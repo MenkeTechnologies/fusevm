@@ -14,7 +14,7 @@
 //!   `LoadConst` copies scalars (Int/Float/Bool) without touching Arc refcounts.
 //! - **In-place container mutation**: array/hash ops (Push, Pop, Shift, Set,
 //!   HashSet, HashDelete) mutate globals directly — no clone-modify-writeback.
-//! - **Cow<str> string coercion**: `as_str_cow()` borrows `Str` variants without
+//! - **`Cow<str>` string coercion**: `as_str_cow()` borrows `Str` variants without
 //!   allocation. Used in string comparisons, Concat, Print, hash key lookup.
 //! - **Inline builtin cache**: `CallBuiltin` dispatches through a pre-registered
 //!   function pointer table — no name lookup at runtime.
