@@ -4,6 +4,7 @@
 //! convert their native types to/from `Value` at the boundary.
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -118,23 +119,25 @@ impl Value {
 
     /// Coerce to string.
     pub fn to_str(&self) -> String {
+        self.as_str_cow().into_owned()
+    }
+
+    /// Coerce to string, borrowing when possible to avoid allocation.
+    /// Returns `Cow::Borrowed` for `Str`, `Undef`, `Bool`, `Hash`, `Ref` variants.
+    pub fn as_str_cow(&self) -> Cow<'_, str> {
         match self {
-            Value::Str(s) => s.as_ref().clone(),
-            Value::Int(n) => n.to_string(),
-            Value::Float(f) => f.to_string(),
-            Value::Bool(b) => {
-                if *b {
-                    "1".to_string()
-                } else {
-                    "".to_string()
-                }
+            Value::Str(s) => Cow::Borrowed(s.as_str()),
+            Value::Int(n) => Cow::Owned(n.to_string()),
+            Value::Float(f) => Cow::Owned(f.to_string()),
+            Value::Bool(b) => Cow::Borrowed(if *b { "1" } else { "" }),
+            Value::Undef => Cow::Borrowed(""),
+            Value::Status(c) => Cow::Owned(c.to_string()),
+            Value::Array(a) => {
+                Cow::Owned(a.iter().map(|v| v.to_str()).collect::<Vec<_>>().join(" "))
             }
-            Value::Undef => String::new(),
-            Value::Status(c) => c.to_string(),
-            Value::Array(a) => a.iter().map(|v| v.to_str()).collect::<Vec<_>>().join(" "),
-            Value::Hash(_) => "(hash)".to_string(),
-            Value::Ref(_) => "(ref)".to_string(),
-            Value::NativeFn(id) => format!("(builtin:{})", id),
+            Value::Hash(_) => Cow::Borrowed("(hash)"),
+            Value::Ref(_) => Cow::Borrowed("(ref)"),
+            Value::NativeFn(id) => Cow::Owned(format!("(builtin:{})", id)),
         }
     }
 

@@ -11,10 +11,17 @@
 //! - **Type-specialized integer fast paths**: Add, Sub, Mul, Mod, comparisons
 //!   check for `Int×Int` first and skip `to_float()` coercion entirely.
 //! - **Zero-clone dispatch**: ops are borrowed from the chunk, not cloned per cycle.
+//!   `LoadConst` copies scalars (Int/Float/Bool) without touching Arc refcounts.
+//! - **In-place container mutation**: array/hash ops (Push, Pop, Shift, Set,
+//!   HashSet, HashDelete) mutate globals directly — no clone-modify-writeback.
+//! - **Cow<str> string coercion**: `as_str_cow()` borrows `Str` variants without
+//!   allocation. Used in string comparisons, Concat, Print, hash key lookup.
 //! - **Inline builtin cache**: `CallBuiltin` dispatches through a pre-registered
 //!   function pointer table — no name lookup at runtime.
 //! - **Fused superinstructions**: hot loop patterns run as single ops
 //!   (AccumSumLoop, SlotIncLtIntJumpBack, etc.)
+//! - **Pre-allocated collections**: Range, MakeHash, HashKeys/Values use exact
+//!   or estimated capacity. ConcatConstLoop pre-sizes the string buffer.
 
 use crate::chunk::Chunk;
 use crate::op::Op;
@@ -186,12 +193,13 @@ impl VM {
                 Op::LoadInt(n) => self.push(Value::Int(*n)),
                 Op::LoadFloat(f) => self.push(Value::Float(*f)),
                 Op::LoadConst(idx) => {
-                    let val = self
-                        .chunk
-                        .constants
-                        .get(*idx as usize)
-                        .cloned()
-                        .unwrap_or(Value::Undef);
+                    let val = match self.chunk.constants.get(*idx as usize) {
+                        Some(Value::Int(n)) => Value::Int(*n),
+                        Some(Value::Float(f)) => Value::Float(*f),
+                        Some(Value::Bool(b)) => Value::Bool(*b),
+                        Some(other) => other.clone(),
+                        None => Value::Undef,
+                    };
                     self.push(val);
                 }
                 Op::LoadTrue => self.push(Value::Bool(true)),
@@ -224,8 +232,9 @@ impl VM {
                 Op::Rot => {
                     let len = self.stack.len();
                     if len >= 3 {
-                        let a = self.stack.remove(len - 3);
-                        self.stack.push(a);
+                        // [a, b, c] → [b, c, a] via two swaps instead of O(n) remove
+                        self.stack.swap(len - 3, len - 2);
+                        self.stack.swap(len - 2, len - 1);
                     }
                 }
 
@@ -297,7 +306,12 @@ impl VM {
                 Op::Concat => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::str(format!("{}{}", a.to_str(), b.to_str())));
+                    let a_s = a.as_str_cow();
+                    let b_s = b.as_str_cow();
+                    let mut s = String::with_capacity(a_s.len() + b_s.len());
+                    s.push_str(&a_s);
+                    s.push_str(&b_s);
+                    self.push(Value::str(s));
                 }
                 Op::StringRepeat => {
                     let count = self.pop().to_int();
@@ -340,41 +354,41 @@ impl VM {
                     }
                 }
 
-                // ── Comparison (string) ──
+                // ── Comparison (string — borrow via Cow to avoid allocation) ──
                 Op::StrEq => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Bool(a.to_str() == b.to_str()));
+                    self.push(Value::Bool(a.as_str_cow() == b.as_str_cow()));
                 }
                 Op::StrNe => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Bool(a.to_str() != b.to_str()));
+                    self.push(Value::Bool(a.as_str_cow() != b.as_str_cow()));
                 }
                 Op::StrLt => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Bool(a.to_str() < b.to_str()));
+                    self.push(Value::Bool(a.as_str_cow() < b.as_str_cow()));
                 }
                 Op::StrGt => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Bool(a.to_str() > b.to_str()));
+                    self.push(Value::Bool(a.as_str_cow() > b.as_str_cow()));
                 }
                 Op::StrLe => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Bool(a.to_str() <= b.to_str()));
+                    self.push(Value::Bool(a.as_str_cow() <= b.as_str_cow()));
                 }
                 Op::StrGe => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Bool(a.to_str() >= b.to_str()));
+                    self.push(Value::Bool(a.as_str_cow() >= b.as_str_cow()));
                 }
                 Op::StrCmp => {
-                    let b = self.pop().to_str();
-                    let a = self.pop().to_str();
-                    self.push(Value::Int(match a.cmp(&b) {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Int(match a.as_str_cow().cmp(&b.as_str_cow()) {
                         std::cmp::Ordering::Less => -1,
                         std::cmp::Ordering::Equal => 0,
                         std::cmp::Ordering::Greater => 1,
@@ -503,22 +517,29 @@ impl VM {
                     }
                 }
 
-                // ── I/O ──
+                // ── I/O (write directly, no intermediate Vec) ──
                 Op::Print(n) => {
                     let n = *n;
                     let start = self.stack.len().saturating_sub(n as usize);
-                    let vals: Vec<String> =
-                        self.stack[start..].iter().map(|v| v.to_str()).collect();
+                    use std::io::Write;
+                    let stdout = std::io::stdout();
+                    let mut lock = stdout.lock();
+                    for v in &self.stack[start..] {
+                        let _ = write!(lock, "{}", v.as_str_cow());
+                    }
                     self.stack.truncate(start);
-                    print!("{}", vals.join(""));
                 }
                 Op::PrintLn(n) => {
                     let n = *n;
                     let start = self.stack.len().saturating_sub(n as usize);
-                    let vals: Vec<String> =
-                        self.stack[start..].iter().map(|v| v.to_str()).collect();
+                    use std::io::Write;
+                    let stdout = std::io::stdout();
+                    let mut lock = stdout.lock();
+                    for v in &self.stack[start..] {
+                        let _ = write!(lock, "{}", v.as_str_cow());
+                    }
+                    let _ = writeln!(lock);
                     self.stack.truncate(start);
-                    println!("{}", vals.join(""));
                 }
                 Op::ReadLine => {
                     let mut line = String::new();
@@ -602,63 +623,84 @@ impl VM {
                 }
                 Op::ArrayGet(arr_idx) => {
                     let index = self.pop().to_int() as usize;
-                    if let Value::Array(ref arr) = self.get_var(*arr_idx) {
-                        self.push(arr.get(index).cloned().unwrap_or(Value::Undef));
+                    let idx = *arr_idx as usize;
+                    let val = if idx < self.globals.len() {
+                        if let Value::Array(ref arr) = self.globals[idx] {
+                            arr.get(index).cloned().unwrap_or(Value::Undef)
+                        } else {
+                            Value::Undef
+                        }
                     } else {
-                        self.push(Value::Undef);
-                    }
+                        Value::Undef
+                    };
+                    self.push(val);
                 }
                 Op::ArraySet(arr_idx) => {
                     let index = self.pop().to_int() as usize;
                     let val = self.pop();
-                    let arr = self.get_var(*arr_idx);
-                    if let Value::Array(mut vec) = arr {
+                    let idx = *arr_idx as usize;
+                    if idx >= self.globals.len() {
+                        self.globals.resize(idx + 1, Value::Undef);
+                    }
+                    if let Value::Array(ref mut vec) = self.globals[idx] {
                         if index >= vec.len() {
                             vec.resize(index + 1, Value::Undef);
                         }
                         vec[index] = val;
-                        self.set_var(*arr_idx, Value::Array(vec));
                     }
                 }
                 Op::ArrayPush(arr_idx) => {
                     let val = self.pop();
-                    let arr = self.get_var(*arr_idx);
-                    if let Value::Array(mut vec) = arr {
+                    let idx = *arr_idx as usize;
+                    if idx >= self.globals.len() {
+                        self.globals.resize(idx + 1, Value::Undef);
+                    }
+                    if let Value::Array(ref mut vec) = self.globals[idx] {
                         vec.push(val);
-                        self.set_var(*arr_idx, Value::Array(vec));
                     }
                 }
                 Op::ArrayPop(arr_idx) => {
-                    let arr = self.get_var(*arr_idx);
-                    if let Value::Array(mut vec) = arr {
-                        let val = vec.pop().unwrap_or(Value::Undef);
-                        self.set_var(*arr_idx, Value::Array(vec));
-                        self.push(val);
+                    let idx = *arr_idx as usize;
+                    let val = if idx < self.globals.len() {
+                        if let Value::Array(ref mut vec) = self.globals[idx] {
+                            vec.pop().unwrap_or(Value::Undef)
+                        } else {
+                            Value::Undef
+                        }
                     } else {
-                        self.push(Value::Undef);
-                    }
+                        Value::Undef
+                    };
+                    self.push(val);
                 }
                 Op::ArrayShift(arr_idx) => {
-                    let arr = self.get_var(*arr_idx);
-                    if let Value::Array(mut vec) = arr {
-                        let val = if vec.is_empty() {
-                            Value::Undef
+                    let idx = *arr_idx as usize;
+                    let val = if idx < self.globals.len() {
+                        if let Value::Array(ref mut vec) = self.globals[idx] {
+                            if vec.is_empty() {
+                                Value::Undef
+                            } else {
+                                vec.remove(0)
+                            }
                         } else {
-                            vec.remove(0)
-                        };
-                        self.set_var(*arr_idx, Value::Array(vec));
-                        self.push(val);
+                            Value::Undef
+                        }
                     } else {
-                        self.push(Value::Undef);
-                    }
+                        Value::Undef
+                    };
+                    self.push(val);
                 }
                 Op::ArrayLen(arr_idx) => {
-                    let arr = self.get_var(*arr_idx);
-                    if let Value::Array(ref vec) = arr {
-                        self.push(Value::Int(vec.len() as i64));
+                    let idx = *arr_idx as usize;
+                    let len = if idx < self.globals.len() {
+                        if let Value::Array(ref vec) = self.globals[idx] {
+                            vec.len() as i64
+                        } else {
+                            0
+                        }
                     } else {
-                        self.push(Value::Int(0));
-                    }
+                        0
+                    };
+                    self.push(Value::Int(len));
                 }
                 Op::MakeArray(n) => {
                     let n = *n;
@@ -680,62 +722,97 @@ impl VM {
                     self.set_var(*idx, Value::Hash(std::collections::HashMap::new()));
                 }
                 Op::HashGet(hash_idx) => {
-                    let key = self.pop().to_str();
-                    if let Value::Hash(ref map) = self.get_var(*hash_idx) {
-                        self.push(map.get(&key).cloned().unwrap_or(Value::Undef));
+                    let key_val = self.pop();
+                    let key = key_val.as_str_cow();
+                    let idx = *hash_idx as usize;
+                    let val = if idx < self.globals.len() {
+                        if let Value::Hash(ref map) = self.globals[idx] {
+                            map.get(key.as_ref()).cloned().unwrap_or(Value::Undef)
+                        } else {
+                            Value::Undef
+                        }
                     } else {
-                        self.push(Value::Undef);
-                    }
+                        Value::Undef
+                    };
+                    self.push(val);
                 }
                 Op::HashSet(hash_idx) => {
                     let key = self.pop().to_str();
                     let val = self.pop();
-                    let h = self.get_var(*hash_idx);
-                    if let Value::Hash(mut map) = h {
+                    let idx = *hash_idx as usize;
+                    if idx >= self.globals.len() {
+                        self.globals.resize(idx + 1, Value::Undef);
+                    }
+                    if let Value::Hash(ref mut map) = self.globals[idx] {
                         map.insert(key, val);
-                        self.set_var(*hash_idx, Value::Hash(map));
                     }
                 }
                 Op::HashDelete(hash_idx) => {
-                    let key = self.pop().to_str();
-                    let h = self.get_var(*hash_idx);
-                    if let Value::Hash(mut map) = h {
-                        let val = map.remove(&key).unwrap_or(Value::Undef);
-                        self.set_var(*hash_idx, Value::Hash(map));
-                        self.push(val);
+                    let key_val = self.pop();
+                    let key = key_val.as_str_cow();
+                    let idx = *hash_idx as usize;
+                    let val = if idx < self.globals.len() {
+                        if let Value::Hash(ref mut map) = self.globals[idx] {
+                            map.remove(key.as_ref()).unwrap_or(Value::Undef)
+                        } else {
+                            Value::Undef
+                        }
                     } else {
-                        self.push(Value::Undef);
-                    }
+                        Value::Undef
+                    };
+                    self.push(val);
                 }
                 Op::HashExists(hash_idx) => {
-                    let key = self.pop().to_str();
-                    if let Value::Hash(ref map) = self.get_var(*hash_idx) {
-                        self.push(Value::Bool(map.contains_key(&key)));
+                    let key_val = self.pop();
+                    let key = key_val.as_str_cow();
+                    let idx = *hash_idx as usize;
+                    let val = if idx < self.globals.len() {
+                        if let Value::Hash(ref map) = self.globals[idx] {
+                            map.contains_key(key.as_ref())
+                        } else {
+                            false
+                        }
                     } else {
-                        self.push(Value::Bool(false));
-                    }
+                        false
+                    };
+                    self.push(Value::Bool(val));
                 }
                 Op::HashKeys(hash_idx) => {
-                    if let Value::Hash(ref map) = self.get_var(*hash_idx) {
-                        let keys: Vec<Value> = map.keys().map(|k| Value::str(k.as_str())).collect();
-                        self.push(Value::Array(keys));
+                    let idx = *hash_idx as usize;
+                    let arr = if idx < self.globals.len() {
+                        if let Value::Hash(ref map) = self.globals[idx] {
+                            let mut keys = Vec::with_capacity(map.len());
+                            keys.extend(map.keys().map(|k| Value::str(k.as_str())));
+                            keys
+                        } else {
+                            Vec::new()
+                        }
                     } else {
-                        self.push(Value::Array(Vec::new()));
-                    }
+                        Vec::new()
+                    };
+                    self.push(Value::Array(arr));
                 }
                 Op::HashValues(hash_idx) => {
-                    if let Value::Hash(ref map) = self.get_var(*hash_idx) {
-                        let vals: Vec<Value> = map.values().cloned().collect();
-                        self.push(Value::Array(vals));
+                    let idx = *hash_idx as usize;
+                    let arr = if idx < self.globals.len() {
+                        if let Value::Hash(ref map) = self.globals[idx] {
+                            let mut vals = Vec::with_capacity(map.len());
+                            vals.extend(map.values().cloned());
+                            vals
+                        } else {
+                            Vec::new()
+                        }
                     } else {
-                        self.push(Value::Array(Vec::new()));
-                    }
+                        Vec::new()
+                    };
+                    self.push(Value::Array(arr));
                 }
                 Op::MakeHash(n) => {
                     let n = *n;
                     let start = self.stack.len().saturating_sub(n as usize);
                     let pairs: Vec<Value> = self.stack.drain(start..).collect();
-                    let mut map = std::collections::HashMap::new();
+                    let mut map =
+                        std::collections::HashMap::with_capacity(pairs.len() / 2);
                     let mut iter = pairs.into_iter();
                     while let Some(key) = iter.next() {
                         if let Some(val) = iter.next() {
@@ -749,14 +826,23 @@ impl VM {
                 Op::Range => {
                     let to = self.pop().to_int();
                     let from = self.pop().to_int();
-                    let arr: Vec<Value> = (from..=to).map(Value::Int).collect();
+                    let cap = (to - from + 1).max(0) as usize;
+                    let mut arr = Vec::with_capacity(cap);
+                    arr.extend((from..=to).map(Value::Int));
                     self.push(Value::Array(arr));
                 }
                 Op::RangeStep => {
                     let step = self.pop().to_int();
                     let to = self.pop().to_int();
                     let from = self.pop().to_int();
-                    let mut arr = Vec::new();
+                    let cap = if step > 0 {
+                        ((to - from) / step + 1).max(0) as usize
+                    } else if step < 0 {
+                        ((from - to) / (-step) + 1).max(0) as usize
+                    } else {
+                        0
+                    };
+                    let mut arr = Vec::with_capacity(cap);
                     if step > 0 {
                         let mut i = from;
                         while i <= to {
@@ -928,7 +1014,8 @@ impl VM {
                     self.push(Value::str(""));
                 }
                 Op::Glob | Op::GlobRecursive => {
-                    let pattern = self.pop().to_str();
+                    let pat_val = self.pop();
+                    let pattern = pat_val.as_str_cow();
                     let matches: Vec<Value> = glob::glob(&pattern)
                         .into_iter()
                         .flat_map(|paths| paths.filter_map(|p| p.ok()))
@@ -941,16 +1028,17 @@ impl VM {
 
                 // ── Remaining fused ops ──
                 Op::ConcatConstLoop(const_idx, s_slot, i_slot, limit) => {
-                    let c = self
+                    let c_str = self
                         .chunk
                         .constants
                         .get(*const_idx as usize)
-                        .cloned()
-                        .unwrap_or(Value::str(""));
-                    let c_str = c.to_str();
+                        .map(|v| v.as_str_cow())
+                        .unwrap_or(std::borrow::Cow::Borrowed(""));
                     let mut s = self.get_slot(*s_slot).to_str();
                     let mut i = self.get_slot(*i_slot).to_int();
                     let lim = *limit as i64;
+                    let iters = (lim - i).max(0) as usize;
+                    s.reserve(c_str.len() * iters);
                     while i < lim {
                         s.push_str(&c_str);
                         i += 1;
@@ -1002,13 +1090,6 @@ impl VM {
     }
 
     // ── Helpers ──
-
-    #[inline(always)]
-    fn binary_op(&mut self, f: impl FnOnce(Value, Value) -> Value) {
-        let b = self.pop();
-        let a = self.pop();
-        self.push(f(a, b));
-    }
 
     fn get_var(&self, idx: u16) -> Value {
         self.globals

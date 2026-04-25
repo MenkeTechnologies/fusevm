@@ -62,6 +62,7 @@ awkrs source  ──► awk compiler    ──┘    JitCompiler::try_run_linear
 - **Extension dispatch** — language-specific opcodes via `Extended(u16, u8)` with registered handler tables
 - **Stack + slots** — stack-based execution with slot-indexed fast paths for locals
 - **Cranelift JIT** — eligibility analysis and compilation for hot chunks
+- **Zero-clone dispatch** — ops borrowed from chunk, in-place array/hash mutation, `Cow<str>` string coercion
 - **Zero runtime dependencies** — pure Rust, no allocator tricks, no unsafe
 
 ---
@@ -219,10 +220,17 @@ Int/float promotion: when either operand is float, both are promoted to `f64`. C
 | `Undef` | Tag only | 0 bytes payload |
 | `Int(i64)` | Inline | 8 bytes |
 | `Float(f64)` | Inline | 8 bytes |
-| `Str(Arc<String>)` | Heap | pointer |
-| `Array(Arc<Vec<Value>>)` | Heap | pointer |
-| `Hash(Arc<IndexMap>)` | Heap | pointer |
 | `Bool(bool)` | Inline | 1 byte |
+| `Str(Arc<String>)` | Heap | pointer |
+| `Array(Vec<Value>)` | Heap, in-place mutation | 3 words |
+| `Hash(HashMap<String, Value>)` | Heap, in-place mutation | 7 words |
+| `Status(i32)` | Inline | 4 bytes |
+| `Ref(Box<Value>)` | Heap | pointer |
+| `NativeFn(u16)` | Inline | 2 bytes |
+
+String coercion returns `Cow<str>` via `as_str_cow()` — borrows the inner `Arc<String>` for `Str` variants, avoiding allocation on string comparisons, concatenation, hash key lookup, and I/O.
+
+Array and hash mutations (`ArrayPush`, `ArrayPop`, `ArrayShift`, `ArraySet`, `HashSet`, `HashDelete`) operate in-place on globals — no clone-modify-writeback cycle. Read-only access (`ArrayGet`, `ArrayLen`, `HashGet`, `HashExists`, `HashKeys`, `HashValues`) borrows directly from the globals vector.
 
 ---
 

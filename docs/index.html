@@ -80,6 +80,7 @@
         <nav class="tutorial-nav">
           <a href="https://menketechnologies.github.io/strykelang/">stryke docs</a>
           <a href="https://menketechnologies.github.io/zshrs/">zshrs docs</a>
+          <a href="https://github.com/MenkeTechnologies/awkrs">awkrs</a>
           <a href="index.html" class="active">fusevm</a>
           <a href="https://docs.rs/fusevm">docs.rs</a>
         </nav>
@@ -106,8 +107,9 @@
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         fusevm is the shared execution engine behind
-        <a href="https://github.com/MenkeTechnologies/strykelang" style="color: var(--cyan);">strykelang</a> and
-        <a href="https://github.com/MenkeTechnologies/zshrs" style="color: var(--cyan);">zshrs</a>.
+        <a href="https://github.com/MenkeTechnologies/strykelang" style="color: var(--cyan);">strykelang</a>,
+        <a href="https://github.com/MenkeTechnologies/zshrs" style="color: var(--cyan);">zshrs</a>, and
+        <a href="https://github.com/MenkeTechnologies/awkrs" style="color: var(--cyan);">awkrs</a>.
         Any language frontend compiles to the same <code>Op</code> enum and gets fused hot-loop dispatch,
         extension opcode tables, stack-based execution with slot-indexed fast paths, and JIT eligibility
         analysis &mdash; for free. <span class="highlight">The VM doesn&rsquo;t care which language produced the bytecodes.</span></p>
@@ -370,6 +372,13 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
   │    ...                                                        │
   │    Extended(19, _)  → ModuleLoad                              │
   │                                                              │
+  │  awkrs frontend:                                              │
+  │    Extended(0, _)   → FieldGet                                │
+  │    Extended(1, _)   → FieldSet                                │
+  │    Extended(2, _)   → PrintColumns                            │
+  │    ...                                                        │
+  │    Extended(94, _)  → GetlineCmd                              │
+  │                                                              │
   │  No conflicts — each frontend owns its own ID space.         │
   └──────────────────────────────────────────────────────────────┘
         </div>
@@ -415,8 +424,9 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         <code>Value</code> is a tagged enum with fast-path immediates for numbers and booleans,
-        and <code>Arc</code>-wrapped heap types for strings, arrays, and hashes. Designed for
-        zero-copy sharing across the rayon work-stealing pool.</p>
+        and heap types for strings, arrays, and hashes. String coercion returns <code>Cow&lt;str&gt;</code>
+        via <code>as_str_cow()</code> &mdash; borrows <code>Str</code> variants without allocation.
+        Array and hash mutations operate in-place on globals, eliminating clone-modify-writeback.</p>
 
         <table class="arch-table">
           <tr><th>Variant</th><th>Representation</th><th>Notes</th></tr>
@@ -424,9 +434,12 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
           <tr><td><code>Int(i64)</code></td><td>Inline 8 bytes</td><td>Fast-path integer arithmetic</td></tr>
           <tr><td><code>Float(f64)</code></td><td>Inline 8 bytes</td><td>IEEE 754 double</td></tr>
           <tr><td><code>Bool(bool)</code></td><td>Inline 1 byte</td><td>Logical ops, conditionals</td></tr>
-          <tr><td><code>Str(Arc&lt;String&gt;)</code></td><td>Heap</td><td>UTF-8, reference-counted sharing</td></tr>
-          <tr><td><code>Array(Arc&lt;Vec&lt;Value&gt;&gt;)</code></td><td>Heap</td><td>Ordered collection</td></tr>
-          <tr><td><code>Hash(Arc&lt;IndexMap&gt;)</code></td><td>Heap</td><td>Insertion-ordered map</td></tr>
+          <tr><td><code>Str(Arc&lt;String&gt;)</code></td><td>Heap, Arc-shared</td><td>UTF-8, <code>Cow&lt;str&gt;</code> coercion borrows without alloc</td></tr>
+          <tr><td><code>Array(Vec&lt;Value&gt;)</code></td><td>Heap, in-place mutation</td><td>Ordered collection, direct <code>ref mut</code> access</td></tr>
+          <tr><td><code>Hash(HashMap&lt;String, Value&gt;)</code></td><td>Heap, in-place mutation</td><td>Key-value map, direct <code>ref mut</code> access</td></tr>
+          <tr><td><code>Status(i32)</code></td><td>Inline 4 bytes</td><td>Exit status (<code>$?</code>)</td></tr>
+          <tr><td><code>Ref(Box&lt;Value&gt;)</code></td><td>Heap</td><td>Pass-by-reference, nested structures</td></tr>
+          <tr><td><code>NativeFn(u16)</code></td><td>Inline 2 bytes</td><td>Builtin function pointer ID</td></tr>
         </table>
       </section>
 
@@ -442,15 +455,16 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
   ┌────────────────────────────────────────────┐
   │                  Chunk                      │
   │                                            │
-  │  ops: Vec&lt;Op&gt;           bytecodes          │
-  │  constants: Vec&lt;Value&gt;  string/float pool  │
-  │  names: Vec&lt;String&gt;     variable name pool  │
-  │  lines: Vec&lt;u32&gt;        source line numbers │
-  │  slot_count: usize      frame slot budget   │
-  │  blocks: Vec&lt;Chunk&gt;     nested blocks       │
-  │                                            │
-  │  Built by ChunkBuilder::emit() + build()   │
-  │  Serialized to SQLite via serde + bincode  │
+  │  ops: Vec&lt;Op&gt;              bytecodes            │
+  │  constants: Vec&lt;Value&gt;     constant pool        │
+  │  names: Vec&lt;String&gt;        variable name pool   │
+  │  lines: Vec&lt;u32&gt;           source line numbers  │
+  │  sub_entries: Vec&lt;(u16,usize)&gt;  subroutine IPs  │
+  │  block_ranges: Vec&lt;(usize,usize)&gt;  block spans  │
+  │  source: String            source file name     │
+  │                                                 │
+  │  Built by ChunkBuilder::emit() + build()        │
+  │  Serializable via serde (JSON, bincode, etc.)   │
   └────────────────────────────────────────────┘
         </div>
       </section>
@@ -468,7 +482,8 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         <a href="https://docs.rs/fusevm" style="color: var(--cyan);">docs.rs</a> &middot;
         <a href="https://github.com/MenkeTechnologies/fusevm" style="color: var(--cyan);">GitHub</a> &middot;
         <a href="https://github.com/MenkeTechnologies/strykelang" style="color: var(--cyan);">strykelang</a> &middot;
-        <a href="https://github.com/MenkeTechnologies/zshrs" style="color: var(--cyan);">zshrs</a></p>
+        <a href="https://github.com/MenkeTechnologies/zshrs" style="color: var(--cyan);">zshrs</a> &middot;
+        <a href="https://github.com/MenkeTechnologies/awkrs" style="color: var(--cyan);">awkrs</a></p>
 
         <p class="motto">ONE VM TO RUN THEM ALL.</p>
       </section>

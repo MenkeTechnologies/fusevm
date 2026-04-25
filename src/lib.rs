@@ -4,7 +4,7 @@
 //! - Fused superinstructions for hot loops (AccumSumLoop, etc.)
 //! - Extension opcode dispatch for language-specific ops
 //! - Stack-based execution with slot-indexed fast paths
-//! - Cranelift JIT compilation (planned)
+//! - Cranelift JIT compilation for eligible chunks
 //!
 //! ## Architecture
 //!
