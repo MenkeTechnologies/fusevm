@@ -37,6 +37,10 @@ pub enum Op {
     /// Slot-indexed fast path (frame slot index, avoids name lookup)
     GetSlot(u16),
     SetSlot(u16),
+    /// Slot-based array index: stack: [index], slot contains array → value
+    SlotArrayGet(u16),
+    /// Slot-based array set: stack: [value, index], slot contains array
+    SlotArraySet(u16),
 
     // ── Arrays ──
     GetArray(u16),
@@ -294,6 +298,8 @@ impl Hash for Op {
             | Op::DeclareVar(idx)
             | Op::GetSlot(idx)
             | Op::SetSlot(idx)
+            | Op::SlotArrayGet(idx)
+            | Op::SlotArraySet(idx)
             | Op::GetArray(idx)
             | Op::SetArray(idx)
             | Op::DeclareArray(idx)

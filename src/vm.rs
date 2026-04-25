@@ -84,9 +84,15 @@ pub enum VMResult {
 impl VM {
     pub fn new(chunk: Chunk) -> Self {
         let num_names = chunk.names.len();
+        let mut frames = Vec::with_capacity(32);
+        frames.push(Frame {
+            return_ip: 0,
+            stack_base: 0,
+            slots: Vec::with_capacity(16),
+        });
         Self {
             stack: Vec::with_capacity(256),
-            frames: Vec::with_capacity(32),
+            frames,
             globals: vec![Value::Undef; num_names],
             ip: 0,
             chunk,
@@ -258,6 +264,28 @@ impl VM {
                 Op::SetSlot(slot) => {
                     let val = self.pop();
                     self.set_slot(*slot, val);
+                }
+                Op::SlotArrayGet(slot) => {
+                    let index = self.pop().to_int() as usize;
+                    let val = self.get_slot(*slot);
+                    let result = if let Value::Array(ref arr) = val {
+                        arr.get(index).cloned().unwrap_or(Value::Undef)
+                    } else {
+                        Value::Undef
+                    };
+                    self.push(result);
+                }
+                Op::SlotArraySet(slot) => {
+                    let index = self.pop().to_int() as usize;
+                    let val = self.pop();
+                    let arr_val = self.get_slot(*slot);
+                    if let Value::Array(mut arr) = arr_val {
+                        if index >= arr.len() {
+                            arr.resize(index + 1, Value::Undef);
+                        }
+                        arr[index] = val;
+                        self.set_slot(*slot, Value::Array(arr));
+                    }
                 }
 
                 // ── Arithmetic (type-specialized: Int×Int avoids to_float) ──
@@ -950,6 +978,25 @@ impl VM {
                     let start = self.stack.len().saturating_sub(argc as usize);
                     let args: Vec<String> = self.stack.drain(start..).map(|v| v.to_str()).collect();
                     if let Some(cmd) = args.first() {
+                        // Check if it's a shell function
+                        let name_idx = self.chunk.names.iter().position(|n| n == cmd);
+                        if let Some(name_idx) = name_idx {
+                            if let Some(entry_ip) = self.chunk.find_sub(name_idx as u16) {
+                                // Push arguments for the function (skip command name)
+                                for arg in &args[1..] {
+                                    self.push(Value::str(arg));
+                                }
+                                // Push frame and call
+                                self.frames.push(Frame {
+                                    return_ip: self.ip,
+                                    stack_base: self.stack.len() - (args.len() - 1),
+                                    slots: Vec::with_capacity(8),
+                                });
+                                self.ip = entry_ip;
+                                continue;
+                            }
+                        }
+
                         match cmd.as_str() {
                             "true" => self.push(Value::Status(0)),
                             "false" => self.push(Value::Status(1)),
