@@ -35,6 +35,7 @@
 pub mod chunk;
 pub mod jit;
 pub mod op;
+pub mod shell_builtins;
 pub mod value;
 pub mod vm;
 
