@@ -1,17 +1,46 @@
-# fusevm
+```
+ ███████╗██╗   ██╗███████╗███████╗██╗   ██╗███╗   ███╗
+ ██╔════╝██║   ██║██╔════╝██╔════╝██║   ██║████╗ ████║
+ █████╗  ██║   ██║███████╗█████╗  ██║   ██║██╔████╔██║
+ ██╔══╝  ██║   ██║╚════██║██╔══╝  ╚██╗ ██╔╝██║╚██╔╝██║
+ ██║     ╚██████╔╝███████║███████╗ ╚████╔╝ ██║ ╚═╝ ██║
+ ╚═╝      ╚═════╝ ╚══════╝╚══════╝  ╚═══╝  ╚═╝     ╚═╝
+```
 
+[![CI](https://github.com/MenkeTechnologies/fusevm/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/fusevm/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/fusevm.svg)](https://crates.io/crates/fusevm)
+[![Downloads](https://img.shields.io/crates/d/fusevm.svg)](https://crates.io/crates/fusevm)
+[![Docs.rs](https://docs.rs/fusevm/badge.svg)](https://docs.rs/fusevm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Language-agnostic bytecode VM with fused superinstructions.**
+### `[LANGUAGE-AGNOSTIC BYTECODE VM WITH FUSED SUPERINSTRUCTIONS]`
 
-Any language frontend can compile to fusevm opcodes and get:
-- Fused superinstructions for hot loops (`AccumSumLoop`, `SlotIncLtIntJumpBack`, etc.)
-- Extension opcode dispatch for language-specific ops
-- Stack-based execution with slot-indexed fast paths
-- Cranelift JIT compilation path (planned)
+> *"One VM to run them all."*
 
-## Architecture
+A language-agnostic bytecode virtual machine with fused superinstructions and a Cranelift JIT compilation path. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and JIT eligibility analysis — for free. 127 opcodes across 10 categories. 1,763 lines of zero-dependency Rust.
+
+### [`Docs`](https://docs.rs/fusevm) · [`Crates.io`](https://crates.io/crates/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang) · [`zshrs`](https://github.com/MenkeTechnologies/zshrs)
+
+---
+
+## Table of Contents
+
+- [\[0x00\] Overview](#0x00-overview)
+- [\[0x01\] Install](#0x01-install)
+- [\[0x02\] Usage](#0x02-usage)
+- [\[0x03\] Architecture](#0x03-architecture)
+- [\[0x04\] Fused Superinstructions](#0x04-fused-superinstructions)
+- [\[0x05\] Op Categories](#0x05-op-categories)
+- [\[0x06\] Extension Mechanism](#0x06-extension-mechanism)
+- [\[0x07\] JIT Compilation](#0x07-jit-compilation)
+- [\[0x08\] Value Representation](#0x08-value-representation)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] OVERVIEW
+
+fusevm is the shared execution engine behind [strykelang](https://github.com/MenkeTechnologies/strykelang) and [zshrs](https://github.com/MenkeTechnologies/zshrs). Both compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
 
 ```
 stryke source ──► stryke compiler ──┐
@@ -19,9 +48,25 @@ stryke source ──► stryke compiler ──┐
 zshrs source  ──► shell compiler  ──┘
 ```
 
-Multiple language frontends compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
+- **Fused superinstructions** — the compiler detects hot patterns and emits single ops instead of multi-op sequences
+- **Extension dispatch** — language-specific opcodes via `Extended(u16, u8)` with registered handler tables
+- **Stack + slots** — stack-based execution with slot-indexed fast paths for locals
+- **Cranelift JIT** — eligibility analysis and compilation for hot chunks
+- **Zero runtime dependencies** — pure Rust, no allocator tricks, no unsafe
 
-## Usage
+---
+
+## [0x01] INSTALL
+
+```sh
+cargo add fusevm
+# or from source
+git clone https://github.com/MenkeTechnologies/fusevm && cd fusevm && cargo build
+```
+
+---
+
+## [0x02] USAGE
 
 ```rust
 use fusevm::{Op, ChunkBuilder, VM, VMResult, Value};
@@ -39,18 +84,51 @@ match vm.run() {
 }
 ```
 
-## Fused Superinstructions
+---
+
+## [0x03] ARCHITECTURE
+
+```
+                  ┌──────────────────────────────────┐
+                  │         Language Frontend         │
+                  │   (stryke, zshrs, or your own)    │
+                  └──────────────┬───────────────────┘
+                                 │ compile
+                                 ▼
+                  ┌──────────────────────────────────┐
+                  │       ChunkBuilder::emit()       │
+                  │   Op enum ──► Chunk (bytecodes)  │
+                  └──────────────┬───────────────────┘
+                                 │
+                    ┌────────────┴────────────┐
+                    ▼                         ▼
+          ┌─────────────────┐     ┌─────────────────────┐
+          │   VM::run()     │     │   JitCompiler       │
+          │  match-dispatch │     │  Cranelift codegen   │
+          ��  interpreter    │     │  (eligible chunks)   │
+          └─────────────────┘     └─────────────────────┘
+```
+
+---
+
+## [0x04] FUSED SUPERINSTRUCTIONS
 
 The performance secret. The compiler detects hot patterns and emits single ops instead of multi-op sequences:
 
-| Fused Op | Replaces | Speedup |
-|----------|----------|---------|
+| Fused Op | Replaces | Effect |
+|----------|----------|--------|
 | `AccumSumLoop(sum, i, limit)` | `GetSlot + GetSlot + Add + SetSlot + PreInc + NumLt + JumpIfFalse` | Entire counted sum loop in one dispatch |
 | `SlotIncLtIntJumpBack(slot, limit, target)` | `PreIncSlot + SlotLtIntJumpIfFalse` | Loop backedge in one dispatch |
 | `ConcatConstLoop(const, s, i, limit)` | `LoadConst + ConcatAppendSlot + SlotIncLtIntJumpBack` | String append loop in one dispatch |
 | `PushIntRangeLoop(arr, i, limit)` | `GetSlot + PushArray + ArrayLen + Pop + SlotIncLtIntJumpBack` | Array push loop in one dispatch |
 
-## Op Categories
+Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredictions from the hot path.
+
+---
+
+## [0x05] OP CATEGORIES
+
+127 opcodes across 10 categories:
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -65,7 +143,9 @@ The performance secret. The compiler detects hot patterns and emits single ops i
 | Fused | ~8 | `AccumSumLoop`, `SlotIncLtIntJumpBack` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
-## Extension Mechanism
+---
+
+## [0x06] EXTENSION MECHANISM
 
 Language-specific opcodes use `Extended(u16, u8)` which dispatches through a handler table registered by the frontend:
 
@@ -80,8 +160,49 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
 }));
 ```
 
-stryke registers ~450 extended ops. zshrs registers ~20. They don't conflict.
+stryke registers ~450 extended ops. zshrs registers ~20. They don't conflict — each frontend owns its own ID space.
 
-## License
+---
 
-MIT
+## [0x07] JIT COMPILATION
+
+The `JitCompiler` analyzes chunks for JIT eligibility and compiles hot paths to native code via Cranelift:
+
+```rust
+use fusevm::jit::{JitCompiler, JitExtension};
+
+struct MyJit;
+impl JitExtension for MyJit {
+    fn is_eligible(&self, chunk: &Chunk) -> bool {
+        // custom eligibility logic
+        true
+    }
+}
+
+let compiler = JitCompiler::new();
+if compiler.is_eligible(&chunk) {
+    let native = compiler.compile(&chunk);
+}
+```
+
+---
+
+## [0x08] VALUE REPRESENTATION
+
+`Value` is a tagged enum with fast-path immediates:
+
+| Variant | Representation | Size |
+|---------|---------------|------|
+| `Undef` | Tag only | 0 bytes payload |
+| `Int(i64)` | Inline | 8 bytes |
+| `Float(f64)` | Inline | 8 bytes |
+| `Str(Arc<String>)` | Heap | pointer |
+| `Array(Arc<Vec<Value>>)` | Heap | pointer |
+| `Hash(Arc<IndexMap>)` | Heap | pointer |
+| `Bool(bool)` | Inline | 1 byte |
+
+---
+
+## [0xFF] LICENSE
+
+MIT — Copyright (c) 2026 [MenkeTechnologies](https://github.com/MenkeTechnologies)
