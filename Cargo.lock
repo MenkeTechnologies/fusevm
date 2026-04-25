@@ -386,7 +386,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fusevm"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
