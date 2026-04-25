@@ -40,6 +40,7 @@ cargo add fusevm                  # interpreter only
 - [\[0x06\] Extension Mechanism](#0x06-extension-mechanism)
 - [\[0x07\] JIT Compilation](#0x07-jit-compilation)
 - [\[0x08\] Value Representation](#0x08-value-representation)
+- [\[0x09\] Benchmarks](#0x09-benchmarks)
 - [\[0xFF\] License](#0xff-license)
 
 ---
@@ -232,6 +233,53 @@ Int/float promotion: when either operand is float, both are promoted to `f64`. C
 String coercion returns `Cow<str>` via `as_str_cow()` — borrows the inner `Arc<String>` for `Str` variants, avoiding allocation on string comparisons, concatenation, hash key lookup, and I/O.
 
 Array and hash mutations (`ArrayPush`, `ArrayPop`, `ArrayShift`, `ArraySet`, `HashSet`, `HashDelete`) operate in-place on globals — no clone-modify-writeback cycle. Read-only access (`ArrayGet`, `ArrayLen`, `HashGet`, `HashExists`, `HashKeys`, `HashValues`) borrows directly from the globals vector.
+
+---
+
+## [0x09] BENCHMARKS
+
+All benchmarks run via [criterion](https://crates.io/crates/criterion) on Apple M-series. `cargo bench` for all, `cargo bench --features jit --bench jit_vs_interp` for JIT comparisons. HTML report at `target/criterion/report/index.html`.
+
+### Classic algorithms
+
+| Benchmark | Time | Ops/sec |
+|-----------|------|---------|
+| `fib_iterative(35)` | 2.7 µs | 374k |
+| `fib_recursive(20)` — 21,891 calls | 1.28 ms | 783 |
+| `ackermann(3,4)` — 10,547 calls | 774 µs | 1.3k |
+| `sum(1..1M)` fused `AccumSumLoop` | 142 ns | 7.0M |
+| `sum(1..1M)` unfused loop ops | 31.0 ms | 32 |
+| `nested_loop(100×100)` | 352 µs | 2.8k |
+| `dispatch_nop_1M` — raw dispatch overhead | 819 µs | **1.22 Gops/sec** |
+| `string_build(10k)` via `ConcatConstLoop` | 11.9 µs | 84k |
+
+### Interpreter vs Cranelift JIT vs native Rust
+
+| Workload | Interpreter | JIT (cached) | Native Rust | JIT/interp |
+|----------|-------------|--------------|-------------|------------|
+| `int_add × 1000` | 5.8 µs | 8.4 µs | 0.6 ns | 1.5x slower |
+| `mixed_arith × 100` | 1.9 µs | 2.5 µs | 0.6 ns | 1.4x slower |
+| `bitwise × 200` | 5.8 µs | **5.0 µs** | 77 ns | **1.15x faster** |
+| `float_arith × 200` | 2.5 µs | 3.4 µs | 125 ns | 1.4x slower |
+| `comparison × 500` | 3.4 µs | 4.2 µs | 217 ns | 1.2x slower |
+
+The linear JIT currently wins on bitwise-heavy sequences where Cranelift's register allocation eliminates stack traffic. On arithmetic the JIT cache lookup (mutex + hash) dominates the small workloads. The JIT crossover point is larger chunks where native execution time dwarfs lookup overhead.
+
+### Fused vs native Rust
+
+| | fusevm fused | Native Rust | Ratio |
+|---|---|---|---|
+| `sum(1..1M)` | 142 ns | ~0 ns (const-folded) | — |
+| `string_build(10k)` | 11.9 µs | 2.4 µs | 5x |
+
+### Tracking improvements
+
+```sh
+cargo bench --bench vm_bench -- --save-baseline before   # save baseline
+# ... make changes ...
+cargo bench --bench vm_bench -- --baseline before        # compare
+open target/criterion/report/index.html                  # HTML graphs
+```
 
 ---
 

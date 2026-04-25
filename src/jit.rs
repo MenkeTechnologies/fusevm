@@ -1070,13 +1070,8 @@ mod cranelift_jit_impl {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
-        chunk.ops.len().hash(&mut h);
-        for op in &chunk.ops {
-            format!("{op:?}").hash(&mut h);
-        }
-        for c in &chunk.constants {
-            format!("{c:?}").hash(&mut h);
-        }
+        chunk.ops.hash(&mut h);
+        chunk.constants.hash(&mut h);
         h.finish()
     }
 

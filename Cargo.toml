@@ -32,3 +32,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "vm_bench"
 harness = false
+
+[[bench]]
+name = "jit_vs_interp"
+harness = false
+required-features = ["jit"]
+
+[[bench]]
+name = "classic"
+harness = false
