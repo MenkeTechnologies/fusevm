@@ -18,7 +18,7 @@
 
 > *"One VM to run them all."*
 
-A language-agnostic bytecode virtual machine with fused superinstructions and Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 127 opcodes across 10 categories. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 129 opcodes across 10 categories. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -141,7 +141,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-127 opcodes across 10 categories:
+129 opcodes across 10 categories:
 
 | Category | Count | Examples |
 |----------|-------|---------|
