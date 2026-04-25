@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and Cranelift JIT. The shared execution engine behind strykelang and zshrs.">
+  <title>fusevm — Documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&amp;family=Share+Tech+Mono&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="hud-static.css">
+  <link rel="stylesheet" href="tutorial.css">
+  <style>
+    .tutorial-main { max-width: 68rem; }
+    .arch-table { width: 100%; border-collapse: collapse; margin: 0.6rem 0 1rem; font-size: 12px; }
+    .arch-table th {
+      background: var(--bg-secondary); color: var(--cyan);
+      font-family: 'Orbitron', sans-serif; font-size: 10px; font-weight: 700;
+      letter-spacing: 1px; text-transform: uppercase; text-align: left;
+      padding: 6px 10px; border: 1px solid var(--border);
+    }
+    .arch-table td { padding: 6px 10px; border: 1px solid var(--border); color: var(--text-dim); vertical-align: top; }
+    .arch-table td code { color: var(--accent-light); background: var(--bg); padding: 1px 4px; font-size: 11px; }
+    .arch-table tr:hover td { background: var(--bg-hover); }
+    .motto { font-family: 'Orbitron', sans-serif; font-size: 16px; color: var(--accent); letter-spacing: 3px; margin: 0.5rem 0 1.5rem; }
+    .section-num { color: var(--cyan); font-family: 'Share Tech Mono', monospace; margin-right: 0.5rem; }
+    .code-block {
+      margin: 0.5rem 0; padding: 0.7rem 1rem; border-left: 2px solid var(--cyan);
+      background: var(--bg); font-family: 'Share Tech Mono', ui-monospace, monospace;
+      font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word;
+      line-height: 1.6;
+    }
+    .code-block .comment { color: var(--text-muted); }
+    .code-block .keyword { color: var(--cyan); }
+    .code-block .string { color: var(--green); }
+    .code-block .var { color: var(--accent-light); }
+    .diagram {
+      margin: 0.8rem 0; padding: 1rem; border: 1px solid var(--border);
+      background: var(--bg-secondary); font-family: 'Share Tech Mono', monospace;
+      font-size: 12px; color: var(--cyan); white-space: pre; overflow-x: auto; line-height: 1.5;
+    }
+    .cat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: 0.6rem; margin: 0.7rem 0; }
+    .cat-card {
+      border: 1px solid var(--border); border-left: 2px solid var(--cyan);
+      padding: 0.6rem 0.8rem; background: color-mix(in srgb, var(--bg-card) 92%, transparent); border-radius: 2px;
+    }
+    .cat-card h4 {
+      font-family: 'Orbitron', sans-serif; font-size: 11px; font-weight: 700;
+      letter-spacing: 1.5px; text-transform: uppercase; color: var(--cyan); margin: 0 0 0.35rem;
+    }
+    .cat-card p { margin: 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.5; }
+    .cat-card code { font-size: 11px; color: var(--accent-light); }
+    .highlight { color: var(--accent); font-weight: 700; }
+    .stat { font-family: 'Orbitron', sans-serif; font-size: 28px; font-weight: 900; color: var(--cyan); }
+    .stat-label { font-size: 11px; color: var(--text-muted); letter-spacing: 1px; text-transform: uppercase; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 1rem; margin: 1rem 0; text-align: center; }
+    .op-tag {
+      display: inline-block; padding: 2px 7px; margin: 2px;
+      font-family: 'Share Tech Mono', monospace; font-size: 11px;
+      border: 1px solid var(--border); border-radius: 2px;
+      color: var(--accent-light); background: var(--bg);
+    }
+    .op-tag.fused { border-color: var(--cyan); color: var(--cyan); }
+    .op-tag.shell { border-color: var(--green); color: var(--green); }
+    .op-tag.ext { border-color: var(--accent); color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="app tutorial-app">
+    <div class="crt-scanline" aria-hidden="true"></div>
+    <div class="crt-scanline-v" aria-hidden="true"></div>
+
+    <header class="tutorial-header">
+      <div class="tutorial-header-inner">
+        <div>
+          <h1 class="tutorial-title">FUSEVM</h1>
+          <p class="tutorial-subtitle">Language-Agnostic Bytecode Virtual Machine</p>
+        </div>
+        <nav class="tutorial-nav">
+          <a href="https://menketechnologies.github.io/strykelang/">stryke docs</a>
+          <a href="https://menketechnologies.github.io/zshrs/">zshrs docs</a>
+          <a href="index.html" class="active">fusevm</a>
+          <a href="https://docs.rs/fusevm">docs.rs</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="tutorial-main">
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <p class="motto">ONE VM TO RUN THEM ALL.</p>
+        <p class="motto" style="font-size: 12px; color: var(--cyan); margin-top: -1rem;">FUSED SUPERINSTRUCTIONS. EXTENSION DISPATCH. CRANELIFT JIT.</p>
+
+        <div class="stat-grid">
+          <div><div class="stat">127</div><div class="stat-label">opcodes</div></div>
+          <div><div class="stat">10</div><div class="stat-label">op categories</div></div>
+          <div><div class="stat">8</div><div class="stat-label">fused superinstructions</div></div>
+          <div><div class="stat">24</div><div class="stat-label">shell ops</div></div>
+          <div><div class="stat">1,763</div><div class="stat-label">lines of Rust</div></div>
+          <div><div class="stat">0</div><div class="stat-label">unsafe blocks</div></div>
+          <div><div class="stat">2</div><div class="stat-label">language frontends</div></div>
+          <div><div class="stat">&le;24B</div><div class="stat-label">op size (cache-friendly)</div></div>
+        </div>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        fusevm is the shared execution engine behind
+        <a href="https://github.com/MenkeTechnologies/strykelang" style="color: var(--cyan);">strykelang</a> and
+        <a href="https://github.com/MenkeTechnologies/zshrs" style="color: var(--cyan);">zshrs</a>.
+        Any language frontend compiles to the same <code>Op</code> enum and gets fused hot-loop dispatch,
+        extension opcode tables, stack-based execution with slot-indexed fast paths, and JIT eligibility
+        analysis &mdash; for free. <span class="highlight">The VM doesn&rsquo;t care which language produced the bytecodes.</span></p>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        stryke registers ~450 extended ops. zshrs registers ~20. They don&rsquo;t conflict &mdash;
+        each frontend owns its own ID space via <code>Extended(u16, u8)</code>. Process control ops
+        (pipes, redirects, globs, file tests) are first-class because multiple frontends need them.</p>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x00]</span> ARCHITECTURE</h2>
+
+        <div class="diagram">
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     LANGUAGE FRONTENDS                          │
+  │                                                                 │
+  │  ┌───────────────┐          ┌───────────────┐                   │
+  │  │   strykelang   │          │    zshrs       │                  │
+  │  │ Perl 5 compat  │          │ shell compiler │                  │
+  │  │ ~450 ext ops   │          │ ~20 ext ops    │                  │
+  │  └───────┬───────┘          └───────┬───────┘                   │
+  │          │      compile              │                           │
+  │          └──────────┬───────────────┘                            │
+  │                     ▼                                            │
+  │          ┌─────────────────────┐                                 │
+  │          │  ChunkBuilder       │                                 │
+  │          │  .emit(Op, line)    │                                 │
+  │          │  .build() → Chunk   │                                 │
+  │          └─────────┬───────────┘                                 │
+  │                    │                                             │
+  │          ┌─────────┴──────────────────┐                          │
+  │          ▼                            ▼                          │
+  │  ┌─────────────────┐     ┌──────────────────────┐               │
+  │  │   VM::run()     │     │   JitCompiler        │               │
+  │  │  match-dispatch │     │  is_eligible(chunk)   │               │
+  │  │  interpreter    │     │  compile() → native   │               │
+  │  │                 │     │  (Cranelift codegen)   │               │
+  │  └─────────────────┘     └──────────────────────┘               │
+  └─────────────────────────────────────────────────────────────────┘
+        </div>
+
+        <p style="font-size: 13px; color: var(--text-dim); line-height: 1.7;">
+        The <code>Chunk</code> is the unit of compiled bytecodes: an op array, constant pool, name pool,
+        line-number table, and slot count. The <code>ChunkBuilder</code> emits ops one at a time and
+        resolves forward jumps on <code>.build()</code>. The VM executes via a <code>match</code>-dispatch
+        loop over the op array. The JIT compiler analyzes chunks for eligibility and compiles hot paths
+        to native code via Cranelift.</p>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x01]</span> QUICK START</h2>
+
+        <div class="code-block"><span class="keyword">use</span> fusevm::{Op, ChunkBuilder, VM, VMResult, Value};
+
+<span class="keyword">let</span> <span class="keyword">mut</span> b = ChunkBuilder::new();
+b.emit(Op::LoadInt(<span class="var">40</span>), <span class="var">1</span>);
+b.emit(Op::LoadInt(<span class="var">2</span>), <span class="var">1</span>);
+b.emit(Op::Add, <span class="var">1</span>);
+
+<span class="keyword">let</span> <span class="keyword">mut</span> vm = VM::new(b.build());
+<span class="keyword">match</span> vm.run() {
+    VMResult::Ok(val) =&gt; println!(<span class="string">"result: {}"</span>, val.to_str()),  <span class="comment">// "42"</span>
+    VMResult::Error(e) =&gt; eprintln!(<span class="string">"error: {}"</span>, e),
+    VMResult::Halted =&gt; {}
+}</div>
+
+        <div class="code-block"><span class="comment">// Extension handler — register language-specific ops</span>
+<span class="keyword">let</span> <span class="keyword">mut</span> vm = VM::new(chunk);
+vm.set_extension_handler(Box::new(|vm, id, arg| {
+    <span class="keyword">match</span> id {
+        <span class="var">0</span> =&gt; { <span class="comment">/* your custom op */</span> }
+        <span class="var">1</span> =&gt; { <span class="comment">/* another custom op */</span> }
+        _ =&gt; {}
+    }
+}));</div>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x02]</span> FUSED SUPERINSTRUCTIONS</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        The performance secret. The compiler detects hot loop patterns and emits single ops instead of
+        multi-op sequences. Each fused op eliminates N&minus;1 dispatch cycles, stack pushes, and branch
+        mispredictions from the hot path.</p>
+
+        <table class="arch-table">
+          <tr><th>Fused Op</th><th>Replaces</th><th>Effect</th></tr>
+          <tr>
+            <td><code>AccumSumLoop(sum, i, limit)</code></td>
+            <td><code>GetSlot + GetSlot + Add + SetSlot + PreInc + NumLt + JumpIfFalse</code></td>
+            <td>Entire counted sum loop in <span class="highlight">one dispatch</span></td>
+          </tr>
+          <tr>
+            <td><code>SlotIncLtIntJumpBack(slot, limit, target)</code></td>
+            <td><code>PreIncSlot + SlotLtIntJumpIfFalse</code></td>
+            <td>Loop backedge in <span class="highlight">one dispatch</span></td>
+          </tr>
+          <tr>
+            <td><code>ConcatConstLoop(const, s, i, limit)</code></td>
+            <td><code>LoadConst + ConcatAppendSlot + SlotIncLtIntJumpBack</code></td>
+            <td>String append loop in <span class="highlight">one dispatch</span></td>
+          </tr>
+          <tr>
+            <td><code>PushIntRangeLoop(arr, i, limit)</code></td>
+            <td><code>GetSlot + PushArray + ArrayLen + Pop + SlotIncLtIntJumpBack</code></td>
+            <td>Array push loop in <span class="highlight">one dispatch</span></td>
+          </tr>
+          <tr>
+            <td><code>AddAssignSlotVoid(a, b)</code></td>
+            <td><code>GetSlot + GetSlot + Add + SetSlot</code></td>
+            <td>Void-context add-assign, <span class="highlight">no stack traffic</span></td>
+          </tr>
+          <tr>
+            <td><code>PreIncSlotVoid(slot)</code></td>
+            <td><code>GetSlot + Inc + SetSlot</code></td>
+            <td>Void-context increment, <span class="highlight">no stack traffic</span></td>
+          </tr>
+          <tr>
+            <td><code>SlotLtIntJumpIfFalse(slot, int, target)</code></td>
+            <td><code>GetSlot + LoadInt + NumLt + JumpIfFalse</code></td>
+            <td>Fused compare + branch, <span class="highlight">no stack traffic</span></td>
+          </tr>
+          <tr>
+            <td><code>PreIncSlot(slot)</code></td>
+            <td><code>GetSlot + Inc + SetSlot + GetSlot</code></td>
+            <td>Slot pre-increment with push</td>
+          </tr>
+        </table>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x03]</span> OP CATEGORIES</h2>
+
+        <p style="font-size: 14px; color: var(--text); margin-bottom: 0.8rem;">
+        127 opcodes across 10 categories. Every op is &le;24 bytes for cache-friendly dispatch.</p>
+
+        <div class="cat-grid">
+          <div class="cat-card">
+            <h4>Constants &amp; Stack</h4>
+            <p>~12 ops</p>
+            <p><code>LoadInt</code> <code>LoadFloat</code> <code>LoadConst</code> <code>LoadTrue</code> <code>LoadFalse</code> <code>LoadUndef</code> <code>Pop</code> <code>Dup</code> <code>Dup2</code> <code>Swap</code> <code>Rot</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Variables</h4>
+            <p>~8 ops &mdash; name-indexed + slot-indexed fast paths</p>
+            <p><code>GetVar</code> <code>SetVar</code> <code>DeclareVar</code> <code>GetSlot</code> <code>SetSlot</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Arrays &amp; Hashes</h4>
+            <p>~25 ops &mdash; full collection primitives</p>
+            <p><code>ArrayPush</code> <code>ArrayPop</code> <code>ArrayShift</code> <code>ArrayLen</code> <code>MakeArray</code> <code>HashGet</code> <code>HashSet</code> <code>HashDelete</code> <code>HashKeys</code> <code>HashValues</code> <code>MakeHash</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Arithmetic</h4>
+            <p>9 ops</p>
+            <p><code>Add</code> <code>Sub</code> <code>Mul</code> <code>Div</code> <code>Mod</code> <code>Pow</code> <code>Negate</code> <code>Inc</code> <code>Dec</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>String</h4>
+            <p>3 ops</p>
+            <p><code>Concat</code> <code>StringRepeat</code> <code>StringLen</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Comparison</h4>
+            <p>~14 ops &mdash; numeric + string + three-way</p>
+            <p><code>NumEq</code> <code>NumLt</code> <code>NumGe</code> <code>Spaceship</code> <code>StrEq</code> <code>StrLt</code> <code>StrCmp</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Logical &amp; Bitwise</h4>
+            <p>9 ops</p>
+            <p><code>LogNot</code> <code>LogAnd</code> <code>LogOr</code> <code>BitAnd</code> <code>BitOr</code> <code>BitXor</code> <code>BitNot</code> <code>Shl</code> <code>Shr</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Control Flow</h4>
+            <p>5 ops &mdash; including short-circuit keep variants</p>
+            <p><code>Jump</code> <code>JumpIfTrue</code> <code>JumpIfFalse</code> <code>JumpIfTrueKeep</code> <code>JumpIfFalseKeep</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Functions &amp; Scope</h4>
+            <p>5 ops</p>
+            <p><code>Call</code> <code>Return</code> <code>ReturnValue</code> <code>PushFrame</code> <code>PopFrame</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Higher-Order</h4>
+            <p>5 ops &mdash; block-based functional primitives</p>
+            <p><code>MapBlock</code> <code>GrepBlock</code> <code>SortBlock</code> <code>SortDefault</code> <code>ForEachBlock</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>I/O</h4>
+            <p>3 ops</p>
+            <p><code>Print</code> <code>PrintLn</code> <code>ReadLine</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Collections</h4>
+            <p>2 ops &mdash; range generation</p>
+            <p><code>Range</code> <code>RangeStep</code></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x04]</span> SHELL OPS</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Process control is universal enough that multiple frontends need it. These are first-class ops,
+        not extensions &mdash; any frontend that targets fusevm gets pipes, redirects, globs, process substitution,
+        and file tests for free.</p>
+
+        <table class="arch-table">
+          <tr><th>Op</th><th>Description</th></tr>
+          <tr><td><code>Exec(n)</code></td><td>Spawn external command &mdash; pop N args, exec, push exit status</td></tr>
+          <tr><td><code>ExecBg(n)</code></td><td>Spawn background &mdash; like Exec but don&rsquo;t wait</td></tr>
+          <tr><td><code>PipelineBegin(n)</code> / <code>PipelineStage</code> / <code>PipelineEnd</code></td><td>Set up, wire, and wait for N-stage pipeline</td></tr>
+          <tr><td><code>Redirect(fd, op)</code></td><td>Redirect fd &mdash; write, append, read, clobber, dup, both</td></tr>
+          <tr><td><code>HereDoc(idx)</code> / <code>HereString</code></td><td>Here-document from constant pool / here-string from stack</td></tr>
+          <tr><td><code>CmdSubst(idx)</code></td><td>Command substitution &mdash; capture stdout of subprogram</td></tr>
+          <tr><td><code>SubshellBegin</code> / <code>SubshellEnd</code></td><td>Isolate scope for subshell execution</td></tr>
+          <tr><td><code>ProcessSubIn(idx)</code> / <code>ProcessSubOut(idx)</code></td><td>Process substitution <code>&lt;(cmd)</code> / <code>&gt;(cmd)</code> &mdash; push FIFO path</td></tr>
+          <tr><td><code>Glob</code> / <code>GlobRecursive</code></td><td>Glob expand pattern from stack &mdash; recursive variant is parallel</td></tr>
+          <tr><td><code>TestFile(test)</code></td><td>File test: <code>-f</code> <code>-d</code> <code>-r</code> <code>-w</code> <code>-x</code> <code>-e</code> <code>-s</code> <code>-L</code> <code>-S</code> <code>-p</code> <code>-b</code> <code>-c</code></td></tr>
+          <tr><td><code>SetStatus</code> / <code>GetStatus</code></td><td>Last exit status <code>$?</code></td></tr>
+          <tr><td><code>TrapSet(idx)</code> / <code>TrapCheck</code></td><td>Signal trap handler registration + periodic trap check</td></tr>
+          <tr><td><code>ExpandParam(mod)</code></td><td>18 parameter expansion modifiers: <code>${:-}</code> <code>${:=}</code> <code>${:?}</code> <code>${:+}</code> <code>${#}</code> <code>${/}</code> <code>${^^}</code> etc.</td></tr>
+          <tr><td><code>WordSplit</code> / <code>BraceExpand</code> / <code>TildeExpand</code></td><td>IFS word split, brace expansion, tilde expansion</td></tr>
+        </table>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x05]</span> EXTENSION MECHANISM</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Language-specific opcodes use <code>Extended(u16, u8)</code> which dispatches through a handler
+        table registered by the frontend. The <code>u16</code> is the extension op ID (up to 65,535 ops
+        per frontend). The <code>u8</code> is an inline operand. <code>ExtendedWide(u16, usize)</code>
+        carries a full <code>usize</code> payload for jump targets and large indices.</p>
+
+        <div class="diagram">
+  ┌──────────────────────────────────────────────────────────────┐
+  │                  EXTENSION DISPATCH TABLE                     │
+  │                                                              │
+  │  strykelang frontend:                                         │
+  │    Extended(0, _)   → RegexMatch                              │
+  │    Extended(1, _)   → RegexSubst                              │
+  │    Extended(2, _)   → HashSlice                               │
+  │    Extended(3, _)   → ArraySlice                              │
+  │    ...                                                        │
+  │    Extended(449, _) → PmapCollect                             │
+  │                                                              │
+  │  zshrs frontend:                                              │
+  │    Extended(0, _)   → HistoryExpand                           │
+  │    Extended(1, _)   → ZleWidget                               │
+  │    Extended(2, _)   → ZstyleLookup                            │
+  │    ...                                                        │
+  │    Extended(19, _)  → ModuleLoad                              │
+  │                                                              │
+  │  No conflicts — each frontend owns its own ID space.         │
+  └──────────────────────────────────────────────────────────────┘
+        </div>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x06]</span> JIT COMPILATION</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        The <code>JitCompiler</code> analyzes chunks for eligibility and compiles hot paths to native
+        code via Cranelift. Frontends implement <code>JitExtension</code> to provide custom eligibility
+        logic and extension op compilation.</p>
+
+        <div class="code-block"><span class="keyword">use</span> fusevm::jit::{JitCompiler, JitExtension, NativeCode};
+
+<span class="keyword">struct</span> MyJit;
+<span class="keyword">impl</span> JitExtension <span class="keyword">for</span> MyJit {
+    <span class="keyword">fn</span> is_eligible(&amp;self, chunk: &amp;Chunk) -&gt; bool {
+        <span class="comment">// custom eligibility logic</span>
+        <span class="keyword">true</span>
+    }
+}
+
+<span class="keyword">let</span> compiler = JitCompiler::new();
+<span class="keyword">if</span> compiler.is_eligible(&amp;chunk) {
+    <span class="keyword">let</span> native: NativeCode = compiler.compile(&amp;chunk);
+    <span class="comment">// execute native code instead of interpreter dispatch</span>
+}</div>
+
+        <table class="arch-table">
+          <tr><th>Component</th><th>Role</th></tr>
+          <tr><td><code>JitCompiler</code></td><td>Eligibility analysis + Cranelift IR generation</td></tr>
+          <tr><td><code>JitExtension</code></td><td>Frontend-provided trait for custom eligibility + extension op compilation</td></tr>
+          <tr><td><code>NativeCode</code></td><td>Compiled native function pointer + metadata</td></tr>
+          <tr><td><code>is_eligible()</code></td><td>Checks op mix, loop depth, extension usage to decide if JIT is profitable</td></tr>
+        </table>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x07]</span> VALUE REPRESENTATION</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        <code>Value</code> is a tagged enum with fast-path immediates for numbers and booleans,
+        and <code>Arc</code>-wrapped heap types for strings, arrays, and hashes. Designed for
+        zero-copy sharing across the rayon work-stealing pool.</p>
+
+        <table class="arch-table">
+          <tr><th>Variant</th><th>Representation</th><th>Notes</th></tr>
+          <tr><td><code>Undef</code></td><td>Tag only</td><td>Perl/shell <code>undef</code> / unset</td></tr>
+          <tr><td><code>Int(i64)</code></td><td>Inline 8 bytes</td><td>Fast-path integer arithmetic</td></tr>
+          <tr><td><code>Float(f64)</code></td><td>Inline 8 bytes</td><td>IEEE 754 double</td></tr>
+          <tr><td><code>Bool(bool)</code></td><td>Inline 1 byte</td><td>Logical ops, conditionals</td></tr>
+          <tr><td><code>Str(Arc&lt;String&gt;)</code></td><td>Heap</td><td>UTF-8, reference-counted sharing</td></tr>
+          <tr><td><code>Array(Arc&lt;Vec&lt;Value&gt;&gt;)</code></td><td>Heap</td><td>Ordered collection</td></tr>
+          <tr><td><code>Hash(Arc&lt;IndexMap&gt;)</code></td><td>Heap</td><td>Insertion-ordered map</td></tr>
+        </table>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x08]</span> CHUNK STRUCTURE</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        A <code>Chunk</code> is the unit of compiled bytecodes. It contains everything the VM needs
+        to execute a compilation unit &mdash; function body, script, or REPL line.</p>
+
+        <div class="diagram">
+  ┌────────────────────────────────────────────┐
+  │                  Chunk                      │
+  │                                            │
+  │  ops: Vec&lt;Op&gt;           bytecodes          │
+  │  constants: Vec&lt;Value&gt;  string/float pool  │
+  │  names: Vec&lt;String&gt;     variable name pool  │
+  │  lines: Vec&lt;u32&gt;        source line numbers │
+  │  slot_count: usize      frame slot budget   │
+  │  blocks: Vec&lt;Chunk&gt;     nested blocks       │
+  │                                            │
+  │  Built by ChunkBuilder::emit() + build()   │
+  │  Serialized to SQLite via serde + bincode  │
+  └────────────────────────────────────────────┘
+        </div>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0xFF]</span> LICENSE &amp; LINKS</h2>
+
+        <p style="font-size: 14px; color: var(--text);">
+        MIT &mdash; Copyright &copy; 2026
+        <a href="https://github.com/MenkeTechnologies" style="color: var(--cyan);">MenkeTechnologies</a></p>
+
+        <p style="font-size: 13px; color: var(--text-dim); line-height: 1.8;">
+        <a href="https://crates.io/crates/fusevm" style="color: var(--cyan);">crates.io</a> &middot;
+        <a href="https://docs.rs/fusevm" style="color: var(--cyan);">docs.rs</a> &middot;
+        <a href="https://github.com/MenkeTechnologies/fusevm" style="color: var(--cyan);">GitHub</a> &middot;
+        <a href="https://github.com/MenkeTechnologies/strykelang" style="color: var(--cyan);">strykelang</a> &middot;
+        <a href="https://github.com/MenkeTechnologies/zshrs" style="color: var(--cyan);">zshrs</a></p>
+
+        <p class="motto">ONE VM TO RUN THEM ALL.</p>
+      </section>
+
+    </main>
+
+    <footer style="border-top: 1px solid var(--border); padding: 1rem 1.5rem; text-align: center; color: var(--text-muted); font-size: 11px;">
+      &copy; 2026 MenkeTechnologies &middot; MIT License &middot;
+      <a href="https://github.com/MenkeTechnologies/fusevm" style="color: var(--cyan);">GitHub</a>
+    </footer>
+  </div>
+</body>
+</html>

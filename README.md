@@ -19,7 +19,7 @@
 
 A language-agnostic bytecode virtual machine with fused superinstructions and a Cranelift JIT compilation path. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and JIT eligibility analysis — for free. 127 opcodes across 10 categories. 1,763 lines of zero-dependency Rust.
 
-### [`Docs`](https://docs.rs/fusevm) · [`Crates.io`](https://crates.io/crates/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang) · [`zshrs`](https://github.com/MenkeTechnologies/zshrs)
+### [`Docs`](https://menketechnologies.github.io/fusevm/) · [`API Reference`](https://docs.rs/fusevm) · [`Crates.io`](https://crates.io/crates/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang) · [`zshrs`](https://github.com/MenkeTechnologies/zshrs)
 
 ---
 
