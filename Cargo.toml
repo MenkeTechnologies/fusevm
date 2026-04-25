@@ -1,0 +1,17 @@
+[package]
+name = "fusevm"
+version = "0.8.17"
+edition = "2021"
+description = "Language-agnostic bytecode VM with fused superinstructions and Cranelift JIT path"
+license = "MIT"
+authors = ["MenkeTechnologies"]
+repository = "https://github.com/MenkeTechnologies/fusevm"
+documentation = "https://docs.rs/fusevm"
+readme = "README.md"
+keywords = ["bytecode", "vm", "jit", "interpreter", "fusevm"]
+categories = ["compilers"]
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+tracing = "0.1"
+glob = "0.3"
