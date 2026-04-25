@@ -1,4 +1,4 @@
-use fusevm::{ChunkBuilder, Op, Value, VM, VMResult};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 
 // ── Helper ──
 
@@ -20,7 +20,12 @@ fn expect_int(ops: &[(Op, u32)], expected: i64) {
 fn expect_float(ops: &[(Op, u32)], expected: f64) {
     match run(ops) {
         VMResult::Ok(Value::Float(f)) => {
-            assert!((f - expected).abs() < 1e-10, "expected {}, got {}", expected, f);
+            assert!(
+                (f - expected).abs() < 1e-10,
+                "expected {}, got {}",
+                expected,
+                f
+            );
         }
         other => panic!("expected Float({}), got {:?}", expected, other),
     }
@@ -44,17 +49,26 @@ fn expect_str(ops: &[(Op, u32)], expected: &str) {
 
 #[test]
 fn add_integers() {
-    expect_int(&[(Op::LoadInt(40), 1), (Op::LoadInt(2), 1), (Op::Add, 1)], 42);
+    expect_int(
+        &[(Op::LoadInt(40), 1), (Op::LoadInt(2), 1), (Op::Add, 1)],
+        42,
+    );
 }
 
 #[test]
 fn sub_integers() {
-    expect_int(&[(Op::LoadInt(50), 1), (Op::LoadInt(8), 1), (Op::Sub, 1)], 42);
+    expect_int(
+        &[(Op::LoadInt(50), 1), (Op::LoadInt(8), 1), (Op::Sub, 1)],
+        42,
+    );
 }
 
 #[test]
 fn mul_integers() {
-    expect_int(&[(Op::LoadInt(6), 1), (Op::LoadInt(7), 1), (Op::Mul, 1)], 42);
+    expect_int(
+        &[(Op::LoadInt(6), 1), (Op::LoadInt(7), 1), (Op::Mul, 1)],
+        42,
+    );
 }
 
 #[test]
@@ -67,17 +81,30 @@ fn div_by_zero_yields_undef() {
 
 #[test]
 fn div_float() {
-    expect_float(&[(Op::LoadFloat(10.0), 1), (Op::LoadFloat(4.0), 1), (Op::Div, 1)], 2.5);
+    expect_float(
+        &[
+            (Op::LoadFloat(10.0), 1),
+            (Op::LoadFloat(4.0), 1),
+            (Op::Div, 1),
+        ],
+        2.5,
+    );
 }
 
 #[test]
 fn modulo() {
-    expect_int(&[(Op::LoadInt(17), 1), (Op::LoadInt(5), 1), (Op::Mod, 1)], 2);
+    expect_int(
+        &[(Op::LoadInt(17), 1), (Op::LoadInt(5), 1), (Op::Mod, 1)],
+        2,
+    );
 }
 
 #[test]
 fn power() {
-    expect_float(&[(Op::LoadInt(2), 1), (Op::LoadInt(10), 1), (Op::Pow, 1)], 1024.0);
+    expect_float(
+        &[(Op::LoadInt(2), 1), (Op::LoadInt(10), 1), (Op::Pow, 1)],
+        1024.0,
+    );
 }
 
 #[test]
@@ -93,13 +120,20 @@ fn inc_dec() {
 
 #[test]
 fn mixed_int_float_add() {
-    expect_float(&[(Op::LoadInt(1), 1), (Op::LoadFloat(2.5), 1), (Op::Add, 1)], 3.5);
+    expect_float(
+        &[(Op::LoadInt(1), 1), (Op::LoadFloat(2.5), 1), (Op::Add, 1)],
+        3.5,
+    );
 }
 
 #[test]
 fn wrapping_add_overflow() {
     expect_int(
-        &[(Op::LoadInt(i64::MAX), 1), (Op::LoadInt(1), 1), (Op::Add, 1)],
+        &[
+            (Op::LoadInt(i64::MAX), 1),
+            (Op::LoadInt(1), 1),
+            (Op::Add, 1),
+        ],
         i64::MIN, // wrapping
     );
 }
@@ -162,20 +196,50 @@ fn string_repeat_zero() {
 
 #[test]
 fn numeric_comparisons() {
-    expect_bool(&[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::NumLt, 1)], true);
-    expect_bool(&[(Op::LoadInt(2), 1), (Op::LoadInt(1), 1), (Op::NumLt, 1)], false);
-    expect_bool(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumEq, 1)], true);
-    expect_bool(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumNe, 1)], false);
-    expect_bool(&[(Op::LoadInt(5), 1), (Op::LoadInt(3), 1), (Op::NumGt, 1)], true);
-    expect_bool(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumLe, 1)], true);
-    expect_bool(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumGe, 1)], true);
+    expect_bool(
+        &[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::NumLt, 1)],
+        true,
+    );
+    expect_bool(
+        &[(Op::LoadInt(2), 1), (Op::LoadInt(1), 1), (Op::NumLt, 1)],
+        false,
+    );
+    expect_bool(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumEq, 1)],
+        true,
+    );
+    expect_bool(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumNe, 1)],
+        false,
+    );
+    expect_bool(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(3), 1), (Op::NumGt, 1)],
+        true,
+    );
+    expect_bool(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumLe, 1)],
+        true,
+    );
+    expect_bool(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumGe, 1)],
+        true,
+    );
 }
 
 #[test]
 fn spaceship() {
-    expect_int(&[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::Spaceship, 1)], -1);
-    expect_int(&[(Op::LoadInt(2), 1), (Op::LoadInt(2), 1), (Op::Spaceship, 1)], 0);
-    expect_int(&[(Op::LoadInt(3), 1), (Op::LoadInt(2), 1), (Op::Spaceship, 1)], 1);
+    expect_int(
+        &[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::Spaceship, 1)],
+        -1,
+    );
+    expect_int(
+        &[(Op::LoadInt(2), 1), (Op::LoadInt(2), 1), (Op::Spaceship, 1)],
+        0,
+    );
+    expect_int(
+        &[(Op::LoadInt(3), 1), (Op::LoadInt(2), 1), (Op::Spaceship, 1)],
+        1,
+    );
 }
 
 #[test]
@@ -217,11 +281,38 @@ fn logical_not() {
 
 #[test]
 fn bitwise_ops() {
-    expect_int(&[(Op::LoadInt(0xFF), 1), (Op::LoadInt(0x0F), 1), (Op::BitAnd, 1)], 0x0F);
-    expect_int(&[(Op::LoadInt(0xF0), 1), (Op::LoadInt(0x0F), 1), (Op::BitOr, 1)], 0xFF);
-    expect_int(&[(Op::LoadInt(0xFF), 1), (Op::LoadInt(0xFF), 1), (Op::BitXor, 1)], 0);
-    expect_int(&[(Op::LoadInt(1), 1), (Op::LoadInt(8), 1), (Op::Shl, 1)], 256);
-    expect_int(&[(Op::LoadInt(256), 1), (Op::LoadInt(4), 1), (Op::Shr, 1)], 16);
+    expect_int(
+        &[
+            (Op::LoadInt(0xFF), 1),
+            (Op::LoadInt(0x0F), 1),
+            (Op::BitAnd, 1),
+        ],
+        0x0F,
+    );
+    expect_int(
+        &[
+            (Op::LoadInt(0xF0), 1),
+            (Op::LoadInt(0x0F), 1),
+            (Op::BitOr, 1),
+        ],
+        0xFF,
+    );
+    expect_int(
+        &[
+            (Op::LoadInt(0xFF), 1),
+            (Op::LoadInt(0xFF), 1),
+            (Op::BitXor, 1),
+        ],
+        0,
+    );
+    expect_int(
+        &[(Op::LoadInt(1), 1), (Op::LoadInt(8), 1), (Op::Shl, 1)],
+        256,
+    );
+    expect_int(
+        &[(Op::LoadInt(256), 1), (Op::LoadInt(4), 1), (Op::Shr, 1)],
+        16,
+    );
 }
 
 // ── Stack Ops ──
@@ -241,7 +332,12 @@ fn dup() {
 #[test]
 fn swap() {
     expect_int(
-        &[(Op::LoadInt(10), 1), (Op::LoadInt(3), 1), (Op::Swap, 1), (Op::Sub, 1)],
+        &[
+            (Op::LoadInt(10), 1),
+            (Op::LoadInt(3), 1),
+            (Op::Swap, 1),
+            (Op::Sub, 1),
+        ],
         -7, // 3 - 10
     );
 }
@@ -271,7 +367,7 @@ fn jump_if_false_taken() {
     b.emit(Op::LoadFalse, 1);
     b.emit(Op::JumpIfFalse(4), 1);
     b.emit(Op::LoadInt(999), 1); // skipped
-    // ip 4:
+                                 // ip 4:
     match VM::new(b.build()).run() {
         VMResult::Ok(Value::Int(99)) => {}
         other => panic!("expected Int(99), got {:?}", other),
@@ -285,7 +381,7 @@ fn jump_if_true_not_taken() {
             (Op::LoadInt(1), 1),
             (Op::LoadFalse, 1),
             (Op::JumpIfTrue(4), 1), // not taken
-            (Op::LoadInt(2), 1),     // executed
+            (Op::LoadInt(2), 1),    // executed
             (Op::Add, 1),
         ],
         3,
@@ -298,8 +394,8 @@ fn short_circuit_or() {
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(42), 1);
     b.emit(Op::JumpIfTrueKeep(3), 1); // truthy, jump to end
-    b.emit(Op::LoadInt(999), 1);       // skipped
-    // ip 3: stack has 42
+    b.emit(Op::LoadInt(999), 1); // skipped
+                                 // ip 3: stack has 42
     match VM::new(b.build()).run() {
         VMResult::Ok(Value::Int(42)) => {}
         other => panic!("expected Int(42), got {:?}", other),
@@ -312,7 +408,7 @@ fn short_circuit_and_false() {
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(0), 1);
     b.emit(Op::JumpIfFalseKeep(3), 1); // falsy (0), jump to end
-    b.emit(Op::LoadInt(999), 1);        // skipped
+    b.emit(Op::LoadInt(999), 1); // skipped
     match VM::new(b.build()).run() {
         VMResult::Ok(Value::Int(0)) => {}
         other => panic!("expected Int(0), got {:?}", other),
@@ -604,7 +700,7 @@ fn fused_slot_inc_lt_jump_back() {
     b.emit(Op::SetSlot(0), 1); // i = 0
     b.emit(Op::LoadInt(0), 1);
     b.emit(Op::SetSlot(1), 1); // sum = 0
-    // ip 5: loop body
+                               // ip 5: loop body
     let body = b.current_pos();
     b.emit(Op::GetSlot(0), 1);
     b.emit(Op::GetSlot(1), 1);
@@ -910,7 +1006,7 @@ fn fibonacci_iterative() {
     b.emit(Op::SetSlot(2), 1); // i = 0
 
     let loop_top = b.current_pos(); // ip 7
-    // Use GetSlot + LoadInt + NumGe + JumpIfTrue for the exit condition
+                                    // Use GetSlot + LoadInt + NumGe + JumpIfTrue for the exit condition
     b.emit(Op::GetSlot(2), 1);
     b.emit(Op::LoadInt(10), 1);
     b.emit(Op::NumGe, 1);

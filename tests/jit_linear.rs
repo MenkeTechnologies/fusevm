@@ -32,17 +32,26 @@ fn jit_expect_float(ops: &[(Op, u32)], expected: f64) {
 
 #[test]
 fn jit_add() {
-    jit_expect_int(&[(Op::LoadInt(40), 1), (Op::LoadInt(2), 1), (Op::Add, 1)], 42);
+    jit_expect_int(
+        &[(Op::LoadInt(40), 1), (Op::LoadInt(2), 1), (Op::Add, 1)],
+        42,
+    );
 }
 
 #[test]
 fn jit_sub() {
-    jit_expect_int(&[(Op::LoadInt(50), 1), (Op::LoadInt(8), 1), (Op::Sub, 1)], 42);
+    jit_expect_int(
+        &[(Op::LoadInt(50), 1), (Op::LoadInt(8), 1), (Op::Sub, 1)],
+        42,
+    );
 }
 
 #[test]
 fn jit_mul() {
-    jit_expect_int(&[(Op::LoadInt(6), 1), (Op::LoadInt(7), 1), (Op::Mul, 1)], 42);
+    jit_expect_int(
+        &[(Op::LoadInt(6), 1), (Op::LoadInt(7), 1), (Op::Mul, 1)],
+        42,
+    );
 }
 
 #[test]
@@ -58,13 +67,20 @@ fn jit_inc_dec() {
 
 #[test]
 fn jit_pow() {
-    jit_expect_int(&[(Op::LoadInt(2), 1), (Op::LoadInt(10), 1), (Op::Pow, 1)], 1024);
+    jit_expect_int(
+        &[(Op::LoadInt(2), 1), (Op::LoadInt(10), 1), (Op::Pow, 1)],
+        1024,
+    );
 }
 
 #[test]
 fn jit_float_add() {
     jit_expect_float(
-        &[(Op::LoadFloat(1.5), 1), (Op::LoadFloat(2.5), 1), (Op::Add, 1)],
+        &[
+            (Op::LoadFloat(1.5), 1),
+            (Op::LoadFloat(2.5), 1),
+            (Op::Add, 1),
+        ],
         4.0,
     );
 }
@@ -96,47 +112,106 @@ fn jit_chained_arithmetic() {
 
 #[test]
 fn jit_numeric_comparisons() {
-    jit_expect_int(&[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::NumLt, 1)], 1);
-    jit_expect_int(&[(Op::LoadInt(2), 1), (Op::LoadInt(1), 1), (Op::NumLt, 1)], 0);
-    jit_expect_int(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumEq, 1)], 1);
-    jit_expect_int(&[(Op::LoadInt(5), 1), (Op::LoadInt(3), 1), (Op::NumGt, 1)], 1);
-    jit_expect_int(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumLe, 1)], 1);
-    jit_expect_int(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumGe, 1)], 1);
-    jit_expect_int(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumNe, 1)], 0);
+    jit_expect_int(
+        &[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::NumLt, 1)],
+        1,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(2), 1), (Op::LoadInt(1), 1), (Op::NumLt, 1)],
+        0,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumEq, 1)],
+        1,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(3), 1), (Op::NumGt, 1)],
+        1,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumLe, 1)],
+        1,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumGe, 1)],
+        1,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumNe, 1)],
+        0,
+    );
 }
 
 #[test]
 fn jit_spaceship() {
-    jit_expect_int(&[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::Spaceship, 1)], -1);
-    jit_expect_int(&[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::Spaceship, 1)], 0);
-    jit_expect_int(&[(Op::LoadInt(9), 1), (Op::LoadInt(3), 1), (Op::Spaceship, 1)], 1);
+    jit_expect_int(
+        &[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::Spaceship, 1)],
+        -1,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::Spaceship, 1)],
+        0,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(9), 1), (Op::LoadInt(3), 1), (Op::Spaceship, 1)],
+        1,
+    );
 }
 
 // ── Bitwise ──
 
 #[test]
 fn jit_bitwise() {
-    jit_expect_int(&[(Op::LoadInt(0xFF), 1), (Op::LoadInt(0x0F), 1), (Op::BitAnd, 1)], 0x0F);
-    jit_expect_int(&[(Op::LoadInt(0xF0), 1), (Op::LoadInt(0x0F), 1), (Op::BitOr, 1)], 0xFF);
-    jit_expect_int(&[(Op::LoadInt(0xFF), 1), (Op::LoadInt(0xFF), 1), (Op::BitXor, 1)], 0);
-    jit_expect_int(&[(Op::LoadInt(1), 1), (Op::LoadInt(8), 1), (Op::Shl, 1)], 256);
-    jit_expect_int(&[(Op::LoadInt(256), 1), (Op::LoadInt(4), 1), (Op::Shr, 1)], 16);
+    jit_expect_int(
+        &[
+            (Op::LoadInt(0xFF), 1),
+            (Op::LoadInt(0x0F), 1),
+            (Op::BitAnd, 1),
+        ],
+        0x0F,
+    );
+    jit_expect_int(
+        &[
+            (Op::LoadInt(0xF0), 1),
+            (Op::LoadInt(0x0F), 1),
+            (Op::BitOr, 1),
+        ],
+        0xFF,
+    );
+    jit_expect_int(
+        &[
+            (Op::LoadInt(0xFF), 1),
+            (Op::LoadInt(0xFF), 1),
+            (Op::BitXor, 1),
+        ],
+        0,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(1), 1), (Op::LoadInt(8), 1), (Op::Shl, 1)],
+        256,
+    );
+    jit_expect_int(
+        &[(Op::LoadInt(256), 1), (Op::LoadInt(4), 1), (Op::Shr, 1)],
+        16,
+    );
 }
 
 // ── Stack ops ──
 
 #[test]
 fn jit_dup() {
-    jit_expect_int(
-        &[(Op::LoadInt(21), 1), (Op::Dup, 1), (Op::Add, 1)],
-        42,
-    );
+    jit_expect_int(&[(Op::LoadInt(21), 1), (Op::Dup, 1), (Op::Add, 1)], 42);
 }
 
 #[test]
 fn jit_swap() {
     jit_expect_int(
-        &[(Op::LoadInt(10), 1), (Op::LoadInt(3), 1), (Op::Swap, 1), (Op::Sub, 1)],
+        &[
+            (Op::LoadInt(10), 1),
+            (Op::LoadInt(3), 1),
+            (Op::Swap, 1),
+            (Op::Sub, 1),
+        ],
         -7,
     );
 }
@@ -212,11 +287,7 @@ fn jit_load_const_float() {
 #[test]
 fn jit_ineligible_string_ops() {
     // Concat is not JIT-eligible in linear mode
-    let result = jit_run(&[
-        (Op::LoadInt(1), 1),
-        (Op::LoadInt(2), 1),
-        (Op::Concat, 1),
-    ]);
+    let result = jit_run(&[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::Concat, 1)]);
     assert!(result.is_none());
 }
 
@@ -238,10 +309,7 @@ fn jit_cache_hit() {
     let jit = JitCompiler::new();
     let first = jit.try_run_linear(&chunk, &[]);
     let second = jit.try_run_linear(&chunk, &[]);
-    assert_eq!(
-        format!("{first:?}"),
-        format!("{second:?}"),
-    );
+    assert_eq!(format!("{first:?}"), format!("{second:?}"),);
 }
 
 // ── Complex expression ──
@@ -272,17 +340,18 @@ fn jit_bool_constants() {
 #[test]
 fn jit_float_spaceship() {
     jit_expect_int(
-        &[(Op::LoadFloat(1.5), 1), (Op::LoadFloat(2.5), 1), (Op::Spaceship, 1)],
+        &[
+            (Op::LoadFloat(1.5), 1),
+            (Op::LoadFloat(2.5), 1),
+            (Op::Spaceship, 1),
+        ],
         -1,
     );
 }
 
 #[test]
 fn jit_float_negate() {
-    jit_expect_float(
-        &[(Op::LoadFloat(3.14), 1), (Op::Negate, 1)],
-        -3.14,
-    );
+    jit_expect_float(&[(Op::LoadFloat(3.14), 1), (Op::Negate, 1)], -3.14);
 }
 
 #[test]

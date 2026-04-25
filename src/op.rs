@@ -148,7 +148,6 @@ pub enum Op {
     // These are the performance secret sauce.
     // The compiler detects hot loop patterns and emits these
     // instead of multi-op sequences.
-
     /// Slot-indexed pre-increment (no stack traffic)
     PreIncSlot(u16),
     /// `if ($slot < INT) goto target` — fused compare + branch
@@ -182,7 +181,6 @@ pub enum Op {
     // ── Shell ops (registered via Extended, but defined here for type safety) ──
     // These are first-class because process control is universal enough
     // that multiple frontends need them (shell, scripting, build tools).
-
     /// Spawn external command: pop N args from stack, exec, push exit status
     Exec(u8),
     /// Spawn background: like Exec but don't wait
@@ -263,24 +261,24 @@ pub mod redirect_op {
 
 /// Parameter expansion modifier types for `ExpandParam(u8)`
 pub mod param_mod {
-    pub const DEFAULT: u8 = 0;       // ${var:-default}
-    pub const ASSIGN: u8 = 1;        // ${var:=default}
-    pub const ERROR: u8 = 2;         // ${var:?error}
-    pub const ALTERNATE: u8 = 3;     // ${var:+alternate}
-    pub const LENGTH: u8 = 4;        // ${#var}
-    pub const STRIP_SHORT: u8 = 5;   // ${var#pat}
-    pub const STRIP_LONG: u8 = 6;    // ${var##pat}
-    pub const RSTRIP_SHORT: u8 = 7;  // ${var%pat}
-    pub const RSTRIP_LONG: u8 = 8;   // ${var%%pat}
-    pub const SUBST_FIRST: u8 = 9;   // ${var/pat/rep}
-    pub const SUBST_ALL: u8 = 10;    // ${var//pat/rep}
-    pub const UPPER: u8 = 11;        // ${var^^}
-    pub const LOWER: u8 = 12;        // ${var,,}
-    pub const UPPER_FIRST: u8 = 13;  // ${var^}
-    pub const LOWER_FIRST: u8 = 14;  // ${var,}
-    pub const INDIRECT: u8 = 15;     // ${!var}
-    pub const KEYS: u8 = 16;         // ${!arr[@]}
-    pub const SLICE: u8 = 17;        // ${var:off:len}
+    pub const DEFAULT: u8 = 0; // ${var:-default}
+    pub const ASSIGN: u8 = 1; // ${var:=default}
+    pub const ERROR: u8 = 2; // ${var:?error}
+    pub const ALTERNATE: u8 = 3; // ${var:+alternate}
+    pub const LENGTH: u8 = 4; // ${#var}
+    pub const STRIP_SHORT: u8 = 5; // ${var#pat}
+    pub const STRIP_LONG: u8 = 6; // ${var##pat}
+    pub const RSTRIP_SHORT: u8 = 7; // ${var%pat}
+    pub const RSTRIP_LONG: u8 = 8; // ${var%%pat}
+    pub const SUBST_FIRST: u8 = 9; // ${var/pat/rep}
+    pub const SUBST_ALL: u8 = 10; // ${var//pat/rep}
+    pub const UPPER: u8 = 11; // ${var^^}
+    pub const LOWER: u8 = 12; // ${var,,}
+    pub const UPPER_FIRST: u8 = 13; // ${var^}
+    pub const LOWER_FIRST: u8 = 14; // ${var,}
+    pub const INDIRECT: u8 = 15; // ${!var}
+    pub const KEYS: u8 = 16; // ${!arr[@]}
+    pub const SLICE: u8 = 17; // ${var:off:len}
 }
 
 #[cfg(test)]
@@ -290,6 +288,10 @@ mod tests {
     #[test]
     fn test_op_size() {
         // Ops should be reasonably small for cache-friendly dispatch
-        assert!(std::mem::size_of::<Op>() <= 24, "Op too large: {} bytes", std::mem::size_of::<Op>());
+        assert!(
+            std::mem::size_of::<Op>() <= 24,
+            "Op too large: {} bytes",
+            std::mem::size_of::<Op>()
+        );
     }
 }

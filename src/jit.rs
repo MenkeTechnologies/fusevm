@@ -160,7 +160,12 @@ mod cranelift_jit_impl {
         Some((a, b))
     }
 
-    fn fold_arith(a: Cell, b: Cell, int_op: fn(i64, i64) -> i64, f_op: fn(f64, f64) -> f64) -> Cell {
+    fn fold_arith(
+        a: Cell,
+        b: Cell,
+        int_op: fn(i64, i64) -> i64,
+        f_op: fn(f64, f64) -> f64,
+    ) -> Cell {
         match (a, b) {
             (Cell::Const(x), Cell::Const(y)) => Cell::Const(int_op(x, y)),
             (Cell::ConstF(x), Cell::ConstF(y)) => Cell::ConstF(f_op(x, y)),
@@ -328,7 +333,9 @@ mod cranelift_jit_impl {
                     _ => Cell::Dyn,
                 });
             }
-            Op::Pop => { stack.pop()?; }
+            Op::Pop => {
+                stack.pop()?;
+            }
             Op::Dup => {
                 let v = stack.last().copied()?;
                 stack.push(v);
@@ -347,7 +354,13 @@ mod cranelift_jit_impl {
                 stack.push(c);
                 stack.push(a);
             }
-            Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe | Op::Spaceship => {
+            Op::NumEq
+            | Op::NumNe
+            | Op::NumLt
+            | Op::NumGt
+            | Op::NumLe
+            | Op::NumGe
+            | Op::Spaceship => {
                 let (a, b) = pop2_strict(stack)?;
                 stack.push(fold_cmp_cell(op, a, b));
             }
@@ -387,12 +400,14 @@ mod cranelift_jit_impl {
                 });
             }
             Op::GetSlot(_) => stack.push(Cell::Dyn),
-            Op::SetSlot(_) => { stack.pop()?; }
+            Op::SetSlot(_) => {
+                stack.pop()?;
+            }
             Op::PreIncSlot(_) => stack.push(Cell::Dyn),
             Op::PreIncSlotVoid(_) => {}
             Op::SlotLtIntJumpIfFalse(_, _, _) => {} // control flow, handled at block level
             Op::SlotIncLtIntJumpBack(_, _, _) => {} // control flow, handled at block level
-            Op::AccumSumLoop(_, _, _) => {} // self-contained fused op
+            Op::AccumSumLoop(_, _, _) => {}         // self-contained fused op
             Op::AddAssignSlotVoid(_, _) => {}
             _ => return None,
         }
@@ -430,12 +445,19 @@ mod cranelift_jit_impl {
     }
 
     fn needs_slots(seq: &[Op]) -> bool {
-        seq.iter().any(|o| matches!(o,
-            Op::GetSlot(_) | Op::SetSlot(_) |
-            Op::PreIncSlot(_) | Op::PreIncSlotVoid(_) |
-            Op::SlotLtIntJumpIfFalse(_, _, _) | Op::SlotIncLtIntJumpBack(_, _, _) |
-            Op::AccumSumLoop(_, _, _) | Op::AddAssignSlotVoid(_, _)
-        ))
+        seq.iter().any(|o| {
+            matches!(
+                o,
+                Op::GetSlot(_)
+                    | Op::SetSlot(_)
+                    | Op::PreIncSlot(_)
+                    | Op::PreIncSlotVoid(_)
+                    | Op::SlotLtIntJumpIfFalse(_, _, _)
+                    | Op::SlotIncLtIntJumpBack(_, _, _)
+                    | Op::AccumSumLoop(_, _, _)
+                    | Op::AddAssignSlotVoid(_, _)
+            )
+        })
     }
 
     // ── Cranelift setup ──
@@ -484,7 +506,11 @@ mod cranelift_jit_impl {
     /// `!` on an i64 value (0 → 1, nonzero → 0).
     #[no_mangle]
     pub extern "C" fn fusevm_jit_lognot_i64(n: i64) -> i64 {
-        if n != 0 { 0 } else { 1 }
+        if n != 0 {
+            0
+        } else {
+            1
+        }
     }
 
     fn new_jit_module() -> Option<JITModule> {
@@ -755,7 +781,9 @@ mod cranelift_jit_impl {
                 let call = bcx.ins().call(fr, &[a_int]);
                 stack.push((*bcx.inst_results(call).first()?, JitTy::Int));
             }
-            Op::Pop => { stack.pop()?; }
+            Op::Pop => {
+                stack.pop()?;
+            }
             Op::Dup => {
                 let v = *stack.last()?;
                 stack.push(v);
@@ -763,7 +791,9 @@ mod cranelift_jit_impl {
             Op::Swap => {
                 let (b, tb) = stack.pop()?;
                 let (a, ta) = stack.pop()?;
-                if ta != tb { return None; }
+                if ta != tb {
+                    return None;
+                }
                 stack.push((b, tb));
                 stack.push((a, ta));
             }
@@ -771,7 +801,9 @@ mod cranelift_jit_impl {
                 let (c, tc) = stack.pop()?;
                 let (b, tb) = stack.pop()?;
                 let (a, ta) = stack.pop()?;
-                if ta != tb || tb != tc { return None; }
+                if ta != tb || tb != tc {
+                    return None;
+                }
                 stack.push((b, tb));
                 stack.push((c, tc));
                 stack.push((a, ta));
@@ -779,31 +811,41 @@ mod cranelift_jit_impl {
             Op::BitXor => {
                 let (b, tb) = stack.pop()?;
                 let (a, ta) = stack.pop()?;
-                if ta != JitTy::Int || tb != JitTy::Int { return None; }
+                if ta != JitTy::Int || tb != JitTy::Int {
+                    return None;
+                }
                 stack.push((bcx.ins().bxor(a, b), JitTy::Int));
             }
             Op::BitAnd => {
                 let (b, tb) = stack.pop()?;
                 let (a, ta) = stack.pop()?;
-                if ta != JitTy::Int || tb != JitTy::Int { return None; }
+                if ta != JitTy::Int || tb != JitTy::Int {
+                    return None;
+                }
                 stack.push((bcx.ins().band(a, b), JitTy::Int));
             }
             Op::BitOr => {
                 let (b, tb) = stack.pop()?;
                 let (a, ta) = stack.pop()?;
-                if ta != JitTy::Int || tb != JitTy::Int { return None; }
+                if ta != JitTy::Int || tb != JitTy::Int {
+                    return None;
+                }
                 stack.push((bcx.ins().bor(a, b), JitTy::Int));
             }
             Op::BitNot => {
                 let (a, ty) = stack.pop()?;
-                if ty != JitTy::Int { return None; }
+                if ty != JitTy::Int {
+                    return None;
+                }
                 let ones = bcx.ins().iconst(types::I64, -1);
                 stack.push((bcx.ins().bxor(a, ones), JitTy::Int));
             }
             Op::Shl => {
                 let (b, tb) = stack.pop()?;
                 let (a, ta) = stack.pop()?;
-                if ta != JitTy::Int || tb != JitTy::Int { return None; }
+                if ta != JitTy::Int || tb != JitTy::Int {
+                    return None;
+                }
                 let mask = bcx.ins().iconst(types::I64, 63);
                 let mb = bcx.ins().band(b, mask);
                 stack.push((bcx.ins().ishl(a, mb), JitTy::Int));
@@ -811,7 +853,9 @@ mod cranelift_jit_impl {
             Op::Shr => {
                 let (b, tb) = stack.pop()?;
                 let (a, ta) = stack.pop()?;
-                if ta != JitTy::Int || tb != JitTy::Int { return None; }
+                if ta != JitTy::Int || tb != JitTy::Int {
+                    return None;
+                }
                 let mask = bcx.ins().iconst(types::I64, 63);
                 let mb = bcx.ins().band(b, mask);
                 stack.push((bcx.ins().sshr(a, mb), JitTy::Int));
@@ -828,7 +872,8 @@ mod cranelift_jit_impl {
                 let base = slot_base?;
                 let (v, ty) = stack.pop()?;
                 let v = scalar_store_i64(bcx, v, ty);
-                bcx.ins().store(MemFlags::trusted(), v, base, (*slot as i32) * 8);
+                bcx.ins()
+                    .store(MemFlags::trusted(), v, base, (*slot as i32) * 8);
             }
             Op::PreIncSlot(slot) => {
                 let base = slot_base?;
@@ -849,10 +894,15 @@ mod cranelift_jit_impl {
             }
             Op::AddAssignSlotVoid(a_slot, b_slot) => {
                 let base = slot_base?;
-                let va = bcx.ins().load(types::I64, MemFlags::trusted(), base, (*a_slot as i32) * 8);
-                let vb = bcx.ins().load(types::I64, MemFlags::trusted(), base, (*b_slot as i32) * 8);
+                let va =
+                    bcx.ins()
+                        .load(types::I64, MemFlags::trusted(), base, (*a_slot as i32) * 8);
+                let vb =
+                    bcx.ins()
+                        .load(types::I64, MemFlags::trusted(), base, (*b_slot as i32) * 8);
                 let sum = bcx.ins().iadd(va, vb);
-                bcx.ins().store(MemFlags::trusted(), sum, base, (*a_slot as i32) * 8);
+                bcx.ins()
+                    .store(MemFlags::trusted(), sum, base, (*a_slot as i32) * 8);
             }
             _ => return None,
         }
@@ -878,7 +928,11 @@ mod cranelift_jit_impl {
             ps.params.push(AbiParam::new(types::I64));
             ps.params.push(AbiParam::new(types::I64));
             ps.returns.push(AbiParam::new(types::I64));
-            Some(module.declare_function("fusevm_jit_pow_i64", Linkage::Import, &ps).ok()?)
+            Some(
+                module
+                    .declare_function("fusevm_jit_pow_i64", Linkage::Import, &ps)
+                    .ok()?,
+            )
         } else {
             None
         };
@@ -887,7 +941,11 @@ mod cranelift_jit_impl {
             ps.params.push(AbiParam::new(types::F64));
             ps.params.push(AbiParam::new(types::F64));
             ps.returns.push(AbiParam::new(types::F64));
-            Some(module.declare_function("fusevm_jit_pow_f64", Linkage::Import, &ps).ok()?)
+            Some(
+                module
+                    .declare_function("fusevm_jit_pow_f64", Linkage::Import, &ps)
+                    .ok()?,
+            )
         } else {
             None
         };
@@ -897,7 +955,11 @@ mod cranelift_jit_impl {
             ps.params.push(AbiParam::new(types::F64));
             ps.params.push(AbiParam::new(types::F64));
             ps.returns.push(AbiParam::new(types::F64));
-            Some(module.declare_function("fusevm_jit_fmod_f64", Linkage::Import, &ps).ok()?)
+            Some(
+                module
+                    .declare_function("fusevm_jit_fmod_f64", Linkage::Import, &ps)
+                    .ok()?,
+            )
         } else {
             None
         };
@@ -906,7 +968,11 @@ mod cranelift_jit_impl {
             let mut ps = module.make_signature();
             ps.params.push(AbiParam::new(types::I64));
             ps.returns.push(AbiParam::new(types::I64));
-            Some(module.declare_function("fusevm_jit_lognot_i64", Linkage::Import, &ps).ok()?)
+            Some(
+                module
+                    .declare_function("fusevm_jit_lognot_i64", Linkage::Import, &ps)
+                    .ok()?,
+            )
         } else {
             None
         };
@@ -921,7 +987,9 @@ mod cranelift_jit_impl {
             JitTy::Float => types::F64,
         }));
 
-        let fid = module.declare_function("linear", Linkage::Local, &sig).ok()?;
+        let fid = module
+            .declare_function("linear", Linkage::Local, &sig)
+            .ok()?;
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
         ctx.func.name = UserFuncName::user(0, fid.as_u32());
@@ -947,8 +1015,14 @@ mod cranelift_jit_impl {
             let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::with_capacity(32);
             for op in seq {
                 emit_data_op(
-                    &mut bcx, op, &mut stack, slot_base,
-                    pow_i64_ref, pow_f64_ref, fmod_f64_ref, lognot_ref,
+                    &mut bcx,
+                    op,
+                    &mut stack,
+                    slot_base,
+                    pow_i64_ref,
+                    pow_f64_ref,
+                    fmod_f64_ref,
+                    lognot_ref,
                     &chunk.constants,
                 )?;
             }
@@ -968,18 +1042,18 @@ mod cranelift_jit_impl {
         module.finalize_definitions().ok()?;
         let ptr = module.get_finalized_function(fid);
         let run = match (need_slots, ret_ty) {
-            (false, JitTy::Int) => LinearRun::Nullary(unsafe {
-                std::mem::transmute::<*const u8, LinearFn0>(ptr)
-            }),
-            (false, JitTy::Float) => LinearRun::NullaryF(unsafe {
-                std::mem::transmute::<*const u8, LinearFn0F>(ptr)
-            }),
-            (true, JitTy::Int) => LinearRun::Slots(unsafe {
-                std::mem::transmute::<*const u8, LinearFnSlots>(ptr)
-            }),
-            (true, JitTy::Float) => LinearRun::SlotsF(unsafe {
-                std::mem::transmute::<*const u8, LinearFnSlotsF>(ptr)
-            }),
+            (false, JitTy::Int) => {
+                LinearRun::Nullary(unsafe { std::mem::transmute::<*const u8, LinearFn0>(ptr) })
+            }
+            (false, JitTy::Float) => {
+                LinearRun::NullaryF(unsafe { std::mem::transmute::<*const u8, LinearFn0F>(ptr) })
+            }
+            (true, JitTy::Int) => {
+                LinearRun::Slots(unsafe { std::mem::transmute::<*const u8, LinearFnSlots>(ptr) })
+            }
+            (true, JitTy::Float) => {
+                LinearRun::SlotsF(unsafe { std::mem::transmute::<*const u8, LinearFnSlotsF>(ptr) })
+            }
         };
         Some(CompiledLinear { module, run })
     }
@@ -1015,7 +1089,11 @@ mod cranelift_jit_impl {
         // Check cache first
         if let Ok(guard) = cache.lock() {
             if let Some(compiled) = guard.get(&key) {
-                let slot_ptr = if slots.is_empty() { std::ptr::null() } else { slots.as_ptr() };
+                let slot_ptr = if slots.is_empty() {
+                    std::ptr::null()
+                } else {
+                    slots.as_ptr()
+                };
                 let result = compiled.invoke(slot_ptr);
                 return Some(compiled.result_to_value(result));
             }
@@ -1023,7 +1101,11 @@ mod cranelift_jit_impl {
 
         // Compile
         let compiled = compile_linear(chunk)?;
-        let slot_ptr = if slots.is_empty() { std::ptr::null() } else { slots.as_ptr() };
+        let slot_ptr = if slots.is_empty() {
+            std::ptr::null()
+        } else {
+            slots.as_ptr()
+        };
         let result = compiled.invoke(slot_ptr);
         let value = compiled.result_to_value(result);
 
@@ -1071,29 +1153,75 @@ impl JitCompiler {
             match op {
                 // Universal ops — always JIT-able
                 Op::Nop
-                | Op::LoadInt(_) | Op::LoadFloat(_) | Op::LoadConst(_)
-                | Op::LoadTrue | Op::LoadFalse | Op::LoadUndef
-                | Op::Pop | Op::Dup | Op::Dup2 | Op::Swap | Op::Rot
-                | Op::GetVar(_) | Op::SetVar(_) | Op::DeclareVar(_)
-                | Op::GetSlot(_) | Op::SetSlot(_)
-                | Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Pow
-                | Op::Negate | Op::Inc | Op::Dec
-                | Op::Concat | Op::StringRepeat | Op::StringLen
-                | Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe
-                | Op::StrEq | Op::StrNe | Op::StrLt | Op::StrGt | Op::StrLe | Op::StrGe
-                | Op::StrCmp | Op::Spaceship
-                | Op::LogNot | Op::LogAnd | Op::LogOr
-                | Op::BitAnd | Op::BitOr | Op::BitXor | Op::BitNot | Op::Shl | Op::Shr
-                | Op::Jump(_) | Op::JumpIfTrue(_) | Op::JumpIfFalse(_)
-                | Op::JumpIfTrueKeep(_) | Op::JumpIfFalseKeep(_)
-                | Op::Call(_, _) | Op::Return | Op::ReturnValue
-                | Op::PushFrame | Op::PopFrame
-                | Op::PreIncSlot(_) | Op::PreIncSlotVoid(_)
+                | Op::LoadInt(_)
+                | Op::LoadFloat(_)
+                | Op::LoadConst(_)
+                | Op::LoadTrue
+                | Op::LoadFalse
+                | Op::LoadUndef
+                | Op::Pop
+                | Op::Dup
+                | Op::Dup2
+                | Op::Swap
+                | Op::Rot
+                | Op::GetVar(_)
+                | Op::SetVar(_)
+                | Op::DeclareVar(_)
+                | Op::GetSlot(_)
+                | Op::SetSlot(_)
+                | Op::Add
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::Mod
+                | Op::Pow
+                | Op::Negate
+                | Op::Inc
+                | Op::Dec
+                | Op::Concat
+                | Op::StringRepeat
+                | Op::StringLen
+                | Op::NumEq
+                | Op::NumNe
+                | Op::NumLt
+                | Op::NumGt
+                | Op::NumLe
+                | Op::NumGe
+                | Op::StrEq
+                | Op::StrNe
+                | Op::StrLt
+                | Op::StrGt
+                | Op::StrLe
+                | Op::StrGe
+                | Op::StrCmp
+                | Op::Spaceship
+                | Op::LogNot
+                | Op::LogAnd
+                | Op::LogOr
+                | Op::BitAnd
+                | Op::BitOr
+                | Op::BitXor
+                | Op::BitNot
+                | Op::Shl
+                | Op::Shr
+                | Op::Jump(_)
+                | Op::JumpIfTrue(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfTrueKeep(_)
+                | Op::JumpIfFalseKeep(_)
+                | Op::Call(_, _)
+                | Op::Return
+                | Op::ReturnValue
+                | Op::PushFrame
+                | Op::PopFrame
+                | Op::PreIncSlot(_)
+                | Op::PreIncSlotVoid(_)
                 | Op::SlotLtIntJumpIfFalse(_, _, _)
                 | Op::SlotIncLtIntJumpBack(_, _, _)
                 | Op::AccumSumLoop(_, _, _)
                 | Op::AddAssignSlotVoid(_, _)
-                | Op::SetStatus | Op::GetStatus => continue,
+                | Op::SetStatus
+                | Op::GetStatus => continue,
 
                 // Extended — check if any extension handles it
                 Op::Extended(id, _) | Op::ExtendedWide(id, _) => {

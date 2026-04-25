@@ -11,9 +11,10 @@ use std::sync::Arc;
 ///
 /// Designed to be small (1 word tag + 1-2 words payload) so the
 /// dispatch loop stays cache-friendly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum Value {
     /// No value / uninitialized
+    #[default]
     Undef,
     /// Boolean (from conditionals, `[[ ]]`, etc.)
     Bool(bool),
@@ -33,12 +34,6 @@ pub enum Value {
     Ref(Box<Value>),
     /// Native function pointer (builtin dispatch)
     NativeFn(u16),
-}
-
-impl Default for Value {
-    fn default() -> Self {
-        Value::Undef
-    }
 }
 
 impl Value {
@@ -108,7 +103,13 @@ impl Value {
         match self {
             Value::Float(f) => *f,
             Value::Int(n) => *n as f64,
-            Value::Bool(b) => if *b { 1.0 } else { 0.0 },
+            Value::Bool(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             Value::Str(s) => s.parse().unwrap_or(0.0),
             Value::Status(c) => *c as f64,
             _ => 0.0,
@@ -121,7 +122,13 @@ impl Value {
             Value::Str(s) => s.as_ref().clone(),
             Value::Int(n) => n.to_string(),
             Value::Float(f) => f.to_string(),
-            Value::Bool(b) => if *b { "1".to_string() } else { "".to_string() },
+            Value::Bool(b) => {
+                if *b {
+                    "1".to_string()
+                } else {
+                    "".to_string()
+                }
+            }
             Value::Undef => String::new(),
             Value::Status(c) => c.to_string(),
             Value::Array(a) => a.iter().map(|v| v.to_str()).collect::<Vec<_>>().join(" "),

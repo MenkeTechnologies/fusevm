@@ -186,7 +186,12 @@ impl VM {
                 Op::LoadInt(n) => self.push(Value::Int(*n)),
                 Op::LoadFloat(f) => self.push(Value::Float(*f)),
                 Op::LoadConst(idx) => {
-                    let val = self.chunk.constants.get(*idx as usize).cloned().unwrap_or(Value::Undef);
+                    let val = self
+                        .chunk
+                        .constants
+                        .get(*idx as usize)
+                        .cloned()
+                        .unwrap_or(Value::Undef);
                     self.push(val);
                 }
                 Op::LoadTrue => self.push(Value::Bool(true)),
@@ -194,7 +199,9 @@ impl VM {
                 Op::LoadUndef => self.push(Value::Undef),
 
                 // ── Stack ──
-                Op::Pop => { self.pop(); }
+                Op::Pop => {
+                    self.pop();
+                }
                 Op::Dup => {
                     let val = self.peek().clone();
                     self.push(val);
@@ -258,10 +265,7 @@ impl VM {
                         Value::Float(a.to_float() / divisor)
                     });
                 }
-                Op::Mod => self.arith_int_fast(
-                    |x, y| if y != 0 { x % y } else { 0 },
-                    |a, b| a % b,
-                ),
+                Op::Mod => self.arith_int_fast(|x, y| if y != 0 { x % y } else { 0 }, |a, b| a % b),
                 Op::Pow => {
                     let b = self.pop();
                     let a = self.pop();
@@ -322,7 +326,13 @@ impl VM {
                             _ => {
                                 let af = a.to_float();
                                 let bf = b.to_float();
-                                if af < bf { -1 } else if af > bf { 1 } else { 0 }
+                                if af < bf {
+                                    -1
+                                } else if af > bf {
+                                    1
+                                } else {
+                                    0
+                                }
                             }
                         };
                         self.stack.truncate(len - 2);
@@ -331,12 +341,36 @@ impl VM {
                 }
 
                 // ── Comparison (string) ──
-                Op::StrEq => { let b = self.pop(); let a = self.pop(); self.push(Value::Bool(a.to_str() == b.to_str())); }
-                Op::StrNe => { let b = self.pop(); let a = self.pop(); self.push(Value::Bool(a.to_str() != b.to_str())); }
-                Op::StrLt => { let b = self.pop(); let a = self.pop(); self.push(Value::Bool(a.to_str() < b.to_str())); }
-                Op::StrGt => { let b = self.pop(); let a = self.pop(); self.push(Value::Bool(a.to_str() > b.to_str())); }
-                Op::StrLe => { let b = self.pop(); let a = self.pop(); self.push(Value::Bool(a.to_str() <= b.to_str())); }
-                Op::StrGe => { let b = self.pop(); let a = self.pop(); self.push(Value::Bool(a.to_str() >= b.to_str())); }
+                Op::StrEq => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Bool(a.to_str() == b.to_str()));
+                }
+                Op::StrNe => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Bool(a.to_str() != b.to_str()));
+                }
+                Op::StrLt => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Bool(a.to_str() < b.to_str()));
+                }
+                Op::StrGt => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Bool(a.to_str() > b.to_str()));
+                }
+                Op::StrLe => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Bool(a.to_str() <= b.to_str()));
+                }
+                Op::StrGe => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Bool(a.to_str() >= b.to_str()));
+                }
                 Op::StrCmp => {
                     let b = self.pop().to_str();
                     let a = self.pop().to_str();
@@ -352,31 +386,67 @@ impl VM {
                     let val = self.pop();
                     self.push(Value::Bool(!val.is_truthy()));
                 }
-                Op::LogAnd => { let b = self.pop(); let a = self.pop(); self.push(Value::Bool(a.is_truthy() && b.is_truthy())); }
-                Op::LogOr => { let b = self.pop(); let a = self.pop(); self.push(Value::Bool(a.is_truthy() || b.is_truthy())); }
-                Op::BitAnd => { let b = self.pop(); let a = self.pop(); self.push(Value::Int(a.to_int() & b.to_int())); }
-                Op::BitOr => { let b = self.pop(); let a = self.pop(); self.push(Value::Int(a.to_int() | b.to_int())); }
-                Op::BitXor => { let b = self.pop(); let a = self.pop(); self.push(Value::Int(a.to_int() ^ b.to_int())); }
+                Op::LogAnd => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Bool(a.is_truthy() && b.is_truthy()));
+                }
+                Op::LogOr => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Bool(a.is_truthy() || b.is_truthy()));
+                }
+                Op::BitAnd => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Int(a.to_int() & b.to_int()));
+                }
+                Op::BitOr => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Int(a.to_int() | b.to_int()));
+                }
+                Op::BitXor => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Int(a.to_int() ^ b.to_int()));
+                }
                 Op::BitNot => {
                     let val = self.pop();
                     self.push(Value::Int(!val.to_int()));
                 }
-                Op::Shl => { let b = self.pop(); let a = self.pop(); self.push(Value::Int(a.to_int() << (b.to_int() as u32 & 63))); }
-                Op::Shr => { let b = self.pop(); let a = self.pop(); self.push(Value::Int(a.to_int() >> (b.to_int() as u32 & 63))); }
+                Op::Shl => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Int(a.to_int() << (b.to_int() as u32 & 63)));
+                }
+                Op::Shr => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Int(a.to_int() >> (b.to_int() as u32 & 63)));
+                }
 
                 // ── Control flow ──
                 Op::Jump(target) => self.ip = *target,
                 Op::JumpIfTrue(target) => {
-                    if self.pop().is_truthy() { self.ip = *target; }
+                    if self.pop().is_truthy() {
+                        self.ip = *target;
+                    }
                 }
                 Op::JumpIfFalse(target) => {
-                    if !self.pop().is_truthy() { self.ip = *target; }
+                    if !self.pop().is_truthy() {
+                        self.ip = *target;
+                    }
                 }
                 Op::JumpIfTrueKeep(target) => {
-                    if self.peek().is_truthy() { self.ip = *target; }
+                    if self.peek().is_truthy() {
+                        self.ip = *target;
+                    }
                 }
                 Op::JumpIfFalseKeep(target) => {
-                    if !self.peek().is_truthy() { self.ip = *target; }
+                    if !self.peek().is_truthy() {
+                        self.ip = *target;
+                    }
                 }
 
                 // ── Functions ──
@@ -391,7 +461,11 @@ impl VM {
                     } else {
                         return VMResult::Error(format!(
                             "undefined function: {}",
-                            self.chunk.names.get(*name_idx as usize).map(|s| s.as_str()).unwrap_or("?")
+                            self.chunk
+                                .names
+                                .get(*name_idx as usize)
+                                .map(|s| s.as_str())
+                                .unwrap_or("?")
                         ));
                     }
                 }
@@ -433,14 +507,16 @@ impl VM {
                 Op::Print(n) => {
                     let n = *n;
                     let start = self.stack.len().saturating_sub(n as usize);
-                    let vals: Vec<String> = self.stack[start..].iter().map(|v| v.to_str()).collect();
+                    let vals: Vec<String> =
+                        self.stack[start..].iter().map(|v| v.to_str()).collect();
                     self.stack.truncate(start);
                     print!("{}", vals.join(""));
                 }
                 Op::PrintLn(n) => {
                     let n = *n;
                     let start = self.stack.len().saturating_sub(n as usize);
-                    let vals: Vec<String> = self.stack[start..].iter().map(|v| v.to_str()).collect();
+                    let vals: Vec<String> =
+                        self.stack[start..].iter().map(|v| v.to_str()).collect();
                     self.stack.truncate(start);
                     println!("{}", vals.join(""));
                 }
@@ -513,9 +589,17 @@ impl VM {
                 }
 
                 // ── Arrays ──
-                Op::GetArray(idx) => { let val = self.get_var(*idx); self.push(val); }
-                Op::SetArray(idx) => { let val = self.pop(); self.set_var(*idx, val); }
-                Op::DeclareArray(idx) => { self.set_var(*idx, Value::Array(Vec::new())); }
+                Op::GetArray(idx) => {
+                    let val = self.get_var(*idx);
+                    self.push(val);
+                }
+                Op::SetArray(idx) => {
+                    let val = self.pop();
+                    self.set_var(*idx, val);
+                }
+                Op::DeclareArray(idx) => {
+                    self.set_var(*idx, Value::Array(Vec::new()));
+                }
                 Op::ArrayGet(arr_idx) => {
                     let index = self.pop().to_int() as usize;
                     if let Value::Array(ref arr) = self.get_var(*arr_idx) {
@@ -529,7 +613,9 @@ impl VM {
                     let val = self.pop();
                     let arr = self.get_var(*arr_idx);
                     if let Value::Array(mut vec) = arr {
-                        if index >= vec.len() { vec.resize(index + 1, Value::Undef); }
+                        if index >= vec.len() {
+                            vec.resize(index + 1, Value::Undef);
+                        }
                         vec[index] = val;
                         self.set_var(*arr_idx, Value::Array(vec));
                     }
@@ -548,21 +634,31 @@ impl VM {
                         let val = vec.pop().unwrap_or(Value::Undef);
                         self.set_var(*arr_idx, Value::Array(vec));
                         self.push(val);
-                    } else { self.push(Value::Undef); }
+                    } else {
+                        self.push(Value::Undef);
+                    }
                 }
                 Op::ArrayShift(arr_idx) => {
                     let arr = self.get_var(*arr_idx);
                     if let Value::Array(mut vec) = arr {
-                        let val = if vec.is_empty() { Value::Undef } else { vec.remove(0) };
+                        let val = if vec.is_empty() {
+                            Value::Undef
+                        } else {
+                            vec.remove(0)
+                        };
                         self.set_var(*arr_idx, Value::Array(vec));
                         self.push(val);
-                    } else { self.push(Value::Undef); }
+                    } else {
+                        self.push(Value::Undef);
+                    }
                 }
                 Op::ArrayLen(arr_idx) => {
                     let arr = self.get_var(*arr_idx);
                     if let Value::Array(ref vec) = arr {
                         self.push(Value::Int(vec.len() as i64));
-                    } else { self.push(Value::Int(0)); }
+                    } else {
+                        self.push(Value::Int(0));
+                    }
                 }
                 Op::MakeArray(n) => {
                     let n = *n;
@@ -572,14 +668,24 @@ impl VM {
                 }
 
                 // ── Hashes ──
-                Op::GetHash(idx) => { let val = self.get_var(*idx); self.push(val); }
-                Op::SetHash(idx) => { let val = self.pop(); self.set_var(*idx, val); }
-                Op::DeclareHash(idx) => { self.set_var(*idx, Value::Hash(std::collections::HashMap::new())); }
+                Op::GetHash(idx) => {
+                    let val = self.get_var(*idx);
+                    self.push(val);
+                }
+                Op::SetHash(idx) => {
+                    let val = self.pop();
+                    self.set_var(*idx, val);
+                }
+                Op::DeclareHash(idx) => {
+                    self.set_var(*idx, Value::Hash(std::collections::HashMap::new()));
+                }
                 Op::HashGet(hash_idx) => {
                     let key = self.pop().to_str();
                     if let Value::Hash(ref map) = self.get_var(*hash_idx) {
                         self.push(map.get(&key).cloned().unwrap_or(Value::Undef));
-                    } else { self.push(Value::Undef); }
+                    } else {
+                        self.push(Value::Undef);
+                    }
                 }
                 Op::HashSet(hash_idx) => {
                     let key = self.pop().to_str();
@@ -597,25 +703,33 @@ impl VM {
                         let val = map.remove(&key).unwrap_or(Value::Undef);
                         self.set_var(*hash_idx, Value::Hash(map));
                         self.push(val);
-                    } else { self.push(Value::Undef); }
+                    } else {
+                        self.push(Value::Undef);
+                    }
                 }
                 Op::HashExists(hash_idx) => {
                     let key = self.pop().to_str();
                     if let Value::Hash(ref map) = self.get_var(*hash_idx) {
                         self.push(Value::Bool(map.contains_key(&key)));
-                    } else { self.push(Value::Bool(false)); }
+                    } else {
+                        self.push(Value::Bool(false));
+                    }
                 }
                 Op::HashKeys(hash_idx) => {
                     if let Value::Hash(ref map) = self.get_var(*hash_idx) {
                         let keys: Vec<Value> = map.keys().map(|k| Value::str(k.as_str())).collect();
                         self.push(Value::Array(keys));
-                    } else { self.push(Value::Array(Vec::new())); }
+                    } else {
+                        self.push(Value::Array(Vec::new()));
+                    }
                 }
                 Op::HashValues(hash_idx) => {
                     if let Value::Hash(ref map) = self.get_var(*hash_idx) {
                         let vals: Vec<Value> = map.values().cloned().collect();
                         self.push(Value::Array(vals));
-                    } else { self.push(Value::Array(Vec::new())); }
+                    } else {
+                        self.push(Value::Array(Vec::new()));
+                    }
                 }
                 Op::MakeHash(n) => {
                     let n = *n;
@@ -645,10 +759,16 @@ impl VM {
                     let mut arr = Vec::new();
                     if step > 0 {
                         let mut i = from;
-                        while i <= to { arr.push(Value::Int(i)); i += step; }
+                        while i <= to {
+                            arr.push(Value::Int(i));
+                            i += step;
+                        }
                     } else if step < 0 {
                         let mut i = from;
-                        while i >= to { arr.push(Value::Int(i)); i += step; }
+                        while i >= to {
+                            arr.push(Value::Int(i));
+                            i += step;
+                        }
                     }
                     self.push(Value::Array(arr));
                 }
@@ -661,47 +781,79 @@ impl VM {
                         crate::op::file_test::EXISTS => std::path::Path::new(&path).exists(),
                         crate::op::file_test::IS_FILE => std::path::Path::new(&path).is_file(),
                         crate::op::file_test::IS_DIR => std::path::Path::new(&path).is_dir(),
-                        crate::op::file_test::IS_SYMLINK => std::path::Path::new(&path).is_symlink(),
+                        crate::op::file_test::IS_SYMLINK => {
+                            std::path::Path::new(&path).is_symlink()
+                        }
                         crate::op::file_test::IS_READABLE | crate::op::file_test::IS_WRITABLE => {
                             std::path::Path::new(&path).exists()
                         }
                         crate::op::file_test::IS_EXECUTABLE => {
-                            #[cfg(unix)] {
+                            #[cfg(unix)]
+                            {
                                 use std::os::unix::fs::PermissionsExt;
-                                std::fs::metadata(&path).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+                                std::fs::metadata(&path)
+                                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                                    .unwrap_or(false)
                             }
-                            #[cfg(not(unix))] { std::path::Path::new(&path).exists() }
+                            #[cfg(not(unix))]
+                            {
+                                std::path::Path::new(&path).exists()
+                            }
                         }
-                        crate::op::file_test::IS_NONEMPTY => {
-                            std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false)
-                        }
+                        crate::op::file_test::IS_NONEMPTY => std::fs::metadata(&path)
+                            .map(|m| m.len() > 0)
+                            .unwrap_or(false),
                         crate::op::file_test::IS_SOCKET => {
-                            #[cfg(unix)] {
+                            #[cfg(unix)]
+                            {
                                 use std::os::unix::fs::FileTypeExt;
-                                std::fs::symlink_metadata(&path).map(|m| m.file_type().is_socket()).unwrap_or(false)
+                                std::fs::symlink_metadata(&path)
+                                    .map(|m| m.file_type().is_socket())
+                                    .unwrap_or(false)
                             }
-                            #[cfg(not(unix))] { false }
+                            #[cfg(not(unix))]
+                            {
+                                false
+                            }
                         }
                         crate::op::file_test::IS_FIFO => {
-                            #[cfg(unix)] {
+                            #[cfg(unix)]
+                            {
                                 use std::os::unix::fs::FileTypeExt;
-                                std::fs::symlink_metadata(&path).map(|m| m.file_type().is_fifo()).unwrap_or(false)
+                                std::fs::symlink_metadata(&path)
+                                    .map(|m| m.file_type().is_fifo())
+                                    .unwrap_or(false)
                             }
-                            #[cfg(not(unix))] { false }
+                            #[cfg(not(unix))]
+                            {
+                                false
+                            }
                         }
                         crate::op::file_test::IS_BLOCK_DEV => {
-                            #[cfg(unix)] {
+                            #[cfg(unix)]
+                            {
                                 use std::os::unix::fs::FileTypeExt;
-                                std::fs::symlink_metadata(&path).map(|m| m.file_type().is_block_device()).unwrap_or(false)
+                                std::fs::symlink_metadata(&path)
+                                    .map(|m| m.file_type().is_block_device())
+                                    .unwrap_or(false)
                             }
-                            #[cfg(not(unix))] { false }
+                            #[cfg(not(unix))]
+                            {
+                                false
+                            }
                         }
                         crate::op::file_test::IS_CHAR_DEV => {
-                            #[cfg(unix)] {
+                            #[cfg(unix)]
+                            {
                                 use std::os::unix::fs::FileTypeExt;
-                                std::fs::symlink_metadata(&path).map(|m| m.file_type().is_char_device()).unwrap_or(false)
+                                std::fs::symlink_metadata(&path)
+                                    .map(|m| m.file_type().is_char_device())
+                                    .unwrap_or(false)
                             }
-                            #[cfg(not(unix))] { false }
+                            #[cfg(not(unix))]
+                            {
+                                false
+                            }
                         }
                         _ => false,
                     };
@@ -720,16 +872,27 @@ impl VM {
                                 println!("{}", args[1..].join(" "));
                                 self.push(Value::Status(0));
                             }
-                            "test" | "[" => { self.push(Value::Status(0)); }
+                            "test" | "[" => {
+                                self.push(Value::Status(0));
+                            }
                             _ => {
                                 use std::process::{Command, Stdio};
-                                match Command::new(cmd).args(&args[1..]).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status() {
-                                    Ok(status) => self.push(Value::Status(status.code().unwrap_or(1))),
+                                match Command::new(cmd)
+                                    .args(&args[1..])
+                                    .stdout(Stdio::inherit())
+                                    .stderr(Stdio::inherit())
+                                    .status()
+                                {
+                                    Ok(status) => {
+                                        self.push(Value::Status(status.code().unwrap_or(1)))
+                                    }
                                     Err(_) => self.push(Value::Status(127)),
                                 }
                             }
                         }
-                    } else { self.push(Value::Status(0)); }
+                    } else {
+                        self.push(Value::Status(0));
+                    }
                 }
                 Op::ExecBg(argc) => {
                     let argc = *argc;
@@ -737,19 +900,33 @@ impl VM {
                     let args: Vec<String> = self.stack.drain(start..).map(|v| v.to_str()).collect();
                     if let Some(cmd) = args.first() {
                         use std::process::{Command, Stdio};
-                        let _ = Command::new(cmd).args(&args[1..]).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+                        let _ = Command::new(cmd)
+                            .args(&args[1..])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn();
                     }
                     self.push(Value::Status(0));
                 }
 
                 // ── Shell stubs ──
                 Op::PipelineBegin(_) | Op::PipelineStage | Op::SubshellBegin | Op::SubshellEnd => {}
-                Op::PipelineEnd => { self.push(Value::Status(self.last_status)); }
-                Op::Redirect(_, _) => { let _ = self.pop(); }
+                Op::PipelineEnd => {
+                    self.push(Value::Status(self.last_status));
+                }
+                Op::Redirect(_, _) => {
+                    let _ = self.pop();
+                }
                 Op::HereDoc(_) => {}
-                Op::HereString => { let _ = self.pop(); }
-                Op::CmdSubst(_) => { self.push(Value::str("")); }
-                Op::ProcessSubIn(_) | Op::ProcessSubOut(_) => { self.push(Value::str("")); }
+                Op::HereString => {
+                    let _ = self.pop();
+                }
+                Op::CmdSubst(_) => {
+                    self.push(Value::str(""));
+                }
+                Op::ProcessSubIn(_) | Op::ProcessSubOut(_) => {
+                    self.push(Value::str(""));
+                }
                 Op::Glob | Op::GlobRecursive => {
                     let pattern = self.pop().to_str();
                     let matches: Vec<Value> = glob::glob(&pattern)
@@ -764,8 +941,12 @@ impl VM {
 
                 // ── Remaining fused ops ──
                 Op::ConcatConstLoop(const_idx, s_slot, i_slot, limit) => {
-                    let c = self.chunk.constants.get(*const_idx as usize)
-                        .cloned().unwrap_or(Value::str(""));
+                    let c = self
+                        .chunk
+                        .constants
+                        .get(*const_idx as usize)
+                        .cloned()
+                        .unwrap_or(Value::str(""));
                     let c_str = c.to_str();
                     let mut s = self.get_slot(*s_slot).to_str();
                     let mut i = self.get_slot(*i_slot).to_int();
@@ -781,7 +962,11 @@ impl VM {
                     let mut i = self.get_slot(*i_slot).to_int();
                     let lim = *limit as i64;
                     let arr = self.get_var(*arr_idx);
-                    let mut vec = if let Value::Array(v) = arr { v } else { Vec::new() };
+                    let mut vec = if let Value::Array(v) = arr {
+                        v
+                    } else {
+                        Vec::new()
+                    };
                     vec.reserve((lim - i).max(0) as usize);
                     while i < lim {
                         vec.push(Value::Int(i));
@@ -792,8 +977,11 @@ impl VM {
                 }
 
                 // ── Higher-order (stubs) ──
-                Op::MapBlock(_) | Op::GrepBlock(_) | Op::SortBlock(_)
-                | Op::SortDefault | Op::ForEachBlock(_) => {}
+                Op::MapBlock(_)
+                | Op::GrepBlock(_)
+                | Op::SortBlock(_)
+                | Op::SortDefault
+                | Op::ForEachBlock(_) => {}
 
                 // ── Builtins (inline cache) ──
                 Op::CallBuiltin(id, argc) => {
@@ -823,7 +1011,10 @@ impl VM {
     }
 
     fn get_var(&self, idx: u16) -> Value {
-        self.globals.get(idx as usize).cloned().unwrap_or(Value::Undef)
+        self.globals
+            .get(idx as usize)
+            .cloned()
+            .unwrap_or(Value::Undef)
     }
 
     fn set_var(&mut self, idx: u16, val: Value) {
@@ -877,7 +1068,7 @@ mod tests {
         b.emit(Op::LoadInt(1), 1);
         b.emit(Op::Jump(3), 1);
         b.emit(Op::LoadInt(999), 1); // skipped
-        // ip 3:
+                                     // ip 3:
         b.emit(Op::LoadInt(2), 1);
         b.emit(Op::Add, 1);
         let mut vm = VM::new(b.build());

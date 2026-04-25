@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! stryke source ──→ stryke compiler ──┐
-//!                                      ├──→ fusevm::Op ──→ VM::run()
+//! awkrs source ──→ awkrs compiler     ├──→ fusevm::Op ──→ VM::run()
 //! zshrs source  ──→ shell compiler  ──┘
 //! ```
 //!
@@ -39,7 +39,7 @@ pub mod value;
 pub mod vm;
 
 pub use chunk::{Chunk, ChunkBuilder};
+pub use jit::{JitCompiler, JitExtension, NativeCode};
 pub use op::Op;
 pub use value::Value;
-pub use jit::{JitCompiler, JitExtension, NativeCode};
-pub use vm::{Frame, VM, VMResult};
+pub use vm::{Frame, VMResult, VM};
