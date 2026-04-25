@@ -854,7 +854,7 @@ impl VM {
         self.globals[idx] = val;
     }
 
-    fn get_slot(&self, slot: u8) -> Value {
+    fn get_slot(&self, slot: u16) -> Value {
         self.frames
             .last()
             .and_then(|f| f.slots.get(slot as usize))
@@ -862,7 +862,7 @@ impl VM {
             .unwrap_or(Value::Undef)
     }
 
-    fn set_slot(&mut self, slot: u8, val: Value) {
+    fn set_slot(&mut self, slot: u16, val: Value) {
         if let Some(frame) = self.frames.last_mut() {
             let idx = slot as usize;
             if idx >= frame.slots.len() {

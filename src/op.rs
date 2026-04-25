@@ -33,9 +33,9 @@ pub enum Op {
     GetVar(u16),
     SetVar(u16),
     DeclareVar(u16),
-    /// Slot-indexed fast path (u8 = frame slot, avoids name lookup)
-    GetSlot(u8),
-    SetSlot(u8),
+    /// Slot-indexed fast path (frame slot index, avoids name lookup)
+    GetSlot(u16),
+    SetSlot(u16),
 
     // ── Arrays ──
     GetArray(u16),
@@ -150,21 +150,21 @@ pub enum Op {
     // instead of multi-op sequences.
 
     /// Slot-indexed pre-increment (no stack traffic)
-    PreIncSlot(u8),
+    PreIncSlot(u16),
     /// `if ($slot < INT) goto target` — fused compare + branch
-    SlotLtIntJumpIfFalse(u8, i32, usize),
+    SlotLtIntJumpIfFalse(u16, i32, usize),
     /// `$slot += 1; if $slot < limit goto body` — fused loop backedge
-    SlotIncLtIntJumpBack(u8, i32, usize),
+    SlotIncLtIntJumpBack(u16, i32, usize),
     /// `while $i < limit { $sum += $i; $i += 1 }` — entire counted sum loop
-    AccumSumLoop(u8, u8, i32),
+    AccumSumLoop(u16, u16, i32),
     /// `while $i < limit { $s .= CONST; $i += 1 }` — fused string append loop
-    ConcatConstLoop(u16, u8, u8, i32),
+    ConcatConstLoop(u16, u16, u16, i32),
     /// `while $i < limit { push @a, $i; $i += 1 }` — fused array push loop
-    PushIntRangeLoop(u16, u8, i32),
+    PushIntRangeLoop(u16, u16, i32),
     /// Void-context slot add-assign: `$a += $b` (no stack push)
-    AddAssignSlotVoid(u8, u8),
+    AddAssignSlotVoid(u16, u16),
     /// Void-context pre-increment: `++$slot` (no stack push)
-    PreIncSlotVoid(u8),
+    PreIncSlotVoid(u16),
 
     // ── Builtins ──
     /// Call a registered builtin by ID: (builtin_id, arg_count)
