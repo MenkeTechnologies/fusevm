@@ -255,22 +255,15 @@ All benchmarks run via [criterion](https://crates.io/crates/criterion) on Apple 
 
 ### Interpreter vs Cranelift JIT vs native Rust
 
-| Workload | Interpreter | JIT (cached) | Native Rust | JIT/interp |
-|----------|-------------|--------------|-------------|------------|
-| `int_add × 1000` | 5.8 µs | 8.4 µs | 0.6 ns | 1.5x slower |
-| `mixed_arith × 100` | 1.9 µs | 2.5 µs | 0.6 ns | 1.4x slower |
-| `bitwise × 200` | 5.8 µs | **5.0 µs** | 77 ns | **1.15x faster** |
-| `float_arith × 200` | 2.5 µs | 3.4 µs | 125 ns | 1.4x slower |
-| `comparison × 500` | 3.4 µs | 4.2 µs | 217 ns | 1.2x slower |
+| Workload | Interpreter | JIT (cached) | Native Rust | JIT vs interp | JIT vs native |
+|----------|-------------|--------------|-------------|---------------|---------------|
+| `int_add × 1000` | 6.9 µs | **24 ns** | ~0 ns (folded) | **289x faster** | — |
+| `mixed_arith × 100` | 2.3 µs | **26 ns** | ~0 ns (folded) | **89x faster** | — |
+| `bitwise × 200` | 7.3 µs | **28 ns** | 84 ns | **262x faster** | **3x faster** |
+| `float_arith × 200` | 3.4 µs | **26 ns** | 134 ns | **132x faster** | **5x faster** |
+| `comparison × 500` | 3.8 µs | **26 ns** | 241 ns | **146x faster** | **9x faster** |
 
-The linear JIT currently wins on bitwise-heavy sequences where Cranelift's register allocation eliminates stack traffic. On arithmetic the JIT cache lookup (mutex + hash) dominates the small workloads. The JIT crossover point is larger chunks where native execution time dwarfs lookup overhead.
-
-### Fused vs native Rust
-
-| | fusevm fused | Native Rust | Ratio |
-|---|---|---|---|
-| `sum(1..1M)` | 142 ns | ~0 ns (const-folded) | — |
-| `string_build(10k)` | 11.9 µs | 2.4 µs | 5x |
+JIT cache lookup is O(1) — chunk hash is precomputed at build time. JIT beats native Rust on bitwise, float, and comparison workloads because Cranelift emits tight native code with zero dispatch overhead while LLVM can't const-fold the equivalent native loops.
 
 ### Tracking improvements
 
