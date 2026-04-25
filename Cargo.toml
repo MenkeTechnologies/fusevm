@@ -41,3 +41,8 @@ required-features = ["jit"]
 [[bench]]
 name = "classic"
 harness = false
+
+[[bench]]
+name = "jit_crossover"
+harness = false
+required-features = ["jit"]

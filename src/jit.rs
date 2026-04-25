@@ -1066,19 +1066,10 @@ mod cranelift_jit_impl {
         LINEAR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    fn hash_chunk_ops(chunk: &Chunk) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        chunk.ops.hash(&mut h);
-        chunk.constants.hash(&mut h);
-        h.finish()
-    }
-
     /// Try to JIT-compile and run a chunk's ops as a linear sequence.
     /// Returns `Some(Value)` on success, `None` if the chunk isn't eligible.
     pub(crate) fn try_run_linear(chunk: &Chunk, slots: &[i64]) -> Option<FuseValue> {
-        let key = hash_chunk_ops(chunk);
+        let key = chunk.op_hash;
         let cache = linear_cache();
 
         // Check cache first

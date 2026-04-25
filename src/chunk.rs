@@ -25,6 +25,9 @@ pub struct Chunk {
     pub block_ranges: Vec<(usize, usize)>,
     /// Source file name (for error messages)
     pub source: String,
+    /// Cached hash of ops + constants (computed once at build time for O(1) JIT cache lookup)
+    #[serde(skip)]
+    pub op_hash: u64,
 }
 
 impl Chunk {
@@ -115,8 +118,14 @@ impl ChunkBuilder {
         self.chunk.source = source.into();
     }
 
-    /// Finalize and return the chunk.
-    pub fn build(self) -> Chunk {
+    /// Finalize and return the chunk with precomputed op hash.
+    pub fn build(mut self) -> Chunk {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.chunk.ops.hash(&mut h);
+        self.chunk.constants.hash(&mut h);
+        self.chunk.op_hash = h.finish();
         self.chunk
     }
 }
