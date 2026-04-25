@@ -261,9 +261,16 @@ pub const BUILTIN_TR: u16 = 252;
 pub const BUILTIN_SEQ: u16 = 253;
 pub const BUILTIN_REV: u16 = 254;
 pub const BUILTIN_TEE: u16 = 255;
+pub const BUILTIN_SLEEP: u16 = 256;
+pub const BUILTIN_WHOAMI: u16 = 257;
+pub const BUILTIN_ID: u16 = 258;
+pub const BUILTIN_HOSTNAME: u16 = 259;
+pub const BUILTIN_UNAME: u16 = 260;
+pub const BUILTIN_DATE: u16 = 261;
+pub const BUILTIN_MKTEMP: u16 = 262;
 
 /// Maximum builtin ID (for pre-allocating the handler table)
-pub const BUILTIN_MAX: u16 = 270;
+pub const BUILTIN_MAX: u16 = 280;
 
 /// Map builtin name to ID. Returns None for non-builtins.
 #[inline]
@@ -400,6 +407,13 @@ pub fn builtin_id(name: &str) -> Option<u16> {
         "seq" => Some(BUILTIN_SEQ),
         "rev" => Some(BUILTIN_REV),
         "tee" => Some(BUILTIN_TEE),
+        "sleep" => Some(BUILTIN_SLEEP),
+        "whoami" => Some(BUILTIN_WHOAMI),
+        "id" => Some(BUILTIN_ID),
+        "hostname" => Some(BUILTIN_HOSTNAME),
+        "uname" => Some(BUILTIN_UNAME),
+        "date" => Some(BUILTIN_DATE),
+        "mktemp" => Some(BUILTIN_MKTEMP),
         _ => None,
     }
 }
