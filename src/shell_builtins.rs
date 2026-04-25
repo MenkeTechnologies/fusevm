@@ -241,8 +241,21 @@ pub const BUILTIN_DBVIEW: u16 = 231;
 pub const BUILTIN_PROFILE: u16 = 232;
 pub const BUILTIN_ZPROF: u16 = 233;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Coreutils (anti-fork builtins)
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub const BUILTIN_CAT: u16 = 240;
+pub const BUILTIN_HEAD: u16 = 241;
+pub const BUILTIN_TAIL: u16 = 242;
+pub const BUILTIN_WC: u16 = 243;
+pub const BUILTIN_BASENAME: u16 = 244;
+pub const BUILTIN_DIRNAME: u16 = 245;
+pub const BUILTIN_TOUCH: u16 = 246;
+pub const BUILTIN_REALPATH: u16 = 247;
+
 /// Maximum builtin ID (for pre-allocating the handler table)
-pub const BUILTIN_MAX: u16 = 240;
+pub const BUILTIN_MAX: u16 = 260;
 
 /// Map builtin name to ID. Returns None for non-builtins.
 #[inline]
@@ -362,6 +375,15 @@ pub fn builtin_id(name: &str) -> Option<u16> {
         "dbview" => Some(BUILTIN_DBVIEW),
         "profile" => Some(BUILTIN_PROFILE),
         "zprof" => Some(BUILTIN_ZPROF),
+        // Coreutils
+        "cat" => Some(BUILTIN_CAT),
+        "head" => Some(BUILTIN_HEAD),
+        "tail" => Some(BUILTIN_TAIL),
+        "wc" => Some(BUILTIN_WC),
+        "basename" => Some(BUILTIN_BASENAME),
+        "dirname" => Some(BUILTIN_DIRNAME),
+        "touch" => Some(BUILTIN_TOUCH),
+        "realpath" => Some(BUILTIN_REALPATH),
         _ => None,
     }
 }
@@ -391,7 +413,9 @@ mod tests {
     fn test_is_builtin() {
         assert!(is_builtin("cd"));
         assert!(is_builtin("export"));
+        assert!(is_builtin("cat"));
+        assert!(is_builtin("head"));
+        assert!(is_builtin("tail"));
         assert!(!is_builtin("ls"));
-        assert!(!is_builtin("cat"));
     }
 }
