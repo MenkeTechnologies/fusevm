@@ -811,8 +811,7 @@ impl VM {
                     let n = *n;
                     let start = self.stack.len().saturating_sub(n as usize);
                     let pairs: Vec<Value> = self.stack.drain(start..).collect();
-                    let mut map =
-                        std::collections::HashMap::with_capacity(pairs.len() / 2);
+                    let mut map = std::collections::HashMap::with_capacity(pairs.len() / 2);
                     let mut iter = pairs.into_iter();
                     while let Some(key) = iter.next() {
                         if let Some(val) = iter.next() {

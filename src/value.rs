@@ -104,13 +104,7 @@ impl Value {
         match self {
             Value::Float(f) => *f,
             Value::Int(n) => *n as f64,
-            Value::Bool(b) => {
-                if *b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            Value::Bool(b) if *b => 1.0,
             Value::Str(s) => s.parse().unwrap_or(0.0),
             Value::Status(c) => *c as f64,
             _ => 0.0,
