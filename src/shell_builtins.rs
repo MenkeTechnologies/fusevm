@@ -253,9 +253,17 @@ pub const BUILTIN_BASENAME: u16 = 244;
 pub const BUILTIN_DIRNAME: u16 = 245;
 pub const BUILTIN_TOUCH: u16 = 246;
 pub const BUILTIN_REALPATH: u16 = 247;
+pub const BUILTIN_SORT: u16 = 248;
+pub const BUILTIN_FIND: u16 = 249;
+pub const BUILTIN_UNIQ: u16 = 250;
+pub const BUILTIN_CUT: u16 = 251;
+pub const BUILTIN_TR: u16 = 252;
+pub const BUILTIN_SEQ: u16 = 253;
+pub const BUILTIN_REV: u16 = 254;
+pub const BUILTIN_TEE: u16 = 255;
 
 /// Maximum builtin ID (for pre-allocating the handler table)
-pub const BUILTIN_MAX: u16 = 260;
+pub const BUILTIN_MAX: u16 = 270;
 
 /// Map builtin name to ID. Returns None for non-builtins.
 #[inline]
@@ -384,6 +392,14 @@ pub fn builtin_id(name: &str) -> Option<u16> {
         "dirname" => Some(BUILTIN_DIRNAME),
         "touch" => Some(BUILTIN_TOUCH),
         "realpath" => Some(BUILTIN_REALPATH),
+        "sort" => Some(BUILTIN_SORT),
+        "find" => Some(BUILTIN_FIND),
+        "uniq" => Some(BUILTIN_UNIQ),
+        "cut" => Some(BUILTIN_CUT),
+        "tr" => Some(BUILTIN_TR),
+        "seq" => Some(BUILTIN_SEQ),
+        "rev" => Some(BUILTIN_REV),
+        "tee" => Some(BUILTIN_TEE),
         _ => None,
     }
 }
@@ -416,6 +432,8 @@ mod tests {
         assert!(is_builtin("cat"));
         assert!(is_builtin("head"));
         assert!(is_builtin("tail"));
+        assert!(is_builtin("sort"));
+        assert!(is_builtin("find"));
         assert!(!is_builtin("ls"));
     }
 }
