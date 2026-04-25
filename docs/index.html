@@ -155,11 +155,11 @@
         <p class="motto" style="font-size: 12px; color: var(--cyan); margin-top: -1rem;">FUSED SUPERINSTRUCTIONS. EXTENSION DISPATCH. CRANELIFT JIT.</p>
 
         <div class="stat-grid">
-          <div><div class="stat">127</div><div class="stat-label">opcodes</div></div>
+          <div><div class="stat">129</div><div class="stat-label">opcodes</div></div>
           <div><div class="stat">10</div><div class="stat-label">op categories</div></div>
           <div><div class="stat">8</div><div class="stat-label">fused superinstructions</div></div>
           <div><div class="stat">24</div><div class="stat-label">shell ops</div></div>
-          <div><div class="stat">1,763</div><div class="stat-label">lines of Rust</div></div>
+          <div><div class="stat">4,258</div><div class="stat-label">lines of Rust</div></div>
           <div><div class="stat">0</div><div class="stat-label">unsafe blocks</div></div>
           <div><div class="stat">3</div><div class="stat-label">language frontends</div></div>
           <div><div class="stat">&le;24B</div><div class="stat-label">op size (cache-friendly)</div></div>
@@ -309,7 +309,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         <h2><span class="section-num">[0x03]</span> OP CATEGORIES</h2>
 
         <p style="font-size: 14px; color: var(--text); margin-bottom: 0.8rem;">
-        127 opcodes across 10 categories. Every op is &le;24 bytes for cache-friendly dispatch.</p>
+        129 opcodes across 10 categories. Every op is &le;24 bytes for cache-friendly dispatch.</p>
 
         <div class="cat-grid">
           <div class="cat-card">
@@ -320,7 +320,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
           <div class="cat-card">
             <h4>Variables</h4>
             <p>~8 ops &mdash; name-indexed + slot-indexed fast paths</p>
-            <p><code>GetVar</code> <code>SetVar</code> <code>DeclareVar</code> <code>GetSlot</code> <code>SetSlot</code></p>
+            <p><code>GetVar</code> <code>SetVar</code> <code>DeclareVar</code> <code>GetSlot</code> <code>SetSlot</code> <code>SlotArrayGet</code> <code>SlotArraySet</code></p>
           </div>
           <div class="cat-card">
             <h4>Arrays &amp; Hashes</h4>
