@@ -17,7 +17,12 @@
 
 > *"One VM to run them all."*
 
-A language-agnostic bytecode virtual machine with fused superinstructions and a Cranelift JIT compilation path. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and JIT eligibility analysis — for free. 127 opcodes across 10 categories. 1,763 lines of zero-dependency Rust.
+A language-agnostic bytecode virtual machine with fused superinstructions and Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 127 opcodes across 10 categories. Cranelift 0.130 behind `jit` feature flag.
+
+```sh
+cargo add fusevm --features jit   # with Cranelift JIT
+cargo add fusevm                  # interpreter only
+```
 
 ### [`Docs`](https://menketechnologies.github.io/fusevm/) · [`API Reference`](https://docs.rs/fusevm) · [`Crates.io`](https://crates.io/crates/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang) · [`zshrs`](https://github.com/MenkeTechnologies/zshrs)
 
@@ -166,24 +171,37 @@ stryke registers ~450 extended ops. zshrs registers ~20. They don't conflict —
 
 ## [0x07] JIT COMPILATION
 
-The `JitCompiler` analyzes chunks for JIT eligibility and compiles hot paths to native code via Cranelift:
+The `JitCompiler` compiles eligible chunks to native code via Cranelift 0.130. Enable with `cargo add fusevm --features jit`.
 
 ```rust
-use fusevm::jit::{JitCompiler, JitExtension};
+use fusevm::{JitCompiler, ChunkBuilder, Op, Value};
 
-struct MyJit;
-impl JitExtension for MyJit {
-    fn is_eligible(&self, chunk: &Chunk) -> bool {
-        // custom eligibility logic
-        true
-    }
-}
+let mut b = ChunkBuilder::new();
+b.emit(Op::LoadInt(40), 1);
+b.emit(Op::LoadInt(2), 1);
+b.emit(Op::Add, 1);
+let chunk = b.build();
 
-let compiler = JitCompiler::new();
-if compiler.is_eligible(&chunk) {
-    let native = compiler.compile(&chunk);
+let jit = JitCompiler::new();
+if jit.is_linear_eligible(&chunk) {
+    // Compiles to native x86-64/aarch64, caches, and runs
+    let result = jit.try_run_linear(&chunk, &[]);  // Some(Int(42))
 }
 ```
+
+### Linear JIT — eligible ops
+
+| Category | JIT'd Ops |
+|----------|-----------|
+| Constants | `LoadInt`, `LoadFloat`, `LoadConst` (int/float), `LoadTrue`, `LoadFalse` |
+| Arithmetic | `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Pow`, `Negate`, `Inc`, `Dec` |
+| Comparison | `NumEq`/`Ne`/`Lt`/`Gt`/`Le`/`Ge`, `Spaceship` |
+| Bitwise | `BitAnd`/`Or`/`Xor`/`Not`, `Shl`, `Shr` |
+| Logic | `LogNot` |
+| Stack | `Pop`, `Dup`, `Swap`, `Rot` |
+| Slots | `GetSlot`, `SetSlot`, `PreIncSlot`, `PreIncSlotVoid`, `AddAssignSlotVoid` |
+
+Int/float promotion: when either operand is float, both are promoted to `f64`. Cranelift emits `iadd`/`fadd`/`fcvt_from_sint` as needed. Runtime helpers for `Pow` (wrapping integer + `f64::powf`) and `Mod` (float `fmod`).
 
 ---
 
