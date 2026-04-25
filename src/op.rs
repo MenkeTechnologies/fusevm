@@ -5,6 +5,7 @@
 //! through a handler table registered by the frontend.
 
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
 /// Stack-based bytecode instruction set.
 ///
@@ -279,6 +280,178 @@ pub mod param_mod {
     pub const INDIRECT: u8 = 15; // ${!var}
     pub const KEYS: u8 = 16; // ${!arr[@]}
     pub const SLICE: u8 = 17; // ${var:off:len}
+}
+
+impl Hash for Op {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Op::LoadInt(n) => n.hash(state),
+            Op::LoadFloat(f) => f.to_bits().hash(state),
+            Op::LoadConst(idx) => idx.hash(state),
+            Op::GetVar(idx)
+            | Op::SetVar(idx)
+            | Op::DeclareVar(idx)
+            | Op::GetSlot(idx)
+            | Op::SetSlot(idx)
+            | Op::GetArray(idx)
+            | Op::SetArray(idx)
+            | Op::DeclareArray(idx)
+            | Op::ArrayGet(idx)
+            | Op::ArraySet(idx)
+            | Op::ArrayPush(idx)
+            | Op::ArrayPop(idx)
+            | Op::ArrayShift(idx)
+            | Op::ArrayLen(idx)
+            | Op::MakeArray(idx)
+            | Op::GetHash(idx)
+            | Op::SetHash(idx)
+            | Op::DeclareHash(idx)
+            | Op::HashGet(idx)
+            | Op::HashSet(idx)
+            | Op::HashDelete(idx)
+            | Op::HashExists(idx)
+            | Op::HashKeys(idx)
+            | Op::HashValues(idx)
+            | Op::MakeHash(idx)
+            | Op::PreIncSlot(idx)
+            | Op::PreIncSlotVoid(idx)
+            | Op::HereDoc(idx)
+            | Op::CmdSubst(idx)
+            | Op::ProcessSubIn(idx)
+            | Op::ProcessSubOut(idx)
+            | Op::TrapSet(idx)
+            | Op::MapBlock(idx)
+            | Op::GrepBlock(idx)
+            | Op::SortBlock(idx)
+            | Op::ForEachBlock(idx) => idx.hash(state),
+            Op::Jump(t)
+            | Op::JumpIfTrue(t)
+            | Op::JumpIfFalse(t)
+            | Op::JumpIfTrueKeep(t)
+            | Op::JumpIfFalseKeep(t) => t.hash(state),
+            Op::Call(name, argc) => {
+                name.hash(state);
+                argc.hash(state);
+            }
+            Op::CallBuiltin(id, argc) => {
+                id.hash(state);
+                argc.hash(state);
+            }
+            Op::Extended(id, arg) => {
+                id.hash(state);
+                arg.hash(state);
+            }
+            Op::ExtendedWide(id, payload) => {
+                id.hash(state);
+                payload.hash(state);
+            }
+            Op::Print(n) | Op::PrintLn(n) | Op::Exec(n) | Op::ExecBg(n) | Op::PipelineBegin(n) => {
+                n.hash(state)
+            }
+            Op::Redirect(fd, op) => {
+                fd.hash(state);
+                op.hash(state);
+            }
+            Op::TestFile(t) | Op::ExpandParam(t) => t.hash(state),
+            Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
+                slot.hash(state);
+                limit.hash(state);
+                target.hash(state);
+            }
+            Op::SlotIncLtIntJumpBack(slot, limit, target) => {
+                slot.hash(state);
+                limit.hash(state);
+                target.hash(state);
+            }
+            Op::AccumSumLoop(sum, i, limit) => {
+                sum.hash(state);
+                i.hash(state);
+                limit.hash(state);
+            }
+            Op::ConcatConstLoop(c, s, i, limit) => {
+                c.hash(state);
+                s.hash(state);
+                i.hash(state);
+                limit.hash(state);
+            }
+            Op::PushIntRangeLoop(arr, i, limit) => {
+                arr.hash(state);
+                i.hash(state);
+                limit.hash(state);
+            }
+            Op::AddAssignSlotVoid(a, b) => {
+                a.hash(state);
+                b.hash(state);
+            }
+            // Nullary ops — discriminant alone is sufficient
+            Op::Nop
+            | Op::LoadTrue
+            | Op::LoadFalse
+            | Op::LoadUndef
+            | Op::Pop
+            | Op::Dup
+            | Op::Dup2
+            | Op::Swap
+            | Op::Rot
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Pow
+            | Op::Negate
+            | Op::Inc
+            | Op::Dec
+            | Op::Concat
+            | Op::StringRepeat
+            | Op::StringLen
+            | Op::NumEq
+            | Op::NumNe
+            | Op::NumLt
+            | Op::NumGt
+            | Op::NumLe
+            | Op::NumGe
+            | Op::Spaceship
+            | Op::StrEq
+            | Op::StrNe
+            | Op::StrLt
+            | Op::StrGt
+            | Op::StrLe
+            | Op::StrGe
+            | Op::StrCmp
+            | Op::LogNot
+            | Op::LogAnd
+            | Op::LogOr
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::BitNot
+            | Op::Shl
+            | Op::Shr
+            | Op::Return
+            | Op::ReturnValue
+            | Op::PushFrame
+            | Op::PopFrame
+            | Op::ReadLine
+            | Op::Range
+            | Op::RangeStep
+            | Op::SortDefault
+            | Op::SetStatus
+            | Op::GetStatus
+            | Op::PipelineStage
+            | Op::PipelineEnd
+            | Op::HereString
+            | Op::SubshellBegin
+            | Op::SubshellEnd
+            | Op::Glob
+            | Op::GlobRecursive
+            | Op::TrapCheck
+            | Op::WordSplit
+            | Op::BraceExpand
+            | Op::TildeExpand => {}
+        }
+    }
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@
 [![Crates.io](https://img.shields.io/crates/v/fusevm.svg)](https://crates.io/crates/fusevm)
 [![Downloads](https://img.shields.io/crates/d/fusevm.svg)](https://crates.io/crates/fusevm)
 [![Docs.rs](https://docs.rs/fusevm/badge.svg)](https://docs.rs/fusevm)
+ [![Docs](https://img.shields.io/badge/docs-online-blue.svg)](https://menketechnologies.github.io/fusevm/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ### `[LANGUAGE-AGNOSTIC BYTECODE VM WITH FUSED SUPERINSTRUCTIONS]`
@@ -39,6 +40,7 @@ cargo add fusevm                  # interpreter only
 - [\[0x06\] Extension Mechanism](#0x06-extension-mechanism)
 - [\[0x07\] JIT Compilation](#0x07-jit-compilation)
 - [\[0x08\] Value Representation](#0x08-value-representation)
+- [\[0x09\] Benchmarks](#0x09-benchmarks)
 - [\[0xFF\] License](#0xff-license)
 
 ---
@@ -231,6 +233,46 @@ Int/float promotion: when either operand is float, both are promoted to `f64`. C
 String coercion returns `Cow<str>` via `as_str_cow()` — borrows the inner `Arc<String>` for `Str` variants, avoiding allocation on string comparisons, concatenation, hash key lookup, and I/O.
 
 Array and hash mutations (`ArrayPush`, `ArrayPop`, `ArrayShift`, `ArraySet`, `HashSet`, `HashDelete`) operate in-place on globals — no clone-modify-writeback cycle. Read-only access (`ArrayGet`, `ArrayLen`, `HashGet`, `HashExists`, `HashKeys`, `HashValues`) borrows directly from the globals vector.
+
+---
+
+## [0x09] BENCHMARKS
+
+All benchmarks run via [criterion](https://crates.io/crates/criterion) on Apple M-series. `cargo bench` for all, `cargo bench --features jit --bench jit_vs_interp` for JIT comparisons. HTML report at `target/criterion/report/index.html`.
+
+### Classic algorithms
+
+| Benchmark | Time | Ops/sec |
+|-----------|------|---------|
+| `fib_iterative(35)` | 2.7 µs | 374k |
+| `fib_recursive(20)` — 21,891 calls | 1.28 ms | 783 |
+| `ackermann(3,4)` — 10,547 calls | 774 µs | 1.3k |
+| `sum(1..1M)` fused `AccumSumLoop` | 142 ns | 7.0M |
+| `sum(1..1M)` unfused loop ops | 31.0 ms | 32 |
+| `nested_loop(100×100)` | 352 µs | 2.8k |
+| `dispatch_nop_1M` — raw dispatch overhead | 819 µs | **1.22 Gops/sec** |
+| `string_build(10k)` via `ConcatConstLoop` | 11.9 µs | 84k |
+
+### Interpreter vs Cranelift JIT vs native Rust
+
+Slot-based inputs prevent constant folding — honest apples-to-apples comparison:
+
+| Workload | Interpreter | JIT (cached) | Native Rust | JIT vs interp | JIT vs native |
+|----------|-------------|--------------|-------------|---------------|---------------|
+| `slot_mixed × 100` | 2.2 µs | **75 ns** | 42 ns | **29x faster** | 1.8x slower |
+| `slot_bitwise × 200` | 6.6 µs | **130 ns** | 74 ns | **51x faster** | 1.8x slower |
+| `slot_float × 200` | 3.1 µs | **246 ns** | 137 ns | **13x faster** | 1.8x slower |
+
+JIT cache lookup is O(1) — chunk hash precomputed at build time (24ns overhead). The JIT is consistently ~1.8x slower than LLVM `-O3` on real computation and 13–51x faster than the interpreter. Being within 2x of LLVM is strong for a single-pass Cranelift JIT.
+
+### Tracking improvements
+
+```sh
+cargo bench --bench vm_bench -- --save-baseline before   # save baseline
+# ... make changes ...
+cargo bench --bench vm_bench -- --baseline before        # compare
+open target/criterion/report/index.html                  # HTML graphs
+```
 
 ---
 

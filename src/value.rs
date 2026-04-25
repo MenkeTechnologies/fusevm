@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 /// Core value type — what lives on the stack and in variables.
@@ -104,13 +105,7 @@ impl Value {
         match self {
             Value::Float(f) => *f,
             Value::Int(n) => *n as f64,
-            Value::Bool(b) => {
-                if *b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            Value::Bool(b) if *b => 1.0,
             Value::Str(s) => s.parse().unwrap_or(0.0),
             Value::Status(c) => *c as f64,
             _ => 0.0,
@@ -153,6 +148,30 @@ impl Value {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Undef => {}
+            Value::Bool(b) => b.hash(state),
+            Value::Int(n) => n.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::Str(s) => s.hash(state),
+            Value::Array(a) => a.hash(state),
+            Value::Hash(h) => {
+                h.len().hash(state);
+                for (k, v) in h {
+                    k.hash(state);
+                    v.hash(state);
+                }
+            }
+            Value::Status(c) => c.hash(state),
+            Value::Ref(b) => b.hash(state),
+            Value::NativeFn(id) => id.hash(state),
+        }
     }
 }
 
