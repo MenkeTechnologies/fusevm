@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and Cranelift JIT. The shared execution engine behind strykelang and zshrs.">
+  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and Cranelift JIT. The shared execution engine behind strykelang, zshrs, and awkrs.">
   <title>fusevm — Documentation</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -100,7 +100,7 @@
           <div><div class="stat">24</div><div class="stat-label">shell ops</div></div>
           <div><div class="stat">1,763</div><div class="stat-label">lines of Rust</div></div>
           <div><div class="stat">0</div><div class="stat-label">unsafe blocks</div></div>
-          <div><div class="stat">2</div><div class="stat-label">language frontends</div></div>
+          <div><div class="stat">3</div><div class="stat-label">language frontends</div></div>
           <div><div class="stat">&le;24B</div><div class="stat-label">op size (cache-friendly)</div></div>
         </div>
 
@@ -113,7 +113,7 @@
         analysis &mdash; for free. <span class="highlight">The VM doesn&rsquo;t care which language produced the bytecodes.</span></p>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
-        stryke registers ~450 extended ops. zshrs registers ~20. They don&rsquo;t conflict &mdash;
+        stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. They don&rsquo;t conflict &mdash;
         each frontend owns its own ID space via <code>Extended(u16, u8)</code>. Process control ops
         (pipes, redirects, globs, file tests) are first-class because multiple frontends need them.</p>
       </section>
@@ -126,13 +126,13 @@
   ┌─────────────────────────────────────────────────────────────────┐
   │                     LANGUAGE FRONTENDS                          │
   │                                                                 │
-  │  ┌───────────────┐          ┌───────────────┐                   │
-  │  │   strykelang   │          │    zshrs       │                  │
-  │  │ Perl 5 compat  │          │ shell compiler │                  │
-  │  │ ~450 ext ops   │          │ ~20 ext ops    │                  │
-  │  └───────┬───────┘          └───────┬───────┘                   │
-  │          │      compile              │                           │
-  │          └──────────┬───────────────┘                            │
+  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐       │
+  │  ���  strykelang    │  │    zshrs       │  │    awkrs       │      │
+  │  │ Perl 5 compat  │  │ shell compiler │  │ awk compiler   │      │
+  │  │ ~450 ext ops   │  │ ~20 ext ops    │  │ ~95 ext ops    │      │
+  │  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘       │
+  │          │       compile     │                   │               │
+  │          └──────────────────┬───────────────────┘               │
   │                     ▼                                            │
   │          ┌─────────────────────┐                                 │
   │          │  ChunkBuilder       │                                 │

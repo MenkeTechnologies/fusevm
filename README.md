@@ -45,12 +45,17 @@ cargo add fusevm                  # interpreter only
 
 ## [0x00] OVERVIEW
 
-fusevm is the shared execution engine behind [strykelang](https://github.com/MenkeTechnologies/strykelang) and [zshrs](https://github.com/MenkeTechnologies/zshrs). Both compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
+fusevm is the shared execution engine behind [strykelang](https://github.com/MenkeTechnologies/strykelang), [zshrs](https://github.com/MenkeTechnologies/zshrs), and [awkrs](https://github.com/MenkeTechnologies/awkrs). All three compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
 
 ```
 stryke source ──► stryke compiler ──┐
-                                     ├──► fusevm::Op ──► VM::run()
-zshrs source  ──► shell compiler  ──┘
+                                     │
+zshrs source  ──► shell compiler  ──┼──► fusevm::Op ──► VM::run()
+                                     │         │
+awkrs source  ──► awk compiler    ──┘    JitCompiler::try_run_linear()
+                                                │
+                                          Cranelift 0.130
+                                         native x86-64 / aarch64
 ```
 
 - **Fused superinstructions** — the compiler detects hot patterns and emits single ops instead of multi-op sequences
@@ -165,7 +170,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
 }));
 ```
 
-stryke registers ~450 extended ops. zshrs registers ~20. They don't conflict — each frontend owns its own ID space.
+stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. They don't conflict — each frontend owns its own ID space.
 
 ---
 
