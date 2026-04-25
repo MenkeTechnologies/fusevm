@@ -374,6 +374,80 @@ fn bench_string_build_10k_native(c: &mut Criterion) {
     });
 }
 
+// ── Block JIT benchmarks (only with jit feature) ──
+
+#[cfg(feature = "jit")]
+fn bench_sum_1m_block_jit_unfused(c: &mut Criterion) {
+    let chunk = sum_unfused_chunk(1_000_000);
+    let jit = fusevm::JitCompiler::new();
+    assert!(jit.is_block_eligible(&chunk), "unfused sum loop should be block-eligible");
+    // warm cache
+    let mut slots = vec![0i64; 4];
+    let _ = jit.try_run_block(&chunk, &mut slots);
+
+    c.bench_function("sum_1M_block_jit_unfused", |b| {
+        b.iter(|| {
+            let mut slots = vec![0i64; 4];
+            let result = jit.try_run_block(black_box(&chunk), &mut slots);
+            black_box(result);
+        })
+    });
+}
+
+#[cfg(feature = "jit")]
+fn bench_sum_1m_block_jit_fused(c: &mut Criterion) {
+    let chunk = sum_fused_chunk(1_000_000);
+    let jit = fusevm::JitCompiler::new();
+    assert!(jit.is_block_eligible(&chunk), "fused sum should be block-eligible");
+    let mut slots = vec![0i64; 4];
+    let _ = jit.try_run_block(&chunk, &mut slots);
+
+    c.bench_function("sum_1M_block_jit_fused", |b| {
+        b.iter(|| {
+            let mut slots = vec![0i64; 4];
+            let result = jit.try_run_block(black_box(&chunk), &mut slots);
+            black_box(result);
+        })
+    });
+}
+
+#[cfg(feature = "jit")]
+fn bench_nested_100x100_block_jit(c: &mut Criterion) {
+    let chunk = nested_loop_chunk(100, 100);
+    let jit = fusevm::JitCompiler::new();
+    assert!(jit.is_block_eligible(&chunk));
+    let mut slots = vec![0i64; 4];
+    let _ = jit.try_run_block(&chunk, &mut slots);
+
+    c.bench_function("nested_100x100_block_jit", |b| {
+        b.iter(|| {
+            let mut slots = vec![0i64; 4];
+            let result = jit.try_run_block(black_box(&chunk), &mut slots);
+            black_box(result);
+        })
+    });
+}
+
+#[cfg(feature = "jit")]
+criterion_group!(
+    benches,
+    bench_fib_35,
+    bench_fib_recursive_20,
+    bench_sum_1m_fused,
+    bench_sum_1m_unfused,
+    bench_sum_1m_native,
+    bench_sum_1m_block_jit_unfused,
+    bench_sum_1m_block_jit_fused,
+    bench_nested_100x100,
+    bench_nested_100x100_native,
+    bench_nested_100x100_block_jit,
+    bench_ackermann_3_4,
+    bench_dispatch_1m,
+    bench_string_build_10k,
+    bench_string_build_10k_native,
+);
+
+#[cfg(not(feature = "jit"))]
 criterion_group!(
     benches,
     bench_fib_35,

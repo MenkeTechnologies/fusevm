@@ -263,7 +263,18 @@ Slot-based inputs prevent constant folding — honest apples-to-apples compariso
 | `slot_bitwise × 200` | 6.6 µs | **130 ns** | 74 ns | **51x faster** | 1.8x slower |
 | `slot_float × 200` | 3.1 µs | **246 ns** | 137 ns | **13x faster** | 1.8x slower |
 
-JIT cache lookup is O(1) — chunk hash precomputed at build time (24ns overhead). The JIT is consistently ~1.8x slower than LLVM `-O3` on real computation and 13–51x faster than the interpreter. Being within 2x of LLVM is strong for a single-pass Cranelift JIT.
+JIT cache lookup is O(1) — chunk hash precomputed at build time (24ns overhead). The linear JIT is consistently ~1.8x slower than LLVM `-O3` on real computation and 13–51x faster than the interpreter.
+
+### Block JIT — loops and branches compiled to native code
+
+The block JIT handles real control flow — loops, conditionals, fused backedges:
+
+| Benchmark | Interpreter | Block JIT | Speedup |
+|-----------|-------------|-----------|---------|
+| `sum(1..1M)` unfused loop | 30.0 ms | **315 µs** | **95x** |
+| `nested_loop(100×100)` | 340 µs | **9.5 µs** | **36x** |
+
+The block JIT compiles the full CFG to native code via Cranelift. All mutable state flows through the slots pointer (`*mut i64`), and `AccumSumLoop` is register-allocated with block parameters — no memory traffic in the inner loop.
 
 ### Tracking improvements
 

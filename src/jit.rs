@@ -67,7 +67,7 @@ mod cranelift_jit_impl {
     use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
     use cranelift_codegen::ir::immediates::Ieee64;
     use cranelift_codegen::ir::types;
-    use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, UserFuncName, Value};
+    use cranelift_codegen::ir::{AbiParam, BlockArg, InstBuilder, MemFlags, UserFuncName, Value};
     use cranelift_codegen::isa::OwnedTargetIsa;
     use cranelift_codegen::settings::{self, Configurable};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -1106,6 +1106,453 @@ mod cranelift_jit_impl {
     pub(crate) fn is_linear_eligible(chunk: &Chunk) -> bool {
         validate_linear_seq(&chunk.ops, &chunk.constants)
     }
+
+    // ── Block JIT compilation ──
+
+    use std::collections::BTreeSet;
+
+    type BlockFn = unsafe extern "C" fn(*mut i64) -> i64;
+
+    pub(crate) struct CompiledBlock {
+        #[allow(dead_code)]
+        module: JITModule,
+        f: BlockFn,
+    }
+
+    impl CompiledBlock {
+        pub(crate) fn invoke(&self, slots: &mut [i64]) -> i64 {
+            let ptr = if slots.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                slots.as_mut_ptr()
+            };
+            unsafe { (self.f)(ptr) }
+        }
+    }
+
+    fn find_leaders(ops: &[Op]) -> BTreeSet<usize> {
+        let mut leaders = BTreeSet::new();
+        if ops.is_empty() {
+            return leaders;
+        }
+        leaders.insert(0);
+        for (ip, op) in ops.iter().enumerate() {
+            match op {
+                Op::Jump(t) => {
+                    leaders.insert(*t);
+                    if ip + 1 < ops.len() {
+                        leaders.insert(ip + 1);
+                    }
+                }
+                Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
+                    leaders.insert(*t);
+                    if ip + 1 < ops.len() {
+                        leaders.insert(ip + 1);
+                    }
+                }
+                Op::SlotLtIntJumpIfFalse(_, _, t) | Op::SlotIncLtIntJumpBack(_, _, t) => {
+                    leaders.insert(*t);
+                    if ip + 1 < ops.len() {
+                        leaders.insert(ip + 1);
+                    }
+                }
+                Op::AccumSumLoop(_, _, _) => {
+                    if ip + 1 < ops.len() {
+                        leaders.insert(ip + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        leaders
+    }
+
+    fn is_block_eligible_op(op: &Op) -> bool {
+        matches!(
+            op,
+            Op::Nop
+                | Op::LoadInt(_)
+                | Op::LoadFloat(_)
+                | Op::LoadConst(_)
+                | Op::LoadTrue
+                | Op::LoadFalse
+                | Op::Pop
+                | Op::Dup
+                | Op::Swap
+                | Op::Rot
+                | Op::Add
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::Mod
+                | Op::Pow
+                | Op::Negate
+                | Op::Inc
+                | Op::Dec
+                | Op::NumEq
+                | Op::NumNe
+                | Op::NumLt
+                | Op::NumGt
+                | Op::NumLe
+                | Op::NumGe
+                | Op::Spaceship
+                | Op::BitAnd
+                | Op::BitOr
+                | Op::BitXor
+                | Op::BitNot
+                | Op::Shl
+                | Op::Shr
+                | Op::LogNot
+                | Op::GetSlot(_)
+                | Op::SetSlot(_)
+                | Op::PreIncSlot(_)
+                | Op::PreIncSlotVoid(_)
+                | Op::AddAssignSlotVoid(_, _)
+                | Op::Jump(_)
+                | Op::JumpIfTrue(_)
+                | Op::JumpIfFalse(_)
+                | Op::SlotLtIntJumpIfFalse(_, _, _)
+                | Op::SlotIncLtIntJumpBack(_, _, _)
+                | Op::AccumSumLoop(_, _, _)
+                | Op::PushFrame
+                | Op::PopFrame
+        )
+    }
+
+    pub(crate) fn is_block_eligible(chunk: &Chunk) -> bool {
+        let ops = &chunk.ops;
+        !ops.is_empty() && ops.iter().all(is_block_eligible_op)
+    }
+
+    fn cond_to_i1(
+        bcx: &mut FunctionBuilder,
+        v: Value,
+        ty: JitTy,
+    ) -> cranelift_codegen::ir::Value {
+        match ty {
+            JitTy::Int => bcx.ins().icmp_imm(IntCC::NotEqual, v, 0),
+            JitTy::Float => {
+                let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
+                bcx.ins().fcmp(FloatCC::OrderedNotEqual, v, z)
+            }
+        }
+    }
+
+    pub(crate) fn compile_block(chunk: &Chunk) -> Option<CompiledBlock> {
+        let ops = &chunk.ops;
+        if !is_block_eligible(chunk) {
+            return None;
+        }
+
+        let leaders = find_leaders(ops);
+        let leader_vec: Vec<usize> = leaders.iter().copied().collect();
+        let mut module = new_jit_module()?;
+
+        // Declare external helpers
+        let needs_pow = ops.iter().any(|o| matches!(o, Op::Pow));
+        let pow_i64_id = if needs_pow {
+            let mut ps = module.make_signature();
+            ps.params.push(AbiParam::new(types::I64));
+            ps.params.push(AbiParam::new(types::I64));
+            ps.returns.push(AbiParam::new(types::I64));
+            Some(module.declare_function("fusevm_jit_pow_i64", Linkage::Import, &ps).ok()?)
+        } else {
+            None
+        };
+        let pow_f64_id = if needs_pow {
+            let mut ps = module.make_signature();
+            ps.params.push(AbiParam::new(types::F64));
+            ps.params.push(AbiParam::new(types::F64));
+            ps.returns.push(AbiParam::new(types::F64));
+            Some(module.declare_function("fusevm_jit_pow_f64", Linkage::Import, &ps).ok()?)
+        } else {
+            None
+        };
+        let needs_fmod = ops.iter().any(|o| matches!(o, Op::Mod));
+        let fmod_f64_id = if needs_fmod {
+            let mut ps = module.make_signature();
+            ps.params.push(AbiParam::new(types::F64));
+            ps.params.push(AbiParam::new(types::F64));
+            ps.returns.push(AbiParam::new(types::F64));
+            Some(module.declare_function("fusevm_jit_fmod_f64", Linkage::Import, &ps).ok()?)
+        } else {
+            None
+        };
+        let needs_lognot = ops.iter().any(|o| matches!(o, Op::LogNot));
+        let lognot_id = if needs_lognot {
+            let mut ps = module.make_signature();
+            ps.params.push(AbiParam::new(types::I64));
+            ps.returns.push(AbiParam::new(types::I64));
+            Some(module.declare_function("fusevm_jit_lognot_i64", Linkage::Import, &ps).ok()?)
+        } else {
+            None
+        };
+
+        let ptr_ty = module.target_config().pointer_type();
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 slots
+        sig.returns.push(AbiParam::new(types::I64)); // result
+
+        let fid = module.declare_function("block_jit", Linkage::Local, &sig).ok()?;
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        ctx.func.name = UserFuncName::user(0, fid.as_u32());
+
+        let mut fctx = FunctionBuilderContext::new();
+        {
+            let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+
+            // Create Cranelift blocks for each bytecode leader
+            let mut block_map: HashMap<usize, cranelift_codegen::ir::Block> = HashMap::new();
+            for &leader_ip in &leader_vec {
+                block_map.insert(leader_ip, bcx.create_block());
+            }
+
+            // Entry block setup
+            let entry = block_map[&0];
+            bcx.append_block_params_for_function_params(entry);
+            bcx.switch_to_block(entry);
+            let slot_base = bcx.block_params(entry)[0];
+
+            let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+            let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+            let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+            let lognot_ref = lognot_id.map(|lid| module.declare_func_in_func(lid, bcx.func));
+
+            // Process each basic block
+            let mut block_terminated = false;
+
+            for (block_idx, &leader_ip) in leader_vec.iter().enumerate() {
+                let block_end = if block_idx + 1 < leader_vec.len() {
+                    leader_vec[block_idx + 1]
+                } else {
+                    ops.len()
+                };
+
+                // Switch to this block (unless it's the entry which we already started)
+                if leader_ip > 0 {
+                    if !block_terminated {
+                        // Previous block fell through — emit jump
+                        bcx.ins().jump(block_map[&leader_ip], &[]);
+                    }
+                    bcx.switch_to_block(block_map[&leader_ip]);
+                }
+
+                let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::new();
+                block_terminated = false;
+
+                for ip in leader_ip..block_end {
+                    let op = &ops[ip];
+                    match op {
+                        Op::PushFrame | Op::PopFrame | Op::Nop => {}
+
+                        Op::Jump(target) => {
+                            let target_block = *block_map.get(target)?;
+                            bcx.ins().jump(target_block, &[]);
+                            block_terminated = true;
+                        }
+
+                        Op::JumpIfTrue(target) => {
+                            let (cond, ty) = stack.pop()?;
+                            let pred = cond_to_i1(&mut bcx, cond, ty);
+                            let target_block = *block_map.get(target)?;
+                            let fall = if ip + 1 < ops.len() {
+                                *block_map.get(&(ip + 1))?
+                            } else {
+                                return None;
+                            };
+                            bcx.ins().brif(pred, target_block, &[], fall, &[]);
+                            block_terminated = true;
+                        }
+
+                        Op::JumpIfFalse(target) => {
+                            let (cond, ty) = stack.pop()?;
+                            let pred = cond_to_i1(&mut bcx, cond, ty);
+                            let target_block = *block_map.get(target)?;
+                            let fall = if ip + 1 < ops.len() {
+                                *block_map.get(&(ip + 1))?
+                            } else {
+                                return None;
+                            };
+                            bcx.ins().brif(pred, fall, &[], target_block, &[]);
+                            block_terminated = true;
+                        }
+
+                        Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
+                            let val = bcx.ins().load(
+                                types::I64,
+                                MemFlags::trusted(),
+                                slot_base,
+                                (*slot as i32) * 8,
+                            );
+                            let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
+                            let is_lt =
+                                bcx.ins().icmp(IntCC::SignedLessThan, val, limit_v);
+                            let target_block = *block_map.get(target)?;
+                            let fall = if ip + 1 < ops.len() {
+                                *block_map.get(&(ip + 1))?
+                            } else {
+                                return None;
+                            };
+                            // if >= limit, jump to target; otherwise fall through
+                            bcx.ins().brif(is_lt, fall, &[], target_block, &[]);
+                            block_terminated = true;
+                        }
+
+                        Op::SlotIncLtIntJumpBack(slot, limit, target) => {
+                            let off = (*slot as i32) * 8;
+                            let old =
+                                bcx.ins().load(types::I64, MemFlags::trusted(), slot_base, off);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let new = bcx.ins().iadd(old, one);
+                            bcx.ins().store(MemFlags::trusted(), new, slot_base, off);
+                            let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
+                            let is_lt =
+                                bcx.ins().icmp(IntCC::SignedLessThan, new, limit_v);
+                            let target_block = *block_map.get(target)?;
+                            let fall = if ip + 1 < ops.len() {
+                                *block_map.get(&(ip + 1))?
+                            } else {
+                                return None;
+                            };
+                            bcx.ins().brif(is_lt, target_block, &[], fall, &[]);
+                            block_terminated = true;
+                        }
+
+                        Op::AccumSumLoop(sum_slot, i_slot, limit) => {
+                            let sum_off = (*sum_slot as i32) * 8;
+                            let i_off = (*i_slot as i32) * 8;
+                            let sum_init = bcx.ins().load(
+                                types::I64,
+                                MemFlags::trusted(),
+                                slot_base,
+                                sum_off,
+                            );
+                            let i_init = bcx.ins().load(
+                                types::I64,
+                                MemFlags::trusted(),
+                                slot_base,
+                                i_off,
+                            );
+                            let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
+
+                            let loop_hdr = bcx.create_block();
+                            let loop_body = bcx.create_block();
+                            let loop_exit = bcx.create_block();
+
+                            bcx.ins().jump(loop_hdr, &[BlockArg::Value(sum_init), BlockArg::Value(i_init)]);
+
+                            // Loop header: check i < limit
+                            bcx.switch_to_block(loop_hdr);
+                            bcx.append_block_param(loop_hdr, types::I64); // sum
+                            bcx.append_block_param(loop_hdr, types::I64); // i
+                            let sum_p = bcx.block_params(loop_hdr)[0];
+                            let i_p = bcx.block_params(loop_hdr)[1];
+                            let cond =
+                                bcx.ins().icmp(IntCC::SignedLessThan, i_p, limit_v);
+                            bcx.ins()
+                                .brif(cond, loop_body, &[], loop_exit, &[BlockArg::Value(sum_p), BlockArg::Value(i_p)]);
+
+                            // Loop body: sum += i; i++
+                            bcx.switch_to_block(loop_body);
+                            let new_sum = bcx.ins().iadd(sum_p, i_p);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let new_i = bcx.ins().iadd(i_p, one);
+                            bcx.ins().jump(loop_hdr, &[BlockArg::Value(new_sum), BlockArg::Value(new_i)]);
+
+                            // Loop exit: store results back to slots
+                            bcx.switch_to_block(loop_exit);
+                            bcx.append_block_param(loop_exit, types::I64);
+                            bcx.append_block_param(loop_exit, types::I64);
+                            let final_sum = bcx.block_params(loop_exit)[0];
+                            let final_i = bcx.block_params(loop_exit)[1];
+                            bcx.ins().store(
+                                MemFlags::trusted(),
+                                final_sum,
+                                slot_base,
+                                sum_off,
+                            );
+                            bcx.ins()
+                                .store(MemFlags::trusted(), final_i, slot_base, i_off);
+                            // Continue — loop_exit is now the current block, next ops
+                            // will be emitted here or a fallthrough jump will be added
+                        }
+
+                        // Data ops — delegate to emit_data_op
+                        _ => {
+                            emit_data_op(
+                                &mut bcx,
+                                op,
+                                &mut stack,
+                                Some(slot_base),
+                                pow_i64_ref,
+                                pow_f64_ref,
+                                fmod_f64_ref,
+                                lognot_ref,
+                                &chunk.constants,
+                            )?;
+                        }
+                    }
+                }
+
+                // End of this basic block — if not terminated, handle fallthrough or return
+                if !block_terminated {
+                    if block_end == ops.len() {
+                        // Final block: return result
+                        let ret_val = if let Some((v, ty)) = stack.pop() {
+                            scalar_store_i64(&mut bcx, v, ty)
+                        } else {
+                            bcx.ins().iconst(types::I64, 0)
+                        };
+                        bcx.ins().return_(&[ret_val]);
+                        block_terminated = true;
+                    }
+                    // Non-final unterminated blocks get a fallthrough jump
+                    // at the top of the next iteration
+                }
+            }
+
+            bcx.seal_all_blocks();
+            bcx.finalize();
+        }
+
+        module.define_function(fid, &mut ctx).ok()?;
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().ok()?;
+        let ptr = module.get_finalized_function(fid);
+        let f = unsafe { std::mem::transmute::<*const u8, BlockFn>(ptr) };
+        Some(CompiledBlock { module, f })
+    }
+
+    // ── Block JIT cache ──
+
+    static BLOCK_CACHE: OnceLock<Mutex<HashMap<u64, Box<CompiledBlock>>>> = OnceLock::new();
+
+    fn block_cache() -> &'static Mutex<HashMap<u64, Box<CompiledBlock>>> {
+        BLOCK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Try to JIT-compile and run a chunk via the block JIT.
+    /// Returns `Some(result_i64)` on success, `None` if ineligible.
+    pub(crate) fn try_run_block(chunk: &Chunk, slots: &mut [i64]) -> Option<i64> {
+        let key = chunk.op_hash;
+        let cache = block_cache();
+
+        if let Ok(guard) = cache.lock() {
+            if let Some(compiled) = guard.get(&key) {
+                return Some(compiled.invoke(slots));
+            }
+        }
+
+        let compiled = compile_block(chunk)?;
+        let result = compiled.invoke(slots);
+
+        if let Ok(mut guard) = cache.lock() {
+            guard.insert(key, Box::new(compiled));
+        }
+
+        Some(result)
+    }
 }
 
 // ── Public API (always available) ──
@@ -1245,6 +1692,31 @@ impl JitCompiler {
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
     pub fn is_linear_eligible(&self, _chunk: &crate::Chunk) -> bool {
+        false
+    }
+
+    /// Try to compile and run a chunk via the block JIT (handles loops/branches).
+    /// Slots are read and written in-place. Returns `Some(result)` on success.
+    #[cfg(feature = "jit")]
+    pub fn try_run_block(&self, chunk: &crate::Chunk, slots: &mut [i64]) -> Option<i64> {
+        cranelift_jit_impl::try_run_block(chunk, slots)
+    }
+
+    /// Check if a chunk is eligible for block JIT.
+    #[cfg(feature = "jit")]
+    pub fn is_block_eligible(&self, chunk: &crate::Chunk) -> bool {
+        cranelift_jit_impl::is_block_eligible(chunk)
+    }
+
+    /// Stub when JIT feature is disabled.
+    #[cfg(not(feature = "jit"))]
+    pub fn try_run_block(&self, _chunk: &crate::Chunk, _slots: &mut [i64]) -> Option<i64> {
+        None
+    }
+
+    /// Stub when JIT feature is disabled.
+    #[cfg(not(feature = "jit"))]
+    pub fn is_block_eligible(&self, _chunk: &crate::Chunk) -> bool {
         false
     }
 }
