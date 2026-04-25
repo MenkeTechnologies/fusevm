@@ -15,6 +15,15 @@ categories = ["compilers"]
 serde = { version = "1", features = ["derive", "rc"] }
 tracing = "0.1"
 glob = "0.3"
+cranelift-jit = { version = "0.130", optional = true }
+cranelift-codegen = { version = "0.130", optional = true }
+cranelift-frontend = { version = "0.130", optional = true }
+cranelift-native = { version = "0.130", optional = true }
+cranelift-module = { version = "0.130", optional = true }
+
+[features]
+default = []
+jit = ["cranelift-jit", "cranelift-codegen", "cranelift-frontend", "cranelift-native", "cranelift-module"]
 
 [dev-dependencies]
 serde_json = "1"
