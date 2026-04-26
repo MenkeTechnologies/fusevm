@@ -5,14 +5,22 @@
 //! the pre-registered function pointer table — no name lookup at runtime.
 //!
 //! Usage in frontend compiler:
-//! ```ignore
+//! ```
+//! use fusevm::{ChunkBuilder, Op};
 //! use fusevm::shell_builtins::*;
-//! builder.emit(Op::CallBuiltin(BUILTIN_CD, 1), line);
+//!
+//! let mut builder = ChunkBuilder::new();
+//! builder.emit(Op::CallBuiltin(BUILTIN_CD, 1), 1);
 //! ```
 //!
 //! Usage in frontend VM init:
-//! ```ignore
-//! vm.register_builtin(BUILTIN_CD, |vm, argc| { ... });
+//! ```
+//! use fusevm::{ChunkBuilder, VM, Value};
+//! use fusevm::shell_builtins::*;
+//!
+//! let chunk = ChunkBuilder::new().build();
+//! let mut vm = VM::new(chunk);
+//! vm.register_builtin(BUILTIN_CD, |_vm, _argc| Value::Status(0));
 //! ```
 
 // ═══════════════════════════════════════════════════════════════════════════

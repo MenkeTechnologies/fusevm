@@ -38,13 +38,6 @@ fn expect_bool(ops: &[(Op, u32)], expected: bool) {
     }
 }
 
-fn expect_str(ops: &[(Op, u32)], expected: &str) {
-    match run(ops) {
-        VMResult::Ok(Value::Str(s)) => assert_eq!(s.as_str(), expected),
-        other => panic!("expected Str({:?}), got {:?}", expected, other),
-    }
-}
-
 // ── Arithmetic ──
 
 #[test]
