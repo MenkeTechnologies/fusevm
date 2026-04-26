@@ -13,7 +13,7 @@ use std::sync::Arc;
 ///
 /// Designed to be small (1 word tag + 1-2 words payload) so the
 /// dispatch loop stays cache-friendly.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum Value {
     /// No value / uninitialized
     #[default]
@@ -178,6 +178,7 @@ impl Hash for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_truthiness() {
@@ -197,5 +198,130 @@ mod tests {
         assert_eq!(Value::Int(42).to_str(), "42");
         assert_eq!(Value::Float(3.14).to_int(), 3);
         assert_eq!(Value::Bool(true).to_int(), 1);
+    }
+
+    #[test]
+    fn truthiness_for_floats() {
+        assert!(!Value::Float(0.0).is_truthy());
+        assert!(!Value::Float(-0.0).is_truthy());
+        assert!(Value::Float(0.1).is_truthy());
+        assert!(Value::Float(f64::NAN).is_truthy()); // NaN != 0.0 so truthy
+        assert!(Value::Float(f64::INFINITY).is_truthy());
+    }
+
+    #[test]
+    fn truthiness_for_collections() {
+        assert!(!Value::Array(vec![]).is_truthy());
+        assert!(Value::Array(vec![Value::Undef]).is_truthy()); // non-empty array
+        assert!(!Value::Hash(HashMap::new()).is_truthy());
+    }
+
+    #[test]
+    fn to_int_handles_all_variants() {
+        assert_eq!(Value::Undef.to_int(), 0);
+        assert_eq!(Value::Int(-7).to_int(), -7);
+        assert_eq!(Value::Float(3.99).to_int(), 3); // truncation
+        assert_eq!(Value::Float(-3.99).to_int(), -3); // truncation toward zero
+        assert_eq!(Value::Bool(true).to_int(), 1);
+        assert_eq!(Value::Bool(false).to_int(), 0);
+        assert_eq!(Value::Status(42).to_int(), 42);
+        assert_eq!(Value::Status(-1).to_int(), -1);
+        assert_eq!(Value::str("not a number").to_int(), 0);
+        assert_eq!(Value::Array(vec![Value::Int(1), Value::Int(2)]).to_int(), 2);
+    }
+
+    #[test]
+    fn to_float_handles_all_variants() {
+        assert_eq!(Value::Int(5).to_float(), 5.0);
+        assert_eq!(Value::Float(2.5).to_float(), 2.5);
+        assert_eq!(Value::Bool(true).to_float(), 1.0);
+        assert_eq!(Value::Bool(false).to_float(), 0.0);
+        assert_eq!(Value::Status(7).to_float(), 7.0);
+        assert_eq!(Value::str("3.14").to_float(), 3.14);
+        assert_eq!(Value::str("garbage").to_float(), 0.0);
+    }
+
+    #[test]
+    fn as_str_cow_borrowed_for_str() {
+        let v = Value::str("hello");
+        match v.as_str_cow() {
+            Cow::Borrowed(s) => assert_eq!(s, "hello"),
+            Cow::Owned(_) => panic!("expected borrowed"),
+        }
+    }
+
+    #[test]
+    fn as_str_cow_owned_for_int() {
+        match Value::Int(42).as_str_cow() {
+            Cow::Owned(s) => assert_eq!(s, "42"),
+            Cow::Borrowed(_) => panic!("expected owned"),
+        }
+    }
+
+    #[test]
+    fn array_to_str_joins_with_space() {
+        let v = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert_eq!(v.to_str(), "1 2 3");
+    }
+
+    #[test]
+    fn len_returns_correct_size_per_variant() {
+        assert_eq!(Value::str("abc").len(), 3);
+        assert_eq!(Value::Array(vec![Value::Int(1); 5]).len(), 5);
+        assert_eq!(Value::Hash(HashMap::new()).len(), 0);
+        // Int falls through to to_str().len()
+        assert_eq!(Value::Int(12345).len(), 5);
+    }
+
+    #[test]
+    fn is_empty_matches_len_zero() {
+        assert!(Value::str("").is_empty());
+        assert!(!Value::str("x").is_empty());
+        assert!(Value::Array(vec![]).is_empty());
+        assert!(!Value::Array(vec![Value::Int(0)]).is_empty());
+    }
+
+    #[test]
+    fn equality_via_partial_eq() {
+        // PartialEq allows direct comparison — useful in tests.
+        assert_eq!(Value::Int(42), Value::Int(42));
+        assert_ne!(Value::Int(42), Value::Int(43));
+        assert_eq!(Value::str("hi"), Value::str("hi"));
+        // NaN != NaN per IEEE 754
+        assert_ne!(Value::Float(f64::NAN), Value::Float(f64::NAN));
+    }
+
+    #[test]
+    fn hash_impl_handles_floats_via_bits() {
+        // Hash impl must be consistent: f64 hashed as bit-pattern.
+        // Two NaN values with same bits hash equal even though NaN != NaN.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let nan1 = Value::Float(f64::NAN);
+        let nan2 = Value::Float(f64::NAN);
+        let mut h1 = DefaultHasher::new();
+        nan1.hash(&mut h1);
+        let mut h2 = DefaultHasher::new();
+        nan2.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn serde_roundtrip_preserves_value() {
+        // Verify Value survives serialization without information loss.
+        let cases = vec![
+            Value::Undef,
+            Value::Bool(true),
+            Value::Int(-42),
+            Value::Float(3.14),
+            Value::str("hello"),
+            Value::Status(127),
+        ];
+        for original in cases {
+            let json = serde_json::to_string(&original).unwrap();
+            let restored: Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(original, restored);
+        }
     }
 }

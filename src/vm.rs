@@ -311,22 +311,22 @@ impl VM {
                 Op::Negate => {
                     let val = self.pop();
                     self.push(match val {
-                        Value::Int(n) => Value::Int(-n),
+                        Value::Int(n) => Value::Int(n.wrapping_neg()),
                         _ => Value::Float(-val.to_float()),
                     });
                 }
                 Op::Inc => {
                     let val = self.pop();
                     self.push(match val {
-                        Value::Int(n) => Value::Int(n + 1),
-                        _ => Value::Int(val.to_int() + 1),
+                        Value::Int(n) => Value::Int(n.wrapping_add(1)),
+                        _ => Value::Int(val.to_int().wrapping_add(1)),
                     });
                 }
                 Op::Dec => {
                     let val = self.pop();
                     self.push(match val {
-                        Value::Int(n) => Value::Int(n - 1),
-                        _ => Value::Int(val.to_int() - 1),
+                        Value::Int(n) => Value::Int(n.wrapping_sub(1)),
+                        _ => Value::Int(val.to_int().wrapping_sub(1)),
                     });
                 }
 
