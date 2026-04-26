@@ -31,23 +31,23 @@ fn fib_iterative_chunk(n: i64) -> fusevm::Chunk {
     let fib_ip = b.current_pos();
     b.add_sub_entry(fib_name, fib_ip);
     // slots: 0=a, 1=b, 2=i, 3=temp, arg is on stack
-    b.emit(Op::SetSlot(2), 2);        // i = n (from stack arg)
+    b.emit(Op::SetSlot(2), 2); // i = n (from stack arg)
     b.emit(Op::LoadInt(0), 2);
-    b.emit(Op::SetSlot(0), 2);        // a = 0
+    b.emit(Op::SetSlot(0), 2); // a = 0
     b.emit(Op::LoadInt(1), 2);
-    b.emit(Op::SetSlot(1), 2);        // b = 1
-    // loop: while i > 0
+    b.emit(Op::SetSlot(1), 2); // b = 1
+                               // loop: while i > 0
     let loop_start = b.current_pos();
-    b.emit(Op::GetSlot(2), 2);        // push i
+    b.emit(Op::GetSlot(2), 2); // push i
     b.emit(Op::LoadInt(0), 2);
-    b.emit(Op::NumLe, 2);             // i <= 0?
+    b.emit(Op::NumLe, 2); // i <= 0?
     let exit_jump = b.emit(Op::JumpIfTrue(0), 2);
     // temp = a + b
     b.emit(Op::GetSlot(0), 2);
     b.emit(Op::GetSlot(1), 2);
     b.emit(Op::Add, 2);
-    b.emit(Op::SetSlot(3), 2);        // temp = a+b
-    // a = b
+    b.emit(Op::SetSlot(3), 2); // temp = a+b
+                               // a = b
     b.emit(Op::GetSlot(1), 2);
     b.emit(Op::SetSlot(0), 2);
     // b = temp
@@ -61,7 +61,7 @@ fn fib_iterative_chunk(n: i64) -> fusevm::Chunk {
     // exit
     let exit_ip = b.current_pos();
     b.patch_jump(exit_jump, exit_ip);
-    b.emit(Op::GetSlot(0), 2);        // return a
+    b.emit(Op::GetSlot(0), 2); // return a
     b.emit(Op::ReturnValue, 2);
 
     let end_ip = b.current_pos();
@@ -92,20 +92,20 @@ fn fib_recursive_chunk(n: i64) -> fusevm::Chunk {
     // fib(n): if n <= 1 return n; else return fib(n-1) + fib(n-2)
     let fib_ip = b.current_pos();
     b.add_sub_entry(fib_name, fib_ip);
-    b.emit(Op::SetSlot(0), 2);          // slot0 = n
+    b.emit(Op::SetSlot(0), 2); // slot0 = n
     b.emit(Op::GetSlot(0), 2);
     b.emit(Op::LoadInt(1), 2);
-    b.emit(Op::NumLe, 2);               // n <= 1?
+    b.emit(Op::NumLe, 2); // n <= 1?
     let base_jump = b.emit(Op::JumpIfTrue(0), 2);
     // recursive case
     b.emit(Op::GetSlot(0), 2);
-    b.emit(Op::Dec, 2);                 // n-1
-    b.emit(Op::Call(fib_name, 1), 2);   // fib(n-1)
+    b.emit(Op::Dec, 2); // n-1
+    b.emit(Op::Call(fib_name, 1), 2); // fib(n-1)
     b.emit(Op::GetSlot(0), 2);
     b.emit(Op::LoadInt(2), 2);
-    b.emit(Op::Sub, 2);                 // n-2
-    b.emit(Op::Call(fib_name, 1), 2);   // fib(n-2)
-    b.emit(Op::Add, 2);                 // fib(n-1) + fib(n-2)
+    b.emit(Op::Sub, 2); // n-2
+    b.emit(Op::Call(fib_name, 1), 2); // fib(n-2)
+    b.emit(Op::Add, 2); // fib(n-1) + fib(n-2)
     b.emit(Op::ReturnValue, 2);
     // base case
     let base_ip = b.current_pos();
@@ -201,21 +201,21 @@ fn nested_loop_chunk(outer: i32, inner: i32) -> fusevm::Chunk {
     b.emit(Op::PushFrame, 1);
     // slot 0 = sum, slot 1 = i, slot 2 = j
     b.emit(Op::LoadInt(0), 1);
-    b.emit(Op::SetSlot(0), 1);       // sum = 0
+    b.emit(Op::SetSlot(0), 1); // sum = 0
     b.emit(Op::LoadInt(0), 1);
-    b.emit(Op::SetSlot(1), 1);       // i = 0
-    // ip=5: outer loop
+    b.emit(Op::SetSlot(1), 1); // i = 0
+                               // ip=5: outer loop
     let outer_start = b.current_pos();
     b.emit(Op::LoadInt(0), 1);
-    b.emit(Op::SetSlot(2), 1);       // j = 0
-    // ip=7: inner loop
+    b.emit(Op::SetSlot(2), 1); // j = 0
+                               // ip=7: inner loop
     let inner_start = b.current_pos();
-    b.emit(Op::GetSlot(0), 1);       // sum
-    b.emit(Op::GetSlot(1), 1);       // i
-    b.emit(Op::GetSlot(2), 1);       // j
-    b.emit(Op::Add, 1);              // i + j
-    b.emit(Op::Add, 1);              // sum + (i+j)
-    b.emit(Op::SetSlot(0), 1);       // sum = ...
+    b.emit(Op::GetSlot(0), 1); // sum
+    b.emit(Op::GetSlot(1), 1); // i
+    b.emit(Op::GetSlot(2), 1); // j
+    b.emit(Op::Add, 1); // i + j
+    b.emit(Op::Add, 1); // sum + (i+j)
+    b.emit(Op::SetSlot(0), 1); // sum = ...
     b.emit(Op::SlotIncLtIntJumpBack(2, inner, inner_start), 1);
     // inner done
     b.emit(Op::SlotIncLtIntJumpBack(1, outer, outer_start), 1);
@@ -263,8 +263,8 @@ fn ackermann_chunk() -> fusevm::Chunk {
     // ack(m, n): slots 0=m, 1=n
     let ack_ip = b.current_pos();
     b.add_sub_entry(ack_name, ack_ip);
-    b.emit(Op::SetSlot(1), 2);       // n (second arg, popped first)
-    b.emit(Op::SetSlot(0), 2);       // m (first arg)
+    b.emit(Op::SetSlot(1), 2); // n (second arg, popped first)
+    b.emit(Op::SetSlot(0), 2); // m (first arg)
 
     // if m == 0: return n + 1
     b.emit(Op::GetSlot(0), 2);
@@ -279,14 +279,14 @@ fn ackermann_chunk() -> fusevm::Chunk {
     let n0_jump = b.emit(Op::JumpIfTrue(0), 2);
 
     // else: return ack(m-1, ack(m, n-1))
-    b.emit(Op::GetSlot(0), 2);       // m
-    b.emit(Op::GetSlot(1), 2);       // n
-    b.emit(Op::Dec, 2);              // n-1
+    b.emit(Op::GetSlot(0), 2); // m
+    b.emit(Op::GetSlot(1), 2); // n
+    b.emit(Op::Dec, 2); // n-1
     b.emit(Op::Call(ack_name, 2), 2); // ack(m, n-1)
-    // now stack has: result of inner ack
-    b.emit(Op::GetSlot(0), 2);       // m
-    b.emit(Op::Dec, 2);              // m-1
-    b.emit(Op::Swap, 2);             // swap so args are (m-1, result)
+                                      // now stack has: result of inner ack
+    b.emit(Op::GetSlot(0), 2); // m
+    b.emit(Op::Dec, 2); // m-1
+    b.emit(Op::Swap, 2); // swap so args are (m-1, result)
     b.emit(Op::Call(ack_name, 2), 2); // ack(m-1, ack(m, n-1))
     b.emit(Op::ReturnValue, 2);
 
@@ -294,8 +294,8 @@ fn ackermann_chunk() -> fusevm::Chunk {
     let n0_ip = b.current_pos();
     b.patch_jump(n0_jump, n0_ip);
     b.emit(Op::GetSlot(0), 2);
-    b.emit(Op::Dec, 2);              // m-1
-    b.emit(Op::LoadInt(1), 2);       // 1
+    b.emit(Op::Dec, 2); // m-1
+    b.emit(Op::LoadInt(1), 2); // 1
     b.emit(Op::Call(ack_name, 2), 2); // ack(m-1, 1)
     b.emit(Op::ReturnValue, 2);
 
@@ -303,7 +303,7 @@ fn ackermann_chunk() -> fusevm::Chunk {
     let m0_ip = b.current_pos();
     b.patch_jump(m0_jump, m0_ip);
     b.emit(Op::GetSlot(1), 2);
-    b.emit(Op::Inc, 2);              // n + 1
+    b.emit(Op::Inc, 2); // n + 1
     b.emit(Op::ReturnValue, 2);
 
     let end_ip = b.current_pos();
@@ -342,7 +342,7 @@ fn bench_dispatch_1m(c: &mut Criterion) {
 
 fn bench_string_build_10k(c: &mut Criterion) {
     let mut builder = ChunkBuilder::new();
-    let const_idx = builder.add_constant(Value::str("x"));
+    let _const_idx = builder.add_constant(Value::str("x"));
     let mut b2 = ChunkBuilder::new();
     let ci = b2.add_constant(Value::str("x"));
     b2.emit(Op::PushFrame, 1);
@@ -380,10 +380,13 @@ fn bench_string_build_10k_native(c: &mut Criterion) {
 fn bench_sum_1m_block_jit_unfused(c: &mut Criterion) {
     let chunk = sum_unfused_chunk(1_000_000);
     let jit = fusevm::JitCompiler::new();
-    assert!(jit.is_block_eligible(&chunk), "unfused sum loop should be block-eligible");
+    assert!(
+        jit.is_block_eligible(&chunk),
+        "unfused sum loop should be block-eligible"
+    );
     // warm cache
     let mut slots = vec![0i64; 4];
-    let _ = jit.try_run_block(&chunk, &mut slots);
+    let _ = jit.try_run_block_eager(&chunk, &mut slots);
 
     c.bench_function("sum_1M_block_jit_unfused", |b| {
         b.iter(|| {
@@ -398,9 +401,12 @@ fn bench_sum_1m_block_jit_unfused(c: &mut Criterion) {
 fn bench_sum_1m_block_jit_fused(c: &mut Criterion) {
     let chunk = sum_fused_chunk(1_000_000);
     let jit = fusevm::JitCompiler::new();
-    assert!(jit.is_block_eligible(&chunk), "fused sum should be block-eligible");
+    assert!(
+        jit.is_block_eligible(&chunk),
+        "fused sum should be block-eligible"
+    );
     let mut slots = vec![0i64; 4];
-    let _ = jit.try_run_block(&chunk, &mut slots);
+    let _ = jit.try_run_block_eager(&chunk, &mut slots);
 
     c.bench_function("sum_1M_block_jit_fused", |b| {
         b.iter(|| {
@@ -417,7 +423,7 @@ fn bench_nested_100x100_block_jit(c: &mut Criterion) {
     let jit = fusevm::JitCompiler::new();
     assert!(jit.is_block_eligible(&chunk));
     let mut slots = vec![0i64; 4];
-    let _ = jit.try_run_block(&chunk, &mut slots);
+    let _ = jit.try_run_block_eager(&chunk, &mut slots);
 
     c.bench_function("nested_100x100_block_jit", |b| {
         b.iter(|| {

@@ -184,7 +184,14 @@ fn bench_mixed_100(c: &mut Criterion) {
 fn bench_bitwise_200(c: &mut Criterion) {
     let ops = slot_bitwise_ops(200);
     let slots = [0x_DEAD_BEEFi64];
-    bench_slot_workload(c, "slot_bitwise_200", &ops, &slots, native_slot_bitwise, 200);
+    bench_slot_workload(
+        c,
+        "slot_bitwise_200",
+        &ops,
+        &slots,
+        native_slot_bitwise,
+        200,
+    );
 }
 
 fn bench_float_200(c: &mut Criterion) {

@@ -62,7 +62,7 @@ pub trait JitExtension: Send + Sync {
 #[cfg(feature = "jit")]
 mod cranelift_jit_impl {
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
 
     use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
     use cranelift_codegen::ir::immediates::Ieee64;
@@ -70,7 +70,7 @@ mod cranelift_jit_impl {
     use cranelift_codegen::ir::{AbiParam, BlockArg, InstBuilder, MemFlags, UserFuncName, Value};
     use cranelift_codegen::isa::OwnedTargetIsa;
     use cranelift_codegen::settings::{self, Configurable};
-    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
     use cranelift_jit::{JITBuilder, JITModule};
     use cranelift_module::{default_libcall_names, Linkage, Module};
 
@@ -1058,46 +1058,43 @@ mod cranelift_jit_impl {
         Some(CompiledLinear { module, run })
     }
 
-    // ── Linear JIT cache ──
+    // ── Linear JIT cache (per-thread, lock-free) ──
 
-    static LINEAR_CACHE: OnceLock<Mutex<HashMap<u64, Box<CompiledLinear>>>> = OnceLock::new();
-
-    fn linear_cache() -> &'static Mutex<HashMap<u64, Box<CompiledLinear>>> {
-        LINEAR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    thread_local! {
+        static LINEAR_CACHE_TLS: std::cell::RefCell<HashMap<u64, Box<CompiledLinear>>> =
+            std::cell::RefCell::new(HashMap::new());
     }
 
     /// Try to JIT-compile and run a chunk's ops as a linear sequence.
     /// Returns `Some(Value)` on success, `None` if the chunk isn't eligible.
     pub(crate) fn try_run_linear(chunk: &Chunk, slots: &[i64]) -> Option<FuseValue> {
         let key = chunk.op_hash;
-        let cache = linear_cache();
-
-        // Check cache first
-        if let Ok(guard) = cache.lock() {
-            if let Some(compiled) = guard.get(&key) {
-                let slot_ptr = if slots.is_empty() {
-                    std::ptr::null()
-                } else {
-                    slots.as_ptr()
-                };
-                let result = compiled.invoke(slot_ptr);
-                return Some(compiled.result_to_value(result));
-            }
-        }
-
-        // Compile
-        let compiled = compile_linear(chunk)?;
         let slot_ptr = if slots.is_empty() {
             std::ptr::null()
         } else {
             slots.as_ptr()
         };
+
+        // Cache hit: invoke and return
+        let cached = LINEAR_CACHE_TLS.with(|cache_cell| {
+            let cache = cache_cell.borrow();
+            cache.get(&key).map(|c| {
+                let result = c.invoke(slot_ptr);
+                c.result_to_value(result)
+            })
+        });
+        if let Some(v) = cached {
+            return Some(v);
+        }
+
+        // Cache miss: compile, invoke, store
+        let compiled = compile_linear(chunk)?;
         let result = compiled.invoke(slot_ptr);
         let value = compiled.result_to_value(result);
 
-        if let Ok(mut guard) = cache.lock() {
-            guard.insert(key, Box::new(compiled));
-        }
+        LINEAR_CACHE_TLS.with(|cache_cell| {
+            cache_cell.borrow_mut().insert(key, Box::new(compiled));
+        });
 
         Some(value)
     }
@@ -1111,22 +1108,41 @@ mod cranelift_jit_impl {
 
     use std::collections::BTreeSet;
 
-    type BlockFn = unsafe extern "C" fn(*mut i64) -> i64;
+    // Specialized block-JIT function pointer types.
+    // Saves a register by omitting the slot pointer when the chunk doesn't use slots.
+    type BlockFnSlotsI = unsafe extern "C" fn(*mut i64) -> i64;
+    type BlockFnSlotsF = unsafe extern "C" fn(*mut i64) -> f64;
+    type BlockFnNoSlotsI = unsafe extern "C" fn() -> i64;
+    type BlockFnNoSlotsF = unsafe extern "C" fn() -> f64;
+
+    #[allow(dead_code)] // Variants reserved for future signature specialization.
+    pub(crate) enum BlockRun {
+        SlotsI(BlockFnSlotsI),
+        SlotsF(BlockFnSlotsF),
+        NoSlotsI(BlockFnNoSlotsI),
+        NoSlotsF(BlockFnNoSlotsF),
+    }
 
     pub(crate) struct CompiledBlock {
         #[allow(dead_code)]
         module: JITModule,
-        f: BlockFn,
+        run: BlockRun,
     }
 
     impl CompiledBlock {
+        /// Invoke and return the result as i64 (truncating float results).
         pub(crate) fn invoke(&self, slots: &mut [i64]) -> i64 {
             let ptr = if slots.is_empty() {
                 std::ptr::null_mut()
             } else {
                 slots.as_mut_ptr()
             };
-            unsafe { (self.f)(ptr) }
+            match &self.run {
+                BlockRun::SlotsI(f) => unsafe { f(ptr) },
+                BlockRun::NoSlotsI(f) => unsafe { f() },
+                BlockRun::SlotsF(f) => (unsafe { f(ptr) }) as i64,
+                BlockRun::NoSlotsF(f) => (unsafe { f() }) as i64,
+            }
         }
     }
 
@@ -1224,11 +1240,119 @@ mod cranelift_jit_impl {
         !ops.is_empty() && ops.iter().all(is_block_eligible_op)
     }
 
-    fn cond_to_i1(
-        bcx: &mut FunctionBuilder,
-        v: Value,
-        ty: JitTy,
-    ) -> cranelift_codegen::ir::Value {
+    /// Find the largest contiguous JIT-eligible region in a chunk.
+    /// A region is closed (all jump targets within the region must also be in
+    /// the region — bytecode-level jumps to outside the region disqualify it).
+    ///
+    /// Returns `(start, end)` op indices (end exclusive), or None if no
+    /// eligible region of useful size exists. Useful size = at least 8 ops.
+    pub(crate) fn find_jit_region(ops: &[Op]) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize)> = None;
+        let mut start: Option<usize> = None;
+
+        for (ip, op) in ops.iter().enumerate() {
+            if is_block_eligible_op(op) {
+                if start.is_none() {
+                    start = Some(ip);
+                }
+            } else if let Some(s) = start.take() {
+                let len = ip - s;
+                if len >= 4 && best.map_or(true, |(bs, be)| len > be - bs) {
+                    best = Some((s, ip));
+                }
+            }
+        }
+        // Tail region
+        if let Some(s) = start {
+            let len = ops.len() - s;
+            if len >= 4 && best.map_or(true, |(bs, be)| len > be - bs) {
+                best = Some((s, ops.len()));
+            }
+        }
+
+        // Verify all jumps within the region target inside the region.
+        // Rebase jumps locally if so; otherwise reject.
+        let (s, e) = best?;
+        for op in &ops[s..e] {
+            match op {
+                Op::Jump(t)
+                | Op::JumpIfTrue(t)
+                | Op::JumpIfFalse(t)
+                | Op::SlotLtIntJumpIfFalse(_, _, t)
+                | Op::SlotIncLtIntJumpBack(_, _, t) => {
+                    if *t < s || *t >= e {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some((s, e))
+    }
+
+    /// Extract a JIT region as a standalone sub-chunk with rebased jump targets.
+    /// The returned chunk has its op_hash recomputed.
+    pub(crate) fn extract_region(chunk: &Chunk, start: usize, end: usize) -> Chunk {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut sub = Chunk {
+            ops: Vec::with_capacity(end - start),
+            constants: chunk.constants.clone(),
+            names: chunk.names.clone(),
+            lines: chunk.lines[start..end].to_vec(),
+            sub_entries: Vec::new(),
+            block_ranges: Vec::new(),
+            source: chunk.source.clone(),
+            op_hash: 0,
+        };
+        for op in &chunk.ops[start..end] {
+            // Rebase jump targets to be local to the sub-chunk.
+            let new_op = match op {
+                Op::Jump(t) => Op::Jump(t - start),
+                Op::JumpIfTrue(t) => Op::JumpIfTrue(t - start),
+                Op::JumpIfFalse(t) => Op::JumpIfFalse(t - start),
+                Op::SlotLtIntJumpIfFalse(s, l, t) => Op::SlotLtIntJumpIfFalse(*s, *l, t - start),
+                Op::SlotIncLtIntJumpBack(s, l, t) => Op::SlotIncLtIntJumpBack(*s, *l, t - start),
+                other => other.clone(),
+            };
+            sub.ops.push(new_op);
+        }
+        let mut h = DefaultHasher::new();
+        sub.ops.hash(&mut h);
+        sub.constants.hash(&mut h);
+        sub.op_hash = h.finish();
+        sub
+    }
+
+    /// Collect all slot indices referenced by the chunk for promotion.
+    fn collect_slots(ops: &[Op]) -> Vec<u16> {
+        let mut slots = std::collections::BTreeSet::new();
+        for op in ops {
+            match op {
+                Op::GetSlot(s)
+                | Op::SetSlot(s)
+                | Op::PreIncSlot(s)
+                | Op::PreIncSlotVoid(s)
+                | Op::SlotLtIntJumpIfFalse(s, _, _)
+                | Op::SlotIncLtIntJumpBack(s, _, _) => {
+                    slots.insert(*s);
+                }
+                Op::AddAssignSlotVoid(a, b) => {
+                    slots.insert(*a);
+                    slots.insert(*b);
+                }
+                Op::AccumSumLoop(s, i, _) => {
+                    slots.insert(*s);
+                    slots.insert(*i);
+                }
+                _ => {}
+            }
+        }
+        slots.into_iter().collect()
+    }
+
+    fn cond_to_i1(bcx: &mut FunctionBuilder, v: Value, ty: JitTy) -> cranelift_codegen::ir::Value {
         match ty {
             JitTy::Int => bcx.ins().icmp_imm(IntCC::NotEqual, v, 0),
             JitTy::Float => {
@@ -1255,7 +1379,11 @@ mod cranelift_jit_impl {
             ps.params.push(AbiParam::new(types::I64));
             ps.params.push(AbiParam::new(types::I64));
             ps.returns.push(AbiParam::new(types::I64));
-            Some(module.declare_function("fusevm_jit_pow_i64", Linkage::Import, &ps).ok()?)
+            Some(
+                module
+                    .declare_function("fusevm_jit_pow_i64", Linkage::Import, &ps)
+                    .ok()?,
+            )
         } else {
             None
         };
@@ -1264,7 +1392,11 @@ mod cranelift_jit_impl {
             ps.params.push(AbiParam::new(types::F64));
             ps.params.push(AbiParam::new(types::F64));
             ps.returns.push(AbiParam::new(types::F64));
-            Some(module.declare_function("fusevm_jit_pow_f64", Linkage::Import, &ps).ok()?)
+            Some(
+                module
+                    .declare_function("fusevm_jit_pow_f64", Linkage::Import, &ps)
+                    .ok()?,
+            )
         } else {
             None
         };
@@ -1274,7 +1406,11 @@ mod cranelift_jit_impl {
             ps.params.push(AbiParam::new(types::F64));
             ps.params.push(AbiParam::new(types::F64));
             ps.returns.push(AbiParam::new(types::F64));
-            Some(module.declare_function("fusevm_jit_fmod_f64", Linkage::Import, &ps).ok()?)
+            Some(
+                module
+                    .declare_function("fusevm_jit_fmod_f64", Linkage::Import, &ps)
+                    .ok()?,
+            )
         } else {
             None
         };
@@ -1283,7 +1419,11 @@ mod cranelift_jit_impl {
             let mut ps = module.make_signature();
             ps.params.push(AbiParam::new(types::I64));
             ps.returns.push(AbiParam::new(types::I64));
-            Some(module.declare_function("fusevm_jit_lognot_i64", Linkage::Import, &ps).ok()?)
+            Some(
+                module
+                    .declare_function("fusevm_jit_lognot_i64", Linkage::Import, &ps)
+                    .ok()?,
+            )
         } else {
             None
         };
@@ -1293,7 +1433,9 @@ mod cranelift_jit_impl {
         sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 slots
         sig.returns.push(AbiParam::new(types::I64)); // result
 
-        let fid = module.declare_function("block_jit", Linkage::Local, &sig).ok()?;
+        let fid = module
+            .declare_function("block_jit", Linkage::Local, &sig)
+            .ok()?;
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
         ctx.func.name = UserFuncName::user(0, fid.as_u32());
@@ -1313,6 +1455,23 @@ mod cranelift_jit_impl {
             bcx.append_block_params_for_function_params(entry);
             bcx.switch_to_block(entry);
             let slot_base = bcx.block_params(entry)[0];
+
+            // ── Slot promotion: declare a Cranelift Variable per used slot, ──
+            // ── load each from the slot pointer at entry. After this, all   ──
+            // ── slot ops use Variables (register-allocated by Cranelift).   ──
+            let used_slots = collect_slots(ops);
+            let mut slot_vars: HashMap<u16, Variable> = HashMap::new();
+            for &slot in &used_slots {
+                let var = bcx.declare_var(types::I64);
+                let val = bcx.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    slot_base,
+                    (slot as i32) * 8,
+                );
+                bcx.def_var(var, val);
+                slot_vars.insert(slot, var);
+            }
 
             let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
             let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
@@ -1378,16 +1537,47 @@ mod cranelift_jit_impl {
                             block_terminated = true;
                         }
 
+                        // ── Slot data ops: use Variables (register-allocated) ──
+                        Op::GetSlot(slot) => {
+                            let var = *slot_vars.get(slot)?;
+                            let v = bcx.use_var(var);
+                            stack.push((v, JitTy::Int));
+                        }
+                        Op::SetSlot(slot) => {
+                            let var = *slot_vars.get(slot)?;
+                            let (v, ty) = stack.pop()?;
+                            let v_i = scalar_store_i64(&mut bcx, v, ty);
+                            bcx.def_var(var, v_i);
+                        }
+                        Op::PreIncSlot(slot) => {
+                            let var = *slot_vars.get(slot)?;
+                            let old = bcx.use_var(var);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let new = bcx.ins().iadd(old, one);
+                            bcx.def_var(var, new);
+                            stack.push((new, JitTy::Int));
+                        }
+                        Op::PreIncSlotVoid(slot) => {
+                            let var = *slot_vars.get(slot)?;
+                            let old = bcx.use_var(var);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let new = bcx.ins().iadd(old, one);
+                            bcx.def_var(var, new);
+                        }
+                        Op::AddAssignSlotVoid(a_slot, b_slot) => {
+                            let a_var = *slot_vars.get(a_slot)?;
+                            let b_var = *slot_vars.get(b_slot)?;
+                            let va = bcx.use_var(a_var);
+                            let vb = bcx.use_var(b_var);
+                            let sum = bcx.ins().iadd(va, vb);
+                            bcx.def_var(a_var, sum);
+                        }
+
                         Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
-                            let val = bcx.ins().load(
-                                types::I64,
-                                MemFlags::trusted(),
-                                slot_base,
-                                (*slot as i32) * 8,
-                            );
+                            let var = *slot_vars.get(slot)?;
+                            let val = bcx.use_var(var);
                             let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
-                            let is_lt =
-                                bcx.ins().icmp(IntCC::SignedLessThan, val, limit_v);
+                            let is_lt = bcx.ins().icmp(IntCC::SignedLessThan, val, limit_v);
                             let target_block = *block_map.get(target)?;
                             let fall = if ip + 1 < ops.len() {
                                 *block_map.get(&(ip + 1))?
@@ -1400,15 +1590,13 @@ mod cranelift_jit_impl {
                         }
 
                         Op::SlotIncLtIntJumpBack(slot, limit, target) => {
-                            let off = (*slot as i32) * 8;
-                            let old =
-                                bcx.ins().load(types::I64, MemFlags::trusted(), slot_base, off);
+                            let var = *slot_vars.get(slot)?;
+                            let old = bcx.use_var(var);
                             let one = bcx.ins().iconst(types::I64, 1);
                             let new = bcx.ins().iadd(old, one);
-                            bcx.ins().store(MemFlags::trusted(), new, slot_base, off);
+                            bcx.def_var(var, new);
                             let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
-                            let is_lt =
-                                bcx.ins().icmp(IntCC::SignedLessThan, new, limit_v);
+                            let is_lt = bcx.ins().icmp(IntCC::SignedLessThan, new, limit_v);
                             let target_block = *block_map.get(target)?;
                             let fall = if ip + 1 < ops.len() {
                                 *block_map.get(&(ip + 1))?
@@ -1420,27 +1608,20 @@ mod cranelift_jit_impl {
                         }
 
                         Op::AccumSumLoop(sum_slot, i_slot, limit) => {
-                            let sum_off = (*sum_slot as i32) * 8;
-                            let i_off = (*i_slot as i32) * 8;
-                            let sum_init = bcx.ins().load(
-                                types::I64,
-                                MemFlags::trusted(),
-                                slot_base,
-                                sum_off,
-                            );
-                            let i_init = bcx.ins().load(
-                                types::I64,
-                                MemFlags::trusted(),
-                                slot_base,
-                                i_off,
-                            );
+                            let sum_var = *slot_vars.get(sum_slot)?;
+                            let i_var = *slot_vars.get(i_slot)?;
+                            let sum_init = bcx.use_var(sum_var);
+                            let i_init = bcx.use_var(i_var);
                             let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
 
                             let loop_hdr = bcx.create_block();
                             let loop_body = bcx.create_block();
                             let loop_exit = bcx.create_block();
 
-                            bcx.ins().jump(loop_hdr, &[BlockArg::Value(sum_init), BlockArg::Value(i_init)]);
+                            bcx.ins().jump(
+                                loop_hdr,
+                                &[BlockArg::Value(sum_init), BlockArg::Value(i_init)],
+                            );
 
                             // Loop header: check i < limit
                             bcx.switch_to_block(loop_hdr);
@@ -1448,34 +1629,33 @@ mod cranelift_jit_impl {
                             bcx.append_block_param(loop_hdr, types::I64); // i
                             let sum_p = bcx.block_params(loop_hdr)[0];
                             let i_p = bcx.block_params(loop_hdr)[1];
-                            let cond =
-                                bcx.ins().icmp(IntCC::SignedLessThan, i_p, limit_v);
-                            bcx.ins()
-                                .brif(cond, loop_body, &[], loop_exit, &[BlockArg::Value(sum_p), BlockArg::Value(i_p)]);
+                            let cond = bcx.ins().icmp(IntCC::SignedLessThan, i_p, limit_v);
+                            bcx.ins().brif(
+                                cond,
+                                loop_body,
+                                &[],
+                                loop_exit,
+                                &[BlockArg::Value(sum_p), BlockArg::Value(i_p)],
+                            );
 
                             // Loop body: sum += i; i++
                             bcx.switch_to_block(loop_body);
                             let new_sum = bcx.ins().iadd(sum_p, i_p);
                             let one = bcx.ins().iconst(types::I64, 1);
                             let new_i = bcx.ins().iadd(i_p, one);
-                            bcx.ins().jump(loop_hdr, &[BlockArg::Value(new_sum), BlockArg::Value(new_i)]);
+                            bcx.ins().jump(
+                                loop_hdr,
+                                &[BlockArg::Value(new_sum), BlockArg::Value(new_i)],
+                            );
 
-                            // Loop exit: store results back to slots
+                            // Loop exit: write back to slot variables
                             bcx.switch_to_block(loop_exit);
                             bcx.append_block_param(loop_exit, types::I64);
                             bcx.append_block_param(loop_exit, types::I64);
                             let final_sum = bcx.block_params(loop_exit)[0];
                             let final_i = bcx.block_params(loop_exit)[1];
-                            bcx.ins().store(
-                                MemFlags::trusted(),
-                                final_sum,
-                                slot_base,
-                                sum_off,
-                            );
-                            bcx.ins()
-                                .store(MemFlags::trusted(), final_i, slot_base, i_off);
-                            // Continue — loop_exit is now the current block, next ops
-                            // will be emitted here or a fallthrough jump will be added
+                            bcx.def_var(sum_var, final_sum);
+                            bcx.def_var(i_var, final_i);
                         }
 
                         // Data ops — delegate to emit_data_op
@@ -1498,12 +1678,19 @@ mod cranelift_jit_impl {
                 // End of this basic block — if not terminated, handle fallthrough or return
                 if !block_terminated {
                     if block_end == ops.len() {
-                        // Final block: return result
+                        // Final block: spill promoted slot variables to memory, then return
                         let ret_val = if let Some((v, ty)) = stack.pop() {
                             scalar_store_i64(&mut bcx, v, ty)
                         } else {
                             bcx.ins().iconst(types::I64, 0)
                         };
+                        // Write all slot Variables back to the slot pointer
+                        // (caller observes the final state of the slot array)
+                        for (&slot, &var) in &slot_vars {
+                            let val = bcx.use_var(var);
+                            bcx.ins()
+                                .store(MemFlags::trusted(), val, slot_base, (slot as i32) * 8);
+                        }
                         bcx.ins().return_(&[ret_val]);
                         block_terminated = true;
                     }
@@ -1520,38 +1707,75 @@ mod cranelift_jit_impl {
         module.clear_context(&mut ctx);
         module.finalize_definitions().ok()?;
         let ptr = module.get_finalized_function(fid);
-        let f = unsafe { std::mem::transmute::<*const u8, BlockFn>(ptr) };
-        Some(CompiledBlock { module, f })
+        // Currently always SlotsI: signature is fn(*mut i64) -> i64.
+        // Future specialization: detect no-slots chunks → NoSlotsI;
+        // detect float-returning chunks → SlotsF/NoSlotsF.
+        let run = BlockRun::SlotsI(unsafe { std::mem::transmute::<*const u8, BlockFnSlotsI>(ptr) });
+        Some(CompiledBlock { module, run })
     }
 
-    // ── Block JIT cache ──
+    // ── Block JIT cache (per-thread, lock-free) ──
+    //
+    // Each thread has its own cache — JITModule is not Send anyway, and
+    // VMs are single-threaded per instance. No mutex overhead per call.
+    // Hot-counts are also tracked here for tiered compilation.
 
-    static BLOCK_CACHE: OnceLock<Mutex<HashMap<u64, Box<CompiledBlock>>>> = OnceLock::new();
+    use std::cell::RefCell;
 
-    fn block_cache() -> &'static Mutex<HashMap<u64, Box<CompiledBlock>>> {
-        BLOCK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    struct BlockCacheEntry {
+        /// Number of times we've been asked to run this chunk.
+        hot_count: u32,
+        /// Compiled native code (set after threshold).
+        compiled: Option<Box<CompiledBlock>>,
     }
+
+    thread_local! {
+        static BLOCK_CACHE_TLS: RefCell<HashMap<u64, BlockCacheEntry>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Tiered compilation threshold — JIT after N interpreter runs.
+    /// Below this, `try_run_block` returns None so the caller falls back
+    /// to the interpreter. This avoids paying compile cost for one-shot chunks.
+    const HOT_THRESHOLD: u32 = 10;
 
     /// Try to JIT-compile and run a chunk via the block JIT.
-    /// Returns `Some(result_i64)` on success, `None` if ineligible.
+    /// Returns `Some(result_i64)` on success, `None` if ineligible OR not yet hot.
     pub(crate) fn try_run_block(chunk: &Chunk, slots: &mut [i64]) -> Option<i64> {
-        let key = chunk.op_hash;
-        let cache = block_cache();
+        try_run_block_inner(chunk, slots, HOT_THRESHOLD)
+    }
 
-        if let Ok(guard) = cache.lock() {
-            if let Some(compiled) = guard.get(&key) {
+    /// Like `try_run_block` but compiles immediately (no warmup). For tests
+    /// and synthetic benchmarks where you want to skip the tiered policy.
+    pub(crate) fn try_run_block_eager(chunk: &Chunk, slots: &mut [i64]) -> Option<i64> {
+        try_run_block_inner(chunk, slots, 0)
+    }
+
+    fn try_run_block_inner(chunk: &Chunk, slots: &mut [i64], threshold: u32) -> Option<i64> {
+        let key = chunk.op_hash;
+
+        BLOCK_CACHE_TLS.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            let entry = cache.entry(key).or_insert(BlockCacheEntry {
+                hot_count: 0,
+                compiled: None,
+            });
+
+            if let Some(ref compiled) = entry.compiled {
                 return Some(compiled.invoke(slots));
             }
-        }
 
-        let compiled = compile_block(chunk)?;
-        let result = compiled.invoke(slots);
+            entry.hot_count = entry.hot_count.saturating_add(1);
+            if entry.hot_count <= threshold {
+                return None; // not hot yet — caller falls back to interpreter
+            }
 
-        if let Ok(mut guard) = cache.lock() {
-            guard.insert(key, Box::new(compiled));
-        }
-
-        Some(result)
+            // Compile on threshold cross
+            let compiled = compile_block(chunk)?;
+            let result = compiled.invoke(slots);
+            entry.compiled = Some(Box::new(compiled));
+            Some(result)
+        })
     }
 }
 
@@ -1697,9 +1921,20 @@ impl JitCompiler {
 
     /// Try to compile and run a chunk via the block JIT (handles loops/branches).
     /// Slots are read and written in-place. Returns `Some(result)` on success.
+    ///
+    /// Tiered: returns `None` for the first N invocations of a given chunk so the
+    /// caller falls back to the interpreter. After the chunk crosses the
+    /// hot-threshold, compiles and caches the native code.
     #[cfg(feature = "jit")]
     pub fn try_run_block(&self, chunk: &crate::Chunk, slots: &mut [i64]) -> Option<i64> {
         cranelift_jit_impl::try_run_block(chunk, slots)
+    }
+
+    /// Like `try_run_block` but skips the tiered policy — compiles immediately
+    /// on first call. Use for tests, microbenchmarks, or AOT-style usage.
+    #[cfg(feature = "jit")]
+    pub fn try_run_block_eager(&self, chunk: &crate::Chunk, slots: &mut [i64]) -> Option<i64> {
+        cranelift_jit_impl::try_run_block_eager(chunk, slots)
     }
 
     /// Check if a chunk is eligible for block JIT.
@@ -1708,9 +1943,43 @@ impl JitCompiler {
         cranelift_jit_impl::is_block_eligible(chunk)
     }
 
+    /// Find the largest contiguous JIT-eligible region in a chunk.
+    /// Returns `(start, end)` op indices, or None if no useful region exists.
+    /// Useful for partial JIT compilation of chunks that aren't entirely eligible.
+    #[cfg(feature = "jit")]
+    pub fn find_jit_region(&self, chunk: &crate::Chunk) -> Option<(usize, usize)> {
+        cranelift_jit_impl::find_jit_region(&chunk.ops)
+    }
+
+    /// Extract a JIT region as a standalone sub-chunk with rebased jump targets.
+    /// The sub-chunk can then be passed to `try_run_block_eager` to JIT-compile
+    /// just that region. Use with `find_jit_region` to find an eligible range.
+    #[cfg(feature = "jit")]
+    pub fn extract_region(&self, chunk: &crate::Chunk, start: usize, end: usize) -> crate::Chunk {
+        cranelift_jit_impl::extract_region(chunk, start, end)
+    }
+
+    /// Stub when JIT feature is disabled.
+    #[cfg(not(feature = "jit"))]
+    pub fn find_jit_region(&self, _chunk: &crate::Chunk) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Stub when JIT feature is disabled.
+    #[cfg(not(feature = "jit"))]
+    pub fn extract_region(&self, chunk: &crate::Chunk, _start: usize, _end: usize) -> crate::Chunk {
+        chunk.clone()
+    }
+
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
     pub fn try_run_block(&self, _chunk: &crate::Chunk, _slots: &mut [i64]) -> Option<i64> {
+        None
+    }
+
+    /// Stub when JIT feature is disabled.
+    #[cfg(not(feature = "jit"))]
+    pub fn try_run_block_eager(&self, _chunk: &crate::Chunk, _slots: &mut [i64]) -> Option<i64> {
         None
     }
 

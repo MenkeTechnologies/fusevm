@@ -33,7 +33,7 @@ pub const BUILTIN_TRUE: u16 = 10;
 pub const BUILTIN_FALSE: u16 = 11;
 pub const BUILTIN_TEST: u16 = 12;
 pub const BUILTIN_COLON: u16 = 13; // :
-pub const BUILTIN_DOT: u16 = 14;   // . (alias for source)
+pub const BUILTIN_DOT: u16 = 14; // . (alias for source)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Variable declaration
