@@ -986,7 +986,21 @@ impl VM {
                 Op::Exec(argc) => {
                     let argc = *argc;
                     let start = self.stack.len().saturating_sub(argc as usize);
-                    let args: Vec<String> = self.stack.drain(start..).map(|v| v.to_str()).collect();
+                    // Flatten Value::Array entries into argv. Shell array splice
+                    // (`${arr[@]}`) pushes a single Array value at compile-time
+                    // even though it expands to N argv slots at runtime. Without
+                    // this flat_map, `cmd ${arr[@]}` would pass the whole array
+                    // as one space-joined arg instead of N separate args.
+                    let args: Vec<String> = self
+                        .stack
+                        .drain(start..)
+                        .flat_map(|v| match v {
+                            Value::Array(items) => {
+                                items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
+                            }
+                            other => vec![other.to_str()],
+                        })
+                        .collect();
                     if let Some(cmd) = args.first() {
                         // Check if it's a shell function
                         let name_idx = self.chunk.names.iter().position(|n| n == cmd);
@@ -1018,18 +1032,28 @@ impl VM {
                                 self.push(Value::Status(0));
                             }
                             _ => {
-                                use std::process::{Command, Stdio};
-                                match Command::new(cmd)
-                                    .args(&args[1..])
-                                    .stdout(Stdio::inherit())
-                                    .stderr(Stdio::inherit())
-                                    .status()
-                                {
-                                    Ok(status) => {
-                                        self.push(Value::Status(status.code().unwrap_or(1)))
-                                    }
-                                    Err(_) => self.push(Value::Status(127)),
-                                }
+                                // Route through the host's `exec` so frontends
+                                // (zshrs) can apply intercepts/AOP advice/job
+                                // tracking on dynamic command names like
+                                // `cmd=ls; $cmd`. The default ShellHost::exec
+                                // implementation falls back to Command::new,
+                                // so behavior is identical when no host is
+                                // wired. Without host, we keep the inline
+                                // Command::new path so the VM still runs in
+                                // host-less embeddings (tests, REPL stubs).
+                                let status = if let Some(h) = self.host.as_mut() {
+                                    h.exec(args.clone())
+                                } else {
+                                    use std::process::{Command, Stdio};
+                                    Command::new(cmd)
+                                        .args(&args[1..])
+                                        .stdout(Stdio::inherit())
+                                        .stderr(Stdio::inherit())
+                                        .status()
+                                        .map(|s| s.code().unwrap_or(1))
+                                        .unwrap_or(127)
+                                };
+                                self.push(Value::Status(status));
                             }
                         }
                     } else {
@@ -1039,14 +1063,36 @@ impl VM {
                 Op::ExecBg(argc) => {
                     let argc = *argc;
                     let start = self.stack.len().saturating_sub(argc as usize);
-                    let args: Vec<String> = self.stack.drain(start..).map(|v| v.to_str()).collect();
+                    // Same Array-flattening as Op::Exec — see comment there.
+                    let args: Vec<String> = self
+                        .stack
+                        .drain(start..)
+                        .flat_map(|v| match v {
+                            Value::Array(items) => {
+                                items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
+                            }
+                            other => vec![other.to_str()],
+                        })
+                        .collect();
                     if let Some(cmd) = args.first() {
-                        use std::process::{Command, Stdio};
-                        let _ = Command::new(cmd)
-                            .args(&args[1..])
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .spawn();
+                        // Route bg exec through the host. Frontends override
+                        // to register the spawned pid in their job table; the
+                        // default impl spawns and detaches. We DON'T wait on
+                        // the bg child here — that's the host's responsibility
+                        // (zshrs uses BUILTIN_RUN_BG which forks before
+                        // emitting Op::ExecBg, so this path is rare for
+                        // shell-level bg). Without host, fall back to inline
+                        // Command::new spawn for host-less embeddings.
+                        if let Some(h) = self.host.as_mut() {
+                            let _ = h.exec_bg(args.clone());
+                        } else {
+                            use std::process::{Command, Stdio};
+                            let _ = Command::new(cmd)
+                                .args(&args[1..])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .spawn();
+                        }
                     }
                     self.push(Value::Status(0));
                 }
@@ -1289,8 +1335,17 @@ impl VM {
                         .unwrap_or_default();
                     let argc = *argc as usize;
                     let start = self.stack.len().saturating_sub(argc);
-                    let args: Vec<String> =
-                        self.stack.drain(start..).map(|v| v.to_str()).collect();
+                    // Flatten arrays (see Op::Exec for rationale).
+                    let args: Vec<String> = self
+                        .stack
+                        .drain(start..)
+                        .flat_map(|v| match v {
+                            Value::Array(items) => {
+                                items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
+                            }
+                            other => vec![other.to_str()],
+                        })
+                        .collect();
                     let status = if let Some(h) = self.host.as_mut() {
                         match h.call_function(&name, args.clone()) {
                             Some(s) => s,

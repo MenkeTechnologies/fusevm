@@ -166,6 +166,25 @@ pub trait ShellHost: Send {
             .unwrap_or(127)
     }
 
+    /// Spawn an external command in the background and detach. Returns the
+    /// child pid (or 0 on failure / when the host doesn't track pids). Default
+    /// uses `std::process::Command::spawn()`. Frontends override to register
+    /// the pid in their job table so `jobs`, `fg`, `wait`, `disown` see it.
+    fn exec_bg(&mut self, args: Vec<String>) -> i32 {
+        use std::process::{Command, Stdio};
+        let cmd = match args.first() {
+            Some(c) => c,
+            None => return 0,
+        };
+        Command::new(cmd)
+            .args(&args[1..])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|c| c.id() as i32)
+            .unwrap_or(0)
+    }
+
     /// Glob match: does `s` match the shell glob pattern `pat`?
     /// Used by `[[ x = pat ]]` and `case`. Default is exact equality.
     fn str_match(&mut self, s: &str, pat: &str) -> bool {
