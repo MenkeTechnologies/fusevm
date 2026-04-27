@@ -23,6 +23,11 @@ pub struct Chunk {
     pub sub_entries: Vec<(u16, usize)>,
     /// Block regions for map/grep/sort/foreach: (start_ip, end_ip)
     pub block_ranges: Vec<(usize, usize)>,
+    /// Sub-chunks for nested execution: `$(cmd)` bodies, `<(cmd)` /
+    /// `>(cmd)` bodies, trap handlers, with-redirects bodies, function bodies
+    /// when they're stored as separate chunks. Indexed by `Op::CmdSubst(u16)`,
+    /// `Op::ProcessSubIn(u16)`, `Op::ProcessSubOut(u16)`, `Op::TrapSet(u16)`.
+    pub sub_chunks: Vec<Chunk>,
     /// Source file name (for error messages)
     pub source: String,
     /// Cached hash of ops + constants (computed once at build time for O(1) JIT cache lookup)
@@ -110,6 +115,15 @@ impl ChunkBuilder {
     pub fn add_block_range(&mut self, start: usize, end: usize) -> u16 {
         let idx = self.chunk.block_ranges.len();
         self.chunk.block_ranges.push((start, end));
+        idx as u16
+    }
+
+    /// Add a nested sub-chunk (for cmd subst, process subst, trap handlers,
+    /// function bodies). Returns the index used by `Op::CmdSubst`,
+    /// `Op::ProcessSubIn`/`Out`, `Op::TrapSet`.
+    pub fn add_sub_chunk(&mut self, sub: Chunk) -> u16 {
+        let idx = self.chunk.sub_chunks.len();
+        self.chunk.sub_chunks.push(sub);
         idx as u16
     }
 

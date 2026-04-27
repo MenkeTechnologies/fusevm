@@ -24,6 +24,7 @@
 //!   or estimated capacity. ConcatConstLoop pre-sizes the string buffer.
 
 use crate::chunk::Chunk;
+use crate::host::ShellHost;
 use crate::op::Op;
 use crate::value::Value;
 
@@ -66,6 +67,9 @@ pub struct VM {
     ext_wide_handler: Option<ExtensionWideHandler>,
     /// Inline builtin cache: builtin_id → function pointer (no lookup at dispatch)
     builtin_table: Vec<Option<BuiltinHandler>>,
+    /// Frontend-supplied shell host (glob/expand/redirect/pipeline/etc).
+    /// When `None`, shell ops fall back to minimal stub behavior.
+    pub host: Option<Box<dyn ShellHost>>,
     /// Halted flag
     halted: bool,
 }
@@ -100,8 +104,14 @@ impl VM {
             ext_handler: None,
             ext_wide_handler: None,
             builtin_table: Vec::new(),
+            host: None,
             halted: false,
         }
+    }
+
+    /// Register the frontend shell host. Replaces any prior host.
+    pub fn set_shell_host(&mut self, host: Box<dyn ShellHost>) {
+        self.host = Some(host);
     }
 
     /// Register a handler for `Op::Extended(id, arg)` opcodes.
@@ -1041,36 +1051,284 @@ impl VM {
                     self.push(Value::Status(0));
                 }
 
-                // ── Shell stubs ──
-                Op::PipelineBegin(_) | Op::PipelineStage | Op::SubshellBegin | Op::SubshellEnd => {}
+                // ── Shell ops ── (route through host when set, fall back to stubs)
+                Op::PipelineBegin(n) => {
+                    let n = *n;
+                    if let Some(h) = self.host.as_mut() {
+                        h.pipeline_begin(n);
+                    }
+                }
+                Op::PipelineStage => {
+                    if let Some(h) = self.host.as_mut() {
+                        h.pipeline_stage();
+                    }
+                }
                 Op::PipelineEnd => {
-                    self.push(Value::Status(self.last_status));
+                    let status = if let Some(h) = self.host.as_mut() {
+                        h.pipeline_end()
+                    } else {
+                        self.last_status
+                    };
+                    self.last_status = status;
+                    self.push(Value::Status(status));
                 }
-                Op::Redirect(_, _) => {
-                    let _ = self.pop();
+                Op::SubshellBegin => {
+                    if let Some(h) = self.host.as_mut() {
+                        h.subshell_begin();
+                    }
                 }
-                Op::HereDoc(_) => {}
+                Op::SubshellEnd => {
+                    if let Some(h) = self.host.as_mut() {
+                        h.subshell_end();
+                    }
+                }
+                Op::Redirect(fd, op) => {
+                    let fd = *fd;
+                    let op = *op;
+                    let target = self.pop().to_str();
+                    if let Some(h) = self.host.as_mut() {
+                        h.redirect(fd, op, &target);
+                    }
+                }
+                Op::HereDoc(idx) => {
+                    let content = self
+                        .chunk
+                        .constants
+                        .get(*idx as usize)
+                        .map(|v| v.to_str())
+                        .unwrap_or_default();
+                    if let Some(h) = self.host.as_mut() {
+                        h.heredoc(&content);
+                    }
+                }
                 Op::HereString => {
-                    let _ = self.pop();
+                    let s = self.pop().to_str();
+                    if let Some(h) = self.host.as_mut() {
+                        h.herestring(&s);
+                    }
                 }
-                Op::CmdSubst(_) => {
-                    self.push(Value::str(""));
+                Op::CmdSubst(idx) => {
+                    let result = match self.chunk.sub_chunks.get(*idx as usize) {
+                        Some(sub) => {
+                            // Split borrow: self.host and self.chunk are disjoint fields
+                            let sub_ref: *const Chunk = sub;
+                            // SAFETY: sub_chunks is not mutated during op dispatch
+                            let sub_ref = unsafe { &*sub_ref };
+                            if let Some(h) = self.host.as_mut() {
+                                h.cmd_subst(sub_ref)
+                            } else {
+                                String::new()
+                            }
+                        }
+                        None => String::new(),
+                    };
+                    self.push(Value::str(result));
                 }
-                Op::ProcessSubIn(_) | Op::ProcessSubOut(_) => {
-                    self.push(Value::str(""));
+                Op::ProcessSubIn(idx) => {
+                    let result = match self.chunk.sub_chunks.get(*idx as usize) {
+                        Some(sub) => {
+                            let sub_ref: *const Chunk = sub;
+                            let sub_ref = unsafe { &*sub_ref };
+                            if let Some(h) = self.host.as_mut() {
+                                h.process_sub_in(sub_ref)
+                            } else {
+                                String::new()
+                            }
+                        }
+                        None => String::new(),
+                    };
+                    self.push(Value::str(result));
+                }
+                Op::ProcessSubOut(idx) => {
+                    let result = match self.chunk.sub_chunks.get(*idx as usize) {
+                        Some(sub) => {
+                            let sub_ref: *const Chunk = sub;
+                            let sub_ref = unsafe { &*sub_ref };
+                            if let Some(h) = self.host.as_mut() {
+                                h.process_sub_out(sub_ref)
+                            } else {
+                                String::new()
+                            }
+                        }
+                        None => String::new(),
+                    };
+                    self.push(Value::str(result));
                 }
                 Op::Glob | Op::GlobRecursive => {
+                    let recursive = matches!(&ops[ip], Op::GlobRecursive);
                     let pat_val = self.pop();
-                    let pattern = pat_val.as_str_cow();
-                    let matches: Vec<Value> = glob::glob(&pattern)
-                        .into_iter()
-                        .flat_map(|paths| paths.filter_map(|p| p.ok()))
-                        .map(|p| Value::str(p.to_string_lossy()))
-                        .collect();
-                    self.push(Value::Array(matches));
+                    let pattern = pat_val.to_str();
+                    let matches: Vec<String> = if let Some(h) = self.host.as_mut() {
+                        h.glob(&pattern, recursive)
+                    } else {
+                        glob::glob(&pattern)
+                            .into_iter()
+                            .flat_map(|paths| paths.filter_map(|p| p.ok()))
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect()
+                    };
+                    let arr: Vec<Value> = matches.into_iter().map(Value::str).collect();
+                    self.push(Value::Array(arr));
                 }
-                Op::TrapSet(_) | Op::TrapCheck => {}
-                Op::ExpandParam(_) | Op::WordSplit | Op::BraceExpand | Op::TildeExpand => {}
+                Op::TrapSet(idx) => {
+                    // stack: [signal_name]
+                    let sig = self.pop().to_str();
+                    if let Some(sub) = self.chunk.sub_chunks.get(*idx as usize) {
+                        let sub_ref: *const Chunk = sub;
+                        let sub_ref = unsafe { &*sub_ref };
+                        if let Some(h) = self.host.as_mut() {
+                            h.trap_set(&sig, sub_ref);
+                        }
+                    }
+                }
+                Op::TrapCheck => {
+                    if let Some(h) = self.host.as_mut() {
+                        h.trap_check();
+                    }
+                }
+                Op::TildeExpand => {
+                    let s = self.pop().to_str();
+                    let result = if let Some(h) = self.host.as_mut() {
+                        h.tilde_expand(&s)
+                    } else {
+                        s
+                    };
+                    self.push(Value::str(result));
+                }
+                Op::BraceExpand => {
+                    let s = self.pop().to_str();
+                    let result = if let Some(h) = self.host.as_mut() {
+                        h.brace_expand(&s)
+                    } else {
+                        vec![s]
+                    };
+                    let arr: Vec<Value> = result.into_iter().map(Value::str).collect();
+                    self.push(Value::Array(arr));
+                }
+                Op::WordSplit => {
+                    let s = self.pop().to_str();
+                    let result = if let Some(h) = self.host.as_mut() {
+                        h.word_split(&s)
+                    } else {
+                        s.split_whitespace().map(|w| w.to_string()).collect()
+                    };
+                    let arr: Vec<Value> = result.into_iter().map(Value::str).collect();
+                    self.push(Value::Array(arr));
+                }
+                Op::ExpandParam(modifier) => {
+                    // Stack layout per modifier:
+                    //   DEFAULT/ASSIGN/ERROR/ALTERNATE/STRIP*/RSTRIP*: [name, arg]
+                    //   SUBST_FIRST/SUBST_ALL: [name, pat, rep]
+                    //   SLICE: [name, off, len]
+                    //   LENGTH/UPPER/LOWER/UPPER_FIRST/LOWER_FIRST/INDIRECT/KEYS: [name]
+                    let m = *modifier;
+                    let argc = match m {
+                        crate::op::param_mod::DEFAULT
+                        | crate::op::param_mod::ASSIGN
+                        | crate::op::param_mod::ERROR
+                        | crate::op::param_mod::ALTERNATE
+                        | crate::op::param_mod::STRIP_SHORT
+                        | crate::op::param_mod::STRIP_LONG
+                        | crate::op::param_mod::RSTRIP_SHORT
+                        | crate::op::param_mod::RSTRIP_LONG => 1,
+                        crate::op::param_mod::SUBST_FIRST
+                        | crate::op::param_mod::SUBST_ALL
+                        | crate::op::param_mod::SLICE => 2,
+                        _ => 0,
+                    };
+                    let mut args: Vec<Value> = Vec::with_capacity(argc);
+                    for _ in 0..argc {
+                        args.push(self.pop());
+                    }
+                    args.reverse();
+                    let name = self.pop().to_str();
+                    let result = if let Some(h) = self.host.as_mut() {
+                        h.expand_param(&name, m, &args)
+                    } else {
+                        Value::str("")
+                    };
+                    self.push(result);
+                }
+                Op::StrMatch => {
+                    let pat = self.pop().to_str();
+                    let s = self.pop().to_str();
+                    let result = if let Some(h) = self.host.as_mut() {
+                        h.str_match(&s, &pat)
+                    } else {
+                        s == pat
+                    };
+                    self.push(Value::Bool(result));
+                }
+                Op::RegexMatch => {
+                    let re = self.pop().to_str();
+                    let s = self.pop().to_str();
+                    let result = if let Some(h) = self.host.as_mut() {
+                        h.regex_match(&s, &re)
+                    } else {
+                        false
+                    };
+                    self.push(Value::Bool(result));
+                }
+                Op::WithRedirectsBegin(n) => {
+                    let n = *n;
+                    if let Some(h) = self.host.as_mut() {
+                        h.with_redirects_begin(n);
+                    }
+                }
+                Op::WithRedirectsEnd => {
+                    if let Some(h) = self.host.as_mut() {
+                        h.with_redirects_end();
+                    }
+                }
+                Op::CallFunction(name_idx, argc) => {
+                    let name = self
+                        .chunk
+                        .names
+                        .get(*name_idx as usize)
+                        .cloned()
+                        .unwrap_or_default();
+                    let argc = *argc as usize;
+                    let start = self.stack.len().saturating_sub(argc);
+                    let args: Vec<String> =
+                        self.stack.drain(start..).map(|v| v.to_str()).collect();
+                    let status = if let Some(h) = self.host.as_mut() {
+                        match h.call_function(&name, args.clone()) {
+                            Some(s) => s,
+                            None => {
+                                let mut full = Vec::with_capacity(args.len() + 1);
+                                full.push(name.clone());
+                                full.extend(args);
+                                h.exec(full)
+                            }
+                        }
+                    } else {
+                        // No host — fall back to in-chunk function lookup, then external exec
+                        let nidx = *name_idx;
+                        if let Some(entry_ip) = self.chunk.find_sub(nidx) {
+                            for arg in &args {
+                                self.push(Value::str(arg));
+                            }
+                            self.frames.push(Frame {
+                                return_ip: self.ip,
+                                stack_base: self.stack.len() - args.len(),
+                                slots: Vec::with_capacity(8),
+                            });
+                            self.ip = entry_ip;
+                            continue;
+                        }
+                        let mut full = Vec::with_capacity(args.len() + 1);
+                        full.push(name);
+                        full.extend(args);
+                        use std::process::Command;
+                        Command::new(&full[0])
+                            .args(&full[1..])
+                            .status()
+                            .map(|s| s.code().unwrap_or(1))
+                            .unwrap_or(127)
+                    };
+                    self.last_status = status;
+                    self.push(Value::Status(status));
+                }
 
                 // ── Remaining fused ops ──
                 Op::ConcatConstLoop(const_idx, s_slot, i_slot, limit) => {

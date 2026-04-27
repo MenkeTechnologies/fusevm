@@ -33,6 +33,7 @@
 //! ```
 
 pub mod chunk;
+pub mod host;
 pub mod jit;
 pub mod op;
 pub mod shell_builtins;
@@ -40,6 +41,7 @@ pub mod value;
 pub mod vm;
 
 pub use chunk::{Chunk, ChunkBuilder};
+pub use host::{DefaultHost, ShellHost};
 pub use jit::{JitCompiler, JitExtension, NativeCode};
 pub use op::Op;
 pub use value::Value;

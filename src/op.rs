@@ -233,6 +233,22 @@ pub enum Op {
     BraceExpand,
     /// Tilde expand ~ and ~user
     TildeExpand,
+    /// Call user-defined shell function by name pool index with N args.
+    /// Falls through to host.call_function() then host.exec() if not found.
+    /// stack: [arg_N, ..., arg_1] → pushes Status
+    CallFunction(u16, u8),
+    /// Glob-pattern match: pop pattern, pop string, push Bool.
+    /// Used by `[[ x = pat ]]` and `case` arm matching.
+    StrMatch,
+    /// Regex match: pop regex, pop string, push Bool. (`=~`)
+    RegexMatch,
+    /// Begin scoped redirection block: u8 = number of redirects already
+    /// applied via prior Redirect ops. Saves fd state on the host's stack.
+    /// Used for `cmd > out.txt` applied to compound commands and
+    /// `func() { ... } > out.txt`.
+    WithRedirectsBegin(u8),
+    /// End scoped redirection block — restore fd state.
+    WithRedirectsEnd,
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -344,6 +360,11 @@ impl Hash for Op {
                 id.hash(state);
                 argc.hash(state);
             }
+            Op::CallFunction(name, argc) => {
+                name.hash(state);
+                argc.hash(state);
+            }
+            Op::WithRedirectsBegin(n) => n.hash(state),
             Op::Extended(id, arg) => {
                 id.hash(state);
                 arg.hash(state);
@@ -455,7 +476,10 @@ impl Hash for Op {
             | Op::TrapCheck
             | Op::WordSplit
             | Op::BraceExpand
-            | Op::TildeExpand => {}
+            | Op::TildeExpand
+            | Op::StrMatch
+            | Op::RegexMatch
+            | Op::WithRedirectsEnd => {}
         }
     }
 }

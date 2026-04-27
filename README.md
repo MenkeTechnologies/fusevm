@@ -175,6 +175,27 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
 
 stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. They don't conflict — each frontend owns its own ID space.
 
+### Shell Host (0.10.0+)
+
+Shell-specific runtime ops (`Glob`, `TildeExpand`, `BraceExpand`, `WordSplit`, `ExpandParam`, `CmdSubst`, `ProcessSubIn`/`Out`, `Redirect`, `HereDoc`, `HereString`, `PipelineBegin`/`Stage`/`End`, `SubshellBegin`/`End`, `TrapSet`/`TrapCheck`, `WithRedirectsBegin`/`End`, `CallFunction`, `StrMatch`, `RegexMatch`) dispatch through the `ShellHost` trait. The frontend (zshrs) provides a real implementation; without one, the VM uses minimal stubs that keep stack discipline correct.
+
+```rust
+use fusevm::{ShellHost, VM, Chunk, Value};
+
+struct MyHost;
+impl ShellHost for MyHost {
+    fn glob(&mut self, pattern: &str, _recursive: bool) -> Vec<String> { /* … */ vec![] }
+    fn tilde_expand(&mut self, s: &str) -> String { /* … */ s.into() }
+    fn cmd_subst(&mut self, sub: &Chunk) -> String { /* run sub, capture stdout */ String::new() }
+    // … other methods have default impls
+}
+
+let mut vm = VM::new(chunk);
+vm.set_shell_host(Box::new(MyHost));
+```
+
+Sub-execution (cmd substitution, process substitution, trap handlers) is delivered to the host as `&Chunk` references taken from the parent's `sub_chunks` table. Build them with `ChunkBuilder::add_sub_chunk(sub) -> u16` and reference by index in `Op::CmdSubst(idx)`, `Op::ProcessSubIn(idx)`, `Op::ProcessSubOut(idx)`, `Op::TrapSet(idx)`.
+
 ---
 
 ## [0x07] JIT COMPILATION
