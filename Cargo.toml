@@ -1,6 +1,6 @@
 [package]
 name = "fusevm"
-version = "0.11.2"
+version = "0.12.0"
 edition = "2021"
 description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear, block, tracing with side-exits and frame materialization)"
 license = "MIT"

@@ -342,20 +342,22 @@ The block JIT compiles the full CFG to native code via Cranelift. All mutable st
 
 `cargo bench --features jit --bench jit_trace` (Apple M-series). Trace recorded at threshold 5 (default 50 in production) so the cache is primed before measurement; all reported times are steady-state hot-path execution.
 
-**Three-tier comparison.** Block JIT bypasses the VM entirely — caller invokes the compiled fn through a direct fn-ptr with a slot pointer. Tracing JIT dispatches through `VM::run()` which adds startup, the backward-branch lookup, and slot copy-in/out per invocation. At large iteration counts both converge as native execution dominates; at small N the VM overhead is visible.
+**Synergistic three-tier dispatch (phase 10).** When `enable_tracing_jit()` is called, `VM::run` consults all three Cranelift tiers in priority order: block JIT first if the chunk is fully eligible (zero VM-side overhead, direct fn-ptr through the slot pointer), tracing JIT for hot loops in chunks block JIT can't handle, interpreter for cold paths and edge cases. Block-eligible chunks short-circuit before tracing JIT records anything — the two tiers never compete on the same chunk.
 
-| Benchmark | Iterations | Interpreter | Block JIT | Tracing JIT | Trace vs Interp | Trace vs Block |
+| Benchmark | Iterations | Interpreter | Block JIT (direct) | Tracing-JIT VM | VM vs Interp | VM vs Block |
 |---|---|---|---|---|---|---|
-| `counter_loop` | 1,000 | 23.0 µs | — | **0.57 µs** | **40x** | — |
-| `counter_loop` | 10,000 | 282.6 µs | 2.66 µs | **3.45 µs** | **82x** | 1.30x slower |
-| `counter_loop` | 100,000 | 3,287 µs | 27.05 µs | **27.91 µs** | **118x** | 1.03x slower |
-| `loop_with_branch` | 1,000 | 43.0 µs | 0.29 µs | **0.81 µs** | **53x** | 2.76x slower |
-| `loop_with_branch` | 10,000 | 448.0 µs | 2.85 µs | **3.54 µs** | **127x** | 1.24x slower |
-| `loop_with_branch` | 100,000 | 4,351 µs | 29.20 µs | **28.85 µs** | **151x** | **1.01x faster** |
+| `counter_loop` | 1,000 | 23.4 µs | 305 ns | **506 ns** | **46x** | 1.66x slower |
+| `counter_loop` | 10,000 | 235.5 µs | 2.80 µs | **2.96 µs** | **80x** | 1.06x slower |
+| `counter_loop` | 100,000 | 2,474 µs | 29.07 µs | **27.88 µs** | **89x** | **1.04x faster** |
+| `loop_with_branch` | 1,000 | 39.8 µs | 310 ns | **487 ns** | **82x** | 1.57x slower |
+| `loop_with_branch` | 10,000 | 410.7 µs | 2.78 µs | **2.97 µs** | **138x** | 1.07x slower |
+| `loop_with_branch` | 100,000 | 4,058 µs | 27.48 µs | **27.75 µs** | **146x** | 1.01x slower |
 
 `counter_loop` is a tight `for i { i++ }` integer counter — about as friendly to a JIT as bytecode gets. `loop_with_branch` adds an internal `if i > 0 { ... }` inside the body to exercise the phase-3 branch-guard machinery; the recorded path's brif compares slot value to zero each iteration.
 
-The trace-vs-block gap narrows from ~2-3x at 1k iterations to within-noise at 100k. Block JIT wins on minimum overhead (no VM dispatch, direct fn-ptr) but only handles whole-chunk eligibility — anything with extension ops, calls to host builtins, or polymorphic types falls back to the interpreter. Tracing JIT covers those cases with a small constant overhead from running through `VM::run`. For purely loop-shaped integer kernels block JIT is faster; for real workloads where most code paths aren't 100% block-eligible, tracing JIT is the more general win.
+The "Block JIT (direct)" column measures `JitCompiler::try_run_block` invoked directly with no VM around it — the floor for what's achievable through the JIT pipeline. The "Tracing-JIT VM" column measures `VM::run()` with `enable_tracing_jit()` set on a block-eligible chunk; the VM auto-dispatches block JIT before reaching the interpreter. The remaining 1.0–1.7x gap between the two is purely VM construction + slot copy-in/out overhead per `vm.run()` call (constant, ~150-200 ns); native execution itself is identical.
+
+For chunks that aren't block-eligible (anything with extension ops, host builtins, or polymorphic types), block JIT bows out and the same `VM::run` path falls through to the interpreter with tracing JIT's recorder armed at backward branches — that's where tracing JIT earns its keep, accelerating loops in code block JIT can't take. The two tiers cover disjoint cases at runtime.
 
 ### Tracking improvements
 

@@ -126,7 +126,7 @@
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.11.0 · Fused superinstructions · Extension dispatch · 3-tier Cranelift JIT (linear · block · tracing)</p>
+          <p class="docs-build-line">fusevm v0.12.0 · Fused superinstructions · Extension dispatch · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing)</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -147,7 +147,7 @@
 
     <main class="tutorial-main">
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>FUSEVM REFERENCE</h2>
-      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 10), tracing (hot loop body, full side-exit machinery). The shared execution engine behind strykelang, zshrs, and awkrs.</p>
+      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 10), tracing (hot loop body with side-exits, frame materialization, side-trace stitching). Auto-dispatched from <code>VM::run()</code> when tracing is enabled. The shared execution engine behind strykelang, zshrs, and awkrs.</p>
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
@@ -159,7 +159,7 @@
           <div><div class="stat">10</div><div class="stat-label">op categories</div></div>
           <div><div class="stat">8</div><div class="stat-label">fused superinstructions</div></div>
           <div><div class="stat">24</div><div class="stat-label">shell ops</div></div>
-          <div><div class="stat">7,242</div><div class="stat-label">lines of Rust</div></div>
+          <div><div class="stat">7,792</div><div class="stat-label">lines of Rust</div></div>
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
           <div><div class="stat">3</div><div class="stat-label">language frontends</div></div>
           <div><div class="stat">&le;24B</div><div class="stat-label">op size (cache-friendly)</div></div>
@@ -466,60 +466,100 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         </table>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
-        Tracing JIT is opt-in per <code>VM</code> via <code>vm.enable_tracing_jit()</code>. The recorder
-        anchors at backward branches, captures the executed op sequence on the next iteration through
-        the header, and installs a compiled trace. Subsequent loop iterations dispatch through native
-        code until either the loop exit condition becomes false or a guard side-exits.</p>
+        Tracing JIT is opt-in per <code>VM</code> via <code>vm.enable_tracing_jit()</code>. When enabled,
+        <code>VM::run()</code> auto-dispatches to all three tiers in priority order (phase 10): block JIT
+        first if the chunk is fully eligible (zero VM-side overhead, direct fn-ptr through the slot pointer);
+        tracing JIT for hot loops in chunks block JIT can't take; interpreter for cold paths and edge cases.
+        Block-eligible chunks short-circuit before tracing JIT records anything, so the two tiers never
+        compete on the same chunk.</p>
 
         <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Tracing JIT capability matrix</h3>
 
         <table class="arch-table">
           <tr><th>Capability</th><th>Phase</th><th>Detail</th></tr>
           <tr><td>Loop bodies, int slots, no calls</td><td>1</td><td>Loops with ≤<code>MAX_TRACE_SLOT</code> int slots, single backward closing branch</td></tr>
-          <tr><td>Cross-call inlining (branchless callees)</td><td>2</td><td>Op::Call inlines callee body into trace IR; per-frame slot-variable scope</td></tr>
+          <tr><td>Cross-call inlining (branchless callees)</td><td>2</td><td><code>Op::Call</code> inlines callee body into trace IR; per-frame slot-variable scope</td></tr>
           <tr><td>Caller-frame internal branches with side-exits</td><td>3</td><td><code>if</code>/<code>else</code> in caller frame compiles with <code>brif</code> guards + per-branch side-exit blocks</td></tr>
           <tr><td>Callee-frame branches, frame materialization on deopt</td><td>4</td><td>Branches inside inlined callees; <code>DeoptInfo</code> out-param materializes synthetic <code>Frame</code>s on <code>vm.frames</code></td></tr>
           <tr><td>Value-stack reconstruction on deopt (Int + Float)</td><td>5 + 5b</td><td>Non-empty abstract stack at branch is OK; <code>stack_kinds</code> tag distinguishes Int from Float entries</td></tr>
-          <tr><td>Side-exit deopt counter + auto-blacklist</td><td>6</td><td>Per-trace <code>side_exit_count</code>; blacklist after <code>MAX_SIDE_EXITS</code> (50) misses</td></tr>
-          <tr><td>Persistent metadata export/import</td><td>7</td><td><code>TraceMetadata</code> (serde-serializable) round-trips through <code>trace_export</code> / <code>trace_import</code></td></tr>
-          <tr><td>Bounded recursion inlining</td><td>8</td><td>Self-recursive calls inline up to <code>MAX_INLINE_RECURSION</code> (4) levels deep before aborting</td></tr>
-          <tr><td>Side-trace stitching from hot deopt sites</td><td>9</td><td>Recorder splits <code>record_anchor_ip</code> (cache key) from <code>close_anchor_ip</code> (loop header); side traces compile via <code>trace_install_with_kind</code> and don't loop in their own IR; chained dispatch up to <code>MAX_TRACE_CHAIN</code> (4) hops</td></tr>
+          <tr><td>Side-exit deopt counter + auto-blacklist</td><td>6</td><td>Per-trace <code>side_exit_count</code>; blacklist after <code>MAX_SIDE_EXITS</code> misses</td></tr>
+          <tr><td>Persistent metadata export/import</td><td>7</td><td><code>TraceMetadata</code> (serde-serializable) round-trips through <code>trace_export</code> / <code>trace_import</code> (and <code>_all</code> bulk variants)</td></tr>
+          <tr><td>Bounded recursion inlining</td><td>8</td><td>Self-recursive calls inline up to <code>MAX_INLINE_RECURSION</code> levels deep before aborting</td></tr>
+          <tr><td>Side-trace stitching from hot deopt sites</td><td>9</td><td>Recorder splits <code>record_anchor_ip</code> (cache key) from <code>close_anchor_ip</code> (loop header); side traces compile via <code>trace_install_with_kind</code> and don't loop in their own IR; chained dispatch up to <code>MAX_TRACE_CHAIN</code> hops</td></tr>
+          <tr><td>Synergistic three-tier auto-dispatch</td><td>10</td><td><code>VM::run()</code> consults block JIT first, then tracing JIT, then interpreter — block-eligible chunks short-circuit before any recording happens</td></tr>
+          <tr><td>Configurable thresholds + float slots + bulk persist</td><td>tune</td><td><code>TraceJitConfig</code> for per-thread tuning; <code>SlotKind::Float</code> slots stored as i64 bit-patterns and bit-cast through; <code>trace_export_all</code> / <code>trace_import_all</code> for batch I/O</td></tr>
         </table>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Speedup over interpreter</h3>
+
+        <p style="font-size: 13px; line-height: 1.7; color: var(--text-dim);">
+        Apple M-series, criterion, <code>cargo bench --features jit --bench jit_trace</code>. "Block JIT (direct)"
+        invokes <code>JitCompiler::try_run_block</code> with no VM around it — the floor through the JIT
+        pipeline. "Tracing-JIT VM" measures <code>vm.run()</code> with <code>enable_tracing_jit()</code> set,
+        which auto-dispatches block JIT for these block-eligible chunks (phase 10). The remaining gap
+        between the two columns is purely VM construction + slot copy-in/out per <code>vm.run()</code> call.</p>
+
+        <table class="arch-table">
+          <tr><th>Workload</th><th>Iterations</th><th>Interpreter</th><th>Block JIT (direct)</th><th>Tracing-JIT VM</th><th>VM vs Interp</th></tr>
+          <tr><td><code>counter_loop</code></td><td>1,000</td><td>23.4 µs</td><td>305 ns</td><td>506 ns</td><td><span class="highlight">46x</span></td></tr>
+          <tr><td><code>counter_loop</code></td><td>10,000</td><td>235.5 µs</td><td>2.80 µs</td><td>2.96 µs</td><td><span class="highlight">80x</span></td></tr>
+          <tr><td><code>counter_loop</code></td><td>100,000</td><td>2,474 µs</td><td>29.07 µs</td><td>27.88 µs</td><td><span class="highlight">89x</span></td></tr>
+          <tr><td><code>loop_with_branch</code></td><td>1,000</td><td>39.8 µs</td><td>310 ns</td><td>487 ns</td><td><span class="highlight">82x</span></td></tr>
+          <tr><td><code>loop_with_branch</code></td><td>10,000</td><td>410.7 µs</td><td>2.78 µs</td><td>2.97 µs</td><td><span class="highlight">138x</span></td></tr>
+          <tr><td><code>loop_with_branch</code></td><td>100,000</td><td>4,058 µs</td><td>27.48 µs</td><td>27.75 µs</td><td><span class="highlight">146x</span></td></tr>
+        </table>
+
+        <p style="font-size: 12px; line-height: 1.7; color: var(--text-muted); font-style: italic;">
+        Microbenchmarks measure tight integer counter loops in isolation — best case for any JIT.
+        Real-world script speedup is bounded by Amdahl: most shell-script time goes to host calls
+        (fork/exec, I/O, glob, builtins) which no JIT tier touches. Typical numeric inner loops see
+        the kernel speedup; surrounding shell logic doesn't. Numbers above are representative of
+        the JIT pipeline itself, not of any specific workload.</p>
 
         <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Usage</h3>
 
-        <div class="code-block"><span class="keyword">use</span> fusevm::{ChunkBuilder, JitCompiler, Op, VM, VMResult, Value};
+        <div class="code-block"><span class="keyword">use</span> fusevm::{ChunkBuilder, JitCompiler, Op, TraceJitConfig, VM, VMResult, Value};
 
 <span class="keyword">let</span> mut b = ChunkBuilder::new();
 <span class="comment">// ... emit a counter loop ...</span>
 <span class="keyword">let</span> chunk = b.build();
 
 <span class="keyword">let</span> mut vm = VM::new(chunk.clone());
-<span class="comment">// Tracing JIT is opt-in per VM.</span>
+<span class="comment">// Phase 10: enabling tracing JIT also enables auto-dispatch through</span>
+<span class="comment">// block JIT for fully-eligible chunks. Pick whichever tier fits.</span>
 vm.enable_tracing_jit();
 <span class="keyword">match</span> vm.run() {
-    VMResult::Ok(val) =&gt; <span class="comment">// hot loop ran via native trace ...</span>
+    VMResult::Ok(val) =&gt; <span class="comment">// ran via block JIT, tracing JIT, or interpreter — automatic.</span>
     _ =&gt; {}
 }
 
-<span class="comment">// Phase 7: persist the compiled trace's metadata.</span>
+<span class="comment">// Per-thread tuning of thresholds (optional).</span>
 <span class="keyword">let</span> jit = JitCompiler::new();
-<span class="keyword">if let</span> Some(meta) = jit.trace_export(&amp;chunk, anchor_ip) {
-    <span class="keyword">let</span> bytes = serde_json::to_vec(&amp;meta)?;
-    std::fs::write(<span class="string">"trace.json"</span>, bytes)?;
-}
-<span class="comment">// On next process start: re-import + re-compile.</span>
-<span class="keyword">let</span> meta: TraceMetadata = serde_json::from_slice(&amp;std::fs::read(<span class="string">"trace.json"</span>)?)?;
-jit.trace_import(&amp;chunk, &amp;meta);</div>
+jit.set_config(TraceJitConfig {
+    trace_threshold: 20,        <span class="comment">// arm earlier on hot loops</span>
+    max_side_exits: 100,        <span class="comment">// be more patient with mismatches</span>
+    ..TraceJitConfig::defaults()
+});
+
+<span class="comment">// Persistent cache: bulk export every trace for this chunk, write to</span>
+<span class="comment">// disk in your format of choice, restore on next process start.</span>
+<span class="keyword">let</span> metas = jit.trace_export_all(&amp;chunk);
+std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&amp;metas)?)?;
+
+<span class="comment">// On next process start: re-import + re-compile in one pass.</span>
+<span class="keyword">let</span> bytes = std::fs::read(<span class="string">"traces.json"</span>)?;
+<span class="keyword">let</span> metas: Vec&lt;TraceMetadata&gt; = serde_json::from_slice(&amp;bytes)?;
+<span class="keyword">let</span> n = jit.trace_import_all(&amp;chunk, &amp;metas);  <span class="comment">// returns # restored</span></div>
 
         <table class="arch-table">
           <tr><th>Type</th><th>Role</th></tr>
-          <tr><td><code>JitCompiler</code></td><td>Stateless handle over the thread-local trace cache; entry point for all tier APIs</td></tr>
+          <tr><td><code>JitCompiler</code></td><td>Stateless handle over the thread-local trace + block caches; entry point for all tier APIs</td></tr>
           <tr><td><code>JitExtension</code></td><td>Frontend-provided trait registering language-specific extended op JIT support</td></tr>
-          <tr><td><code>SlotKind</code></td><td>Slot type tag (Int / Float) for the tracing JIT's entry guard</td></tr>
+          <tr><td><code>TraceJitConfig</code></td><td>Per-thread tunable thresholds (<code>trace_threshold</code>, <code>max_side_exits</code>, <code>max_inline_recursion</code>, <code>max_trace_chain</code>, <code>max_trace_len</code>)</td></tr>
+          <tr><td><code>SlotKind</code></td><td>Slot type tag (Int / Float) for the tracing JIT's entry guard. Float slots stored as i64 bit-patterns and bit-cast through</td></tr>
           <tr><td><code>TraceLookup</code></td><td>Dispatch outcome at a backward branch (<code>NotHot</code> / <code>StartRecording</code> / <code>Ran</code> / <code>GuardMismatch</code> / <code>Skip</code>)</td></tr>
           <tr><td><code>DeoptInfo</code> / <code>DeoptFrame</code></td><td><code>#[repr(C)]</code> out-params trace fns populate to materialize inlined frames + value-stack on side-exit</td></tr>
-          <tr><td><code>TraceMetadata</code></td><td>Serde-serializable record for persistent trace cache (phase 7)</td></tr>
+          <tr><td><code>TraceMetadata</code></td><td>Serde-serializable record for persistent trace cache (phase 7); bulk variants <code>trace_export_all</code> / <code>trace_import_all</code></td></tr>
         </table>
       </section>
 

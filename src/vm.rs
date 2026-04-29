@@ -573,7 +573,43 @@ impl VM {
     // ── Main dispatch loop ──
 
     /// Execute the loaded chunk until completion or error.
+    ///
+    /// Phase 10: tiered auto-dispatch. When `tracing_jit` is enabled the
+    /// VM consults all three Cranelift tiers in priority order:
+    ///
+    /// 1. **Block JIT** — if the entire chunk is block-eligible, the
+    ///    block-JIT cache returns `Some(result)` after its own warmup
+    ///    threshold and the whole chunk runs in native code with zero
+    ///    interpreter dispatch.
+    /// 2. **Tracing JIT** — when block JIT doesn't apply, the dispatch
+    ///    loop runs with the recorder armed at backward branches; hot
+    ///    loops compile to traces that take over subsequent iterations.
+    /// 3. **Interpreter** — fallback for cold code and chunks neither
+    ///    tier handles.
+    ///
+    /// Block JIT is tried first because, when it applies, it has zero
+    /// VM-side overhead (direct fn-ptr through the slot pointer). For
+    /// chunks block JIT can't take, control falls through to the
+    /// interpreter with tracing JIT integrated. The two tiers don't
+    /// compete on the same chunk: block-eligible chunks short-circuit
+    /// before tracing JIT records anything.
     pub fn run(&mut self) -> VMResult {
+        // Phase 10: try block JIT first for fully-eligible chunks. The
+        // block-JIT cache has its own threshold (10 invocations); the
+        // call returns None until it warms up, at which point the whole
+        // chunk runs in native code.
+        #[cfg(feature = "jit")]
+        if self.tracing_jit && self.frames.len() == 1 && self.ip == 0 {
+            if self.jit.is_block_eligible(&self.chunk) {
+                self.refresh_slot_buffers();
+                if let Some(result_i64) = self.jit.try_run_block(&self.chunk, &mut self.slot_buf) {
+                    self.write_slots_back();
+                    self.halted = true;
+                    return VMResult::Ok(Value::Int(result_i64));
+                }
+            }
+        }
+
         let ops = &self.chunk.ops as *const Vec<Op>;
         // SAFETY: self.chunk.ops is not mutated during execution.
         // We take a pointer to avoid borrow checker issues with &self.chunk.ops
