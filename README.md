@@ -52,18 +52,24 @@ fusevm is the shared execution engine behind [strykelang](https://github.com/Men
 ```
 stryke source ──► stryke compiler ──┐
                                      │
-zshrs source  ──► shell compiler  ──┼──► fusevm::Op ──► VM::run()
-                                     │         │
-awkrs source  ──► awk compiler    ──┘    JitCompiler::try_run_linear()
-                                                │
-                                          Cranelift 0.130
-                                         native x86-64 / aarch64
+zshrs source  ──► shell compiler  ──┼──► fusevm::Op ──► VM::run() ─────┐
+                                     │                                  │
+awkrs source  ──► awk compiler    ──┘                                   │
+                                                                        ▼
+                                              JitCompiler tiers (Cranelift 0.130)
+                                              ├── Linear JIT (straight-line, instant)
+                                              ├── Block JIT (CFG, threshold 10)
+                                              └── Tracing JIT (hot loop, threshold 50,
+                                                              deopts on guard miss)
+                                                          │
+                                                          ▼
+                                                native x86-64 / aarch64
 ```
 
 - **Fused superinstructions** — the compiler detects hot patterns and emits single ops instead of multi-op sequences
 - **Extension dispatch** — language-specific opcodes via `Extended(u16, u8)` with registered handler tables
 - **Stack + slots** — stack-based execution with slot-indexed fast paths for locals
-- **Cranelift JIT** — eligibility analysis and compilation for hot chunks
+- **Three-tier Cranelift JIT** — Linear JIT (straight-line, compile-on-first-call), Block JIT (CFG-aware, threshold 10), Tracing JIT (records hot loop paths, threshold 50, deopts on type-guard miss)
 - **Zero-clone dispatch** — ops borrowed from chunk, in-place array/hash mutation, `Cow<str>` string coercion
 - **Zero runtime dependencies** — pure Rust, no allocator tricks, no unsafe
 
@@ -90,6 +96,11 @@ b.emit(Op::LoadInt(2), 1);
 b.emit(Op::Add, 1);
 
 let mut vm = VM::new(b.build());
+// Optional: enable tracing JIT — hot loops will be recorded and
+// JIT-compiled at runtime. Requires `--features jit`.
+#[cfg(feature = "jit")]
+vm.enable_tracing_jit();
+
 match vm.run() {
     VMResult::Ok(val) => println!("result: {}", val.to_str()),  // "42"
     VMResult::Error(e) => eprintln!("error: {}", e),
@@ -232,6 +243,36 @@ if jit.is_linear_eligible(&chunk) {
 
 Int/float promotion: when either operand is float, both are promoted to `f64`. Cranelift emits `iadd`/`fadd`/`fcvt_from_sint` as needed. Runtime helpers for `Pow` (wrapping integer + `f64::powf`) and `Mod` (float `fmod`).
 
+### JIT tier ladder
+
+fusevm runs three JIT tiers in increasing order of optimization power and compile cost. A given chunk can be served by exactly one tier — they cover disjoint cases:
+
+| Tier | Trigger | Coverage | Speculation |
+|------|---------|----------|-------------|
+| **Linear** | `is_linear_eligible` + first call | Straight-line expression chunks; returns `Value` (int or float) | None — IR matches bytecode exactly |
+| **Block** | `is_block_eligible` + 10 invocations | Whole-chunk CFG (loops, branches, fused backedges) | None — slot ops assume i64 |
+| **Tracing** | 50 backedges through any loop header | Hot path through anything; recorded loop body compiled with type-specialized IR | Slot-type entry guard; deopt to interpreter on guard miss |
+
+Tracing JIT is opt-in per VM (`vm.enable_tracing_jit()`). The recorder anchors at backward branches, captures the executed op sequence on the next iteration through the header, and installs a compiled trace that runs the loop body in native code until the loop's exit condition becomes false. Slot type changes between invocations cause the entry guard to refuse the trace; after 5 such guard mismatches the trace is blacklisted and never retried.
+
+**Cross-call inlining (phase 2).** `Op::Call` to a sub-entry resolves to the callee's bytecode IP at recording time, and the callee body inlines into the trace IR. Each inlined frame gets its own slot-variable scope (caller slots eagerly promoted from the slot pointer; callee slots lazily allocated zero-initialized). `Op::Return` and `Op::ReturnValue` truncate the abstract stack to the frame's entry mark, mirroring interpreter semantics. Args travel via the value stack — no movement to slots is required.
+
+**Caller-frame internal branches with side-exits (phase 3).** Loops with `if`/`else` bodies are now traceable. The recorder captures the executed direction at each conditional jump (via parallel `recorded_ips`), and the compiler emits a `brif` guard at every internal branch: the runtime condition must match the recorded direction, otherwise control transfers to a per-branch side-exit block that spills the caller's slot variables and returns the un-recorded direction's IP for the interpreter to resume from.
+
+**Callee-frame branches with frame materialization on deopt (phase 4).** Branches are now allowed inside inlined callees, not just the caller frame. When a side-exit fires from inside an inlined callee, the trace populates a `DeoptInfo` out-parameter the VM uses to materialize synthetic `Frame`s on `vm.frames` — each with its `return_ip` pointing back to the post-`Op::Call` IP in the parent, and slot values copied from the trace's per-frame Cranelift Variables. The interpreter then resumes mid-callee with a correctly shaped call stack; when the callee eventually hits `Op::Return`, the synthetic frame is popped and execution continues in the parent. Bounds: max 4 inlined frames at any side-exit, max 16 slot indices per inlined frame.
+
+**Value-stack reconstruction on deopt (phase 5).** The "abstract stack empty at branch" restriction is lifted: branches can fire while the trace's abstract stack still holds intermediate values. At side-exit, those values are written into `DeoptInfo.stack_buf` (capacity 32) and the VM pushes them onto `vm.stack` so the interpreter resumes with the same stack state the bytecode would have at the deopt IP. Phase 5b adds a parallel `stack_kinds` tag array so Float entries get bit-cast through `f64::from_bits` and materialized as `Value::Float` (not just `Value::Int`). This unlocks short-circuit `&&`/`||` patterns and any branch where intermediate float/int computations live on the value stack.
+
+**Side-exit deopt counter + auto-blacklist (phase 6).** Each compiled trace's `TraceCacheEntry` tracks a `side_exit_count` distinct from the entry-guard `deopt_count`. When a brif guard inside the trace fires (the trace returns a resume IP that isn't the loop fallthrough), the counter increments; after `MAX_SIDE_EXITS` (50) misses the trace is blacklisted and never retried. This avoids the pathological case where the recorded path doesn't match runtime and every iteration pays trace+deopt+interpret cost. Note: full side-trace stitching — recording from the side-exit IP and linking the new trace into the main one — is deferred (it's substantial work on its own).
+
+**Persistent trace metadata (phase 7).** `TraceMetadata` is a serde-serializable struct (chunk hash, anchor IP, fallthrough IP, op sequence, recorded IPs, slot-kind snapshot). `JitCompiler::trace_export` extracts it from a compiled-trace cache entry; `trace_import` re-installs it on a fresh `JitCompiler` after verifying `chunk_op_hash` still matches. Persistence format is intentionally caller-owned — fusevm doesn't ship a file layout, so users can pick JSON, bincode, sqlite, or anything else with serde support.
+
+**Bounded recursion inlining (phase 8).** The recorder's hard-no on self-recursive calls is relaxed to a depth cap (`MAX_INLINE_RECURSION` = 4 levels). A self-call up to that depth is inlined like any other Call; deeper recursion aborts the trace and the interpreter handles it. Combined with phase 4's frame materialization, this enables tracing of tail-recursive helpers up to the cap.
+
+**Side-trace stitching (phase 9).** When a main trace's side-exit fires repeatedly at the same IP, the recorder rearms at that IP and records a *side trace*: the bytecode path from the side-exit forward to the loop's backward branch. `TraceRecorder` splits its anchor into `record_anchor_ip` (cache key — the side-exit IP) and `close_anchor_ip` (the enclosing loop's header where the closing branch lands). Side traces compile via `trace_install_with_kind` and don't loop in their own IR — both directions of the closing branch exit, returning either the close target (so the main trace runs the next iteration) or the loop's fallthrough IP (loop done). The VM's chained-dispatch path runs after each main-trace deopt: if a side trace is registered at the resume IP, dispatch it; otherwise bump the main trace's `side_exit_count` toward auto-blacklist. Chains are bounded by `MAX_TRACE_CHAIN` (4) per backward-branch hop. Phase 6's blacklist counter is reserved for cases where no side trace is helping — productive deopts don't penalize the main trace.
+
+**Deferred refinement.** A built-in disk-backed cache implementation is out of scope; the `TraceMetadata` API gives users a clean integration point. Phase 9 ships a working stitching path with the conservative restriction that side traces use the same eligibility rules as main traces and don't recursively spawn further side traces from their own deopts (their side-exits still bump main trace's blacklist counter).
+
 ---
 
 ## [0x08] VALUE REPRESENTATION
@@ -296,6 +337,25 @@ The block JIT handles real control flow — loops, conditionals, fused backedges
 | `nested_loop(100×100)` | 340 µs | **9.5 µs** | **36x** |
 
 The block JIT compiles the full CFG to native code via Cranelift. All mutable state flows through the slots pointer (`*mut i64`), and `AccumSumLoop` is register-allocated with block parameters — no memory traffic in the inner loop.
+
+### Tracing JIT — hot loop bodies compiled to native code
+
+`cargo bench --features jit --bench jit_trace` (Apple M-series). Trace recorded at threshold 5 (default 50 in production) so the cache is primed before measurement; all reported times are steady-state hot-path execution.
+
+**Three-tier comparison.** Block JIT bypasses the VM entirely — caller invokes the compiled fn through a direct fn-ptr with a slot pointer. Tracing JIT dispatches through `VM::run()` which adds startup, the backward-branch lookup, and slot copy-in/out per invocation. At large iteration counts both converge as native execution dominates; at small N the VM overhead is visible.
+
+| Benchmark | Iterations | Interpreter | Block JIT | Tracing JIT | Trace vs Interp | Trace vs Block |
+|---|---|---|---|---|---|---|
+| `counter_loop` | 1,000 | 23.0 µs | — | **0.57 µs** | **40x** | — |
+| `counter_loop` | 10,000 | 282.6 µs | 2.66 µs | **3.45 µs** | **82x** | 1.30x slower |
+| `counter_loop` | 100,000 | 3,287 µs | 27.05 µs | **27.91 µs** | **118x** | 1.03x slower |
+| `loop_with_branch` | 1,000 | 43.0 µs | 0.29 µs | **0.81 µs** | **53x** | 2.76x slower |
+| `loop_with_branch` | 10,000 | 448.0 µs | 2.85 µs | **3.54 µs** | **127x** | 1.24x slower |
+| `loop_with_branch` | 100,000 | 4,351 µs | 29.20 µs | **28.85 µs** | **151x** | **1.01x faster** |
+
+`counter_loop` is a tight `for i { i++ }` integer counter — about as friendly to a JIT as bytecode gets. `loop_with_branch` adds an internal `if i > 0 { ... }` inside the body to exercise the phase-3 branch-guard machinery; the recorded path's brif compares slot value to zero each iteration.
+
+The trace-vs-block gap narrows from ~2-3x at 1k iterations to within-noise at 100k. Block JIT wins on minimum overhead (no VM dispatch, direct fn-ptr) but only handles whole-chunk eligibility — anything with extension ops, calls to host builtins, or polymorphic types falls back to the interpreter. Tracing JIT covers those cases with a small constant overhead from running through `VM::run`. For purely loop-shaped integer kernels block JIT is faster; for real workloads where most code paths aren't 100% block-eligible, tracing JIT is the more general win.
 
 ### Tracking improvements
 

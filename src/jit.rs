@@ -57,6 +57,184 @@ pub trait JitExtension: Send + Sync {
     fn name(&self) -> &str;
 }
 
+/// Slot type tag observed at trace recording time.
+///
+/// Used by the tracing JIT entry guard: if a slot's runtime type at trace
+/// invocation differs from the type recorded at compile time, the trace
+/// is skipped and the interpreter handles the iteration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SlotKind {
+    Int,
+    Float,
+}
+
+/// Serializable trace metadata for persistent cache export/import (phase 7).
+///
+/// Captures everything needed to re-compile a previously-installed trace
+/// in a fresh process: the original recorded op sequence, the parallel
+/// bytecode IPs, the slot-type entry guard, and the fallthrough IP. Bind
+/// to the chunk via `chunk_op_hash` so a stale metadata file (chunk has
+/// changed) is rejected on import rather than silently mis-compiled.
+///
+/// Persistence format is intentionally serde-based so callers can pick
+/// whatever encoding fits their environment (JSON, bincode, custom binary).
+/// `fusevm` itself doesn't ship a file format — `JitCompiler::export_trace`
+/// returns the struct, `import_trace` consumes one. The user owns I/O.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TraceMetadata {
+    pub chunk_op_hash: u64,
+    pub anchor_ip: usize,
+    pub fallthrough_ip: usize,
+    pub ops: Vec<crate::op::Op>,
+    pub recorded_ips: Vec<usize>,
+    pub slot_kinds_at_anchor: Vec<SlotKind>,
+}
+
+/// Outcome of consulting the trace cache at a backward-branch site.
+#[derive(Debug)]
+pub enum TraceLookup {
+    /// Header not yet hot — interpreter continues. Counter was bumped.
+    NotHot,
+    /// Header crossed `TRACE_THRESHOLD` and no compiled trace exists yet.
+    /// The interpreter should arm the recorder for the next iteration.
+    StartRecording,
+    /// A compiled trace ran. The interpreter should resume at this IP.
+    Ran { resume_ip: usize },
+    /// A compiled trace exists but the slot type guard failed.
+    /// Interpreter handles this iteration normally.
+    GuardMismatch,
+    /// Trace was previously aborted or blacklisted; never retry.
+    Skip,
+}
+
+/// Maximum number of inlined callee frames a trace can materialize on
+/// side-exit. Traces requiring deeper inlining at any side-exit point are
+/// rejected at compile time. 4 covers typical shell/script helper patterns.
+pub const MAX_DEOPT_FRAMES: usize = 4;
+
+/// Maximum slot indices per inlined frame the trace can materialize.
+pub const MAX_DEOPT_SLOTS_PER_FRAME: usize = 16;
+
+/// Maximum abstract-stack values a trace can write back to the interpreter
+/// stack on side-exit. Phase 5+. Branches with deeper stack are rejected
+/// at compile time.
+pub const MAX_DEOPT_STACK: usize = 32;
+
+/// Tunable thresholds for the tracing JIT.
+///
+/// All hot/threshold/cap values are surfaced here so callers can adjust
+/// the JIT for their workload without recompiling fusevm. Defaults match
+/// the constants used through phase 9; aggressive workloads (very hot
+/// short loops) might want lower thresholds, while cold-start workloads
+/// (script that runs once) might want higher thresholds to avoid spending
+/// compile time on traces that won't pay off.
+///
+/// Apply via `JitCompiler::set_config(...)` — affects subsequent calls
+/// from the current thread.
+#[derive(Clone, Copy, Debug)]
+pub struct TraceJitConfig {
+    /// Backedges through a loop header before recording arms.
+    pub trace_threshold: u32,
+    /// Mid-trace side-exits before the trace is auto-blacklisted.
+    pub max_side_exits: u32,
+    /// Maximum self-recursive levels the recorder will inline.
+    pub max_inline_recursion: usize,
+    /// Maximum chained side traces dispatched per backward-branch hop.
+    pub max_trace_chain: usize,
+    /// Maximum recorded ops in a single trace before recording aborts.
+    pub max_trace_len: usize,
+}
+
+impl TraceJitConfig {
+    /// Defaults matching the phase-1-through-9 constants.
+    pub const fn defaults() -> Self {
+        Self {
+            trace_threshold: 50,
+            max_side_exits: 50,
+            max_inline_recursion: 4,
+            max_trace_chain: 4,
+            max_trace_len: 256,
+        }
+    }
+}
+
+impl Default for TraceJitConfig {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+/// Materialization record for a single inlined frame at side-exit time.
+///
+/// Phase 4 of the tracing JIT: when a trace deopts inside a callee, the
+/// interpreter expects `vm.frames` to reflect the call stack the bytecode
+/// would naturally have at the deopt IP. The compiled trace populates one
+/// `DeoptFrame` per inlined frame (caller→callee order) into `DeoptInfo`,
+/// and the VM materializes them after the trace returns.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct DeoptFrame {
+    /// IP just after the corresponding `Op::Call` in the parent frame.
+    /// Set by the interpreter when this synthetic frame's `Return` fires.
+    pub return_ip: usize,
+    /// Number of slot values written into `slots`.
+    pub slot_count: usize,
+    /// Slot values, indexed [0..slot_count]. Each is interpreted as an
+    /// i64 carried by `Value::Int`. Beyond `slot_count` is undefined.
+    pub slots: [i64; MAX_DEOPT_SLOTS_PER_FRAME],
+}
+
+impl DeoptFrame {
+    /// Zero-init record (used to pre-fill the buffer before each invocation).
+    pub const fn zeroed() -> Self {
+        Self {
+            return_ip: 0,
+            slot_count: 0,
+            slots: [0; MAX_DEOPT_SLOTS_PER_FRAME],
+        }
+    }
+}
+
+/// Tag for a single abstract-stack entry written to `DeoptInfo.stack_buf`.
+/// 0 = `Value::Int(i64)`, 1 = `Value::Float(f64)`. Other values reserved.
+pub const STACK_KIND_INT: u8 = 0;
+pub const STACK_KIND_FLOAT: u8 = 1;
+
+/// Out-parameter the trace fn writes on every invocation.
+///
+/// `resume_ip` is set by the trace on every exit (normal loop fallthrough
+/// OR side-exit). `frame_count` is 0 for caller-frame side-exits (no
+/// materialization needed) and 1..=MAX_DEOPT_FRAMES for callee-frame
+/// side-exits. `stack_count` is the number of abstract-stack values the
+/// trace had built up at the side-exit; the VM pushes them onto
+/// `vm.stack` after the trace returns, materializing each entry as
+/// `Value::Int` or `Value::Float` based on the parallel `stack_kinds`
+/// tag (Float values are bit-cast through `f64::from_bits`).
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct DeoptInfo {
+    pub resume_ip: usize,
+    pub frame_count: usize,
+    pub stack_count: usize,
+    pub frames: [DeoptFrame; MAX_DEOPT_FRAMES],
+    pub stack_buf: [i64; MAX_DEOPT_STACK],
+    pub stack_kinds: [u8; MAX_DEOPT_STACK],
+}
+
+impl DeoptInfo {
+    /// Zero-init buffer.
+    pub const fn zeroed() -> Self {
+        Self {
+            resume_ip: 0,
+            frame_count: 0,
+            stack_count: 0,
+            frames: [DeoptFrame::zeroed(); MAX_DEOPT_FRAMES],
+            stack_buf: [0; MAX_DEOPT_STACK],
+            stack_kinds: [0; MAX_DEOPT_STACK],
+        }
+    }
+}
+
 // ── Cranelift JIT implementation (feature-gated) ──
 
 #[cfg(feature = "jit")]
@@ -1303,6 +1481,7 @@ mod cranelift_jit_impl {
             lines: chunk.lines[start..end].to_vec(),
             sub_entries: Vec::new(),
             block_ranges: Vec::new(),
+            sub_chunks: Vec::new(),
             source: chunk.source.clone(),
             op_hash: 0,
         };
@@ -1777,6 +1956,1421 @@ mod cranelift_jit_impl {
             Some(result)
         })
     }
+
+    // ── Tracing JIT (Tier 2 — hot paths through control flow) ──
+    //
+    // Tracing JIT records the actual hot path through bytecode, anchored at
+    // backward branches (loop headers). Once a header crosses TRACE_THRESHOLD
+    // backedge counts, the recorder is armed; on the next iteration through the
+    // header it captures every executed op until execution returns to the
+    // anchor IP. The captured straight-line sequence (the "trace") is compiled
+    // to native code.
+    //
+    // # Phase 1 restrictions
+    // - Loop body must consist entirely of block-JIT-eligible ops
+    // - All slots referenced by the trace must hold Int values at trace entry
+    //   (entry guard enforced by interpreter, not by compiled code)
+    // - The trace closes on a backward Jump/JumpIfTrue/JumpIfFalse to the anchor
+    // - No other backward jumps allowed (single-loop only)
+    // - No internal forward jumps that escape the loop body (phase 2)
+    // - No Call/Return inside the trace (phase 2)
+    //
+    // # Side-exit ABI
+    // Trace fns: `unsafe extern "C" fn(*mut i64) -> i64`
+    // Returns the IP at which the interpreter should resume:
+    // - The fallthrough IP on normal loop exit (condition false)
+    // - The deopt IP on internal guard failure (phase 2 — currently unused)
+    //
+    // # Cache key
+    // (chunk.op_hash, anchor_ip) — different headers in the same chunk get
+    // different traces. Per-thread, lock-free.
+
+    /// Trace fn signature.
+    ///
+    /// - `slots` — pointer to the caller frame's i64 slot array.
+    /// - `deopt_info` — pointer to a `DeoptInfo` the trace populates on
+    ///   every exit (normal loop fallthrough OR side-exit). The trace
+    ///   writes `resume_ip` always; `frame_count` and `frames[0..frame_count]`
+    ///   are populated only on callee-frame side-exits.
+    /// - returns: the resume IP (also written to `*deopt_info`).
+    type TraceFn = unsafe extern "C" fn(*mut i64, *mut super::DeoptInfo) -> i64;
+
+    /// A compiled trace.
+    pub(crate) struct CompiledTrace {
+        #[allow(dead_code)]
+        module: JITModule,
+        run: TraceFn,
+    }
+
+    impl CompiledTrace {
+        /// Invoke the trace. Returns the IP to resume interpretation at,
+        /// and populates `deopt_info` for the caller to materialize any
+        /// inlined frames.
+        pub(crate) fn invoke(&self, slots: *mut i64, deopt_info: &mut super::DeoptInfo) -> i64 {
+            unsafe { (self.run)(slots, deopt_info as *mut _) }
+        }
+    }
+
+    /// Per-trace cache entry.
+    struct TraceCacheEntry {
+        /// Backedge counter for this header IP.
+        hot_count: u32,
+        /// Compiled trace, or None if not yet compiled / failed to compile.
+        compiled: Option<Box<CompiledTrace>>,
+        /// True if recording was attempted and aborted (don't retry).
+        aborted: bool,
+        /// Number of entry-guard deopts at runtime (slot type mismatches).
+        deopt_count: u32,
+        /// Number of mid-trace side-exits (a brif guard fired and the
+        /// interpreter resumed at a non-fallthrough IP). Phase 6: blacklist
+        /// the trace after `MAX_SIDE_EXITS` to avoid pathological
+        /// trace+deopt+interpret cycles.
+        side_exit_count: u32,
+        /// True if blacklisted after too many deopts. Skip lookup entirely.
+        blacklisted: bool,
+        /// IP just past the loop body (where the loop falls through on exit).
+        /// Set when the trace is compiled. Compared against the trace fn's
+        /// returned resume_ip to detect mid-trace side-exits.
+        fallthrough_ip: usize,
+        /// Slot indices touched by the trace, with their expected entry types.
+        /// Phase 1: all entries are JitTy::Int. The interpreter checks these
+        /// before invoking the trace.
+        slot_types: Vec<(u16, JitTy)>,
+        /// Phase 7: original recording metadata retained for persistent
+        /// cache export. None until the trace is successfully installed.
+        saved_metadata: Option<super::TraceMetadata>,
+    }
+
+    thread_local! {
+        static TRACE_CACHE_TLS: RefCell<HashMap<(u64, usize), TraceCacheEntry>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Maximum slot index a trace can reference (keeps slot_types small).
+    /// Not user-tunable — fundamental to the deopt buffer layout.
+    pub(crate) const MAX_TRACE_SLOT: u16 = 64;
+
+    thread_local! {
+        /// Per-thread tunable thresholds for the tracing JIT. Callers
+        /// override via `JitCompiler::set_config`.
+        static TRACE_CONFIG: RefCell<super::TraceJitConfig> =
+            RefCell::new(super::TraceJitConfig::defaults());
+    }
+
+    fn cfg_trace_threshold() -> u32 {
+        TRACE_CONFIG.with(|c| c.borrow().trace_threshold)
+    }
+    fn cfg_max_side_exits() -> u32 {
+        TRACE_CONFIG.with(|c| c.borrow().max_side_exits)
+    }
+    pub(crate) fn cfg_max_trace_len() -> usize {
+        TRACE_CONFIG.with(|c| c.borrow().max_trace_len)
+    }
+    pub(crate) fn cfg_max_inline_recursion() -> usize {
+        TRACE_CONFIG.with(|c| c.borrow().max_inline_recursion)
+    }
+    #[allow(dead_code)]
+    pub(crate) fn cfg_max_trace_chain() -> usize {
+        TRACE_CONFIG.with(|c| c.borrow().max_trace_chain)
+    }
+    pub(crate) fn set_config(cfg: super::TraceJitConfig) {
+        TRACE_CONFIG.with(|c| *c.borrow_mut() = cfg);
+    }
+    pub(crate) fn get_config() -> super::TraceJitConfig {
+        TRACE_CONFIG.with(|c| *c.borrow())
+    }
+
+    fn slot_kind_to_jitty(k: super::SlotKind) -> JitTy {
+        match k {
+            super::SlotKind::Int => JitTy::Int,
+            super::SlotKind::Float => JitTy::Float,
+        }
+    }
+
+    /// Consult the trace cache at a backward-branch site.
+    ///
+    /// `slot_kinds_at_anchor` is the runtime types of the frame's slots at the
+    /// anchor IP. Used to (a) install the entry guard at compile time, (b) check
+    /// it before invoking a previously compiled trace.
+    pub(crate) fn trace_lookup(
+        chunk: &Chunk,
+        anchor_ip: usize,
+        slots: *mut i64,
+        slot_kinds_at_anchor: &[super::SlotKind],
+        deopt_info: &mut super::DeoptInfo,
+    ) -> super::TraceLookup {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            let entry = cache.entry(key).or_insert(TraceCacheEntry {
+                hot_count: 0,
+                compiled: None,
+                aborted: false,
+                deopt_count: 0,
+                side_exit_count: 0,
+                blacklisted: false,
+                fallthrough_ip: 0,
+                slot_types: Vec::new(),
+                saved_metadata: None,
+            });
+
+            if entry.blacklisted || entry.aborted {
+                return super::TraceLookup::Skip;
+            }
+
+            if let Some(ref compiled) = entry.compiled {
+                // Entry guard: verify all referenced slots still hold expected types.
+                for &(slot, ty) in &entry.slot_types {
+                    let actual = slot_kinds_at_anchor
+                        .get(slot as usize)
+                        .copied()
+                        .map(slot_kind_to_jitty)
+                        .unwrap_or(JitTy::Int);
+                    if actual != ty {
+                        entry.deopt_count = entry.deopt_count.saturating_add(1);
+                        if entry.deopt_count >= 5 {
+                            entry.blacklisted = true;
+                        }
+                        return super::TraceLookup::GuardMismatch;
+                    }
+                }
+                // Reset deopt info before each invocation so stale records
+                // from prior calls don't leak through.
+                deopt_info.resume_ip = 0;
+                deopt_info.frame_count = 0;
+                deopt_info.stack_count = 0;
+                let resume_ip = compiled.invoke(slots, deopt_info) as usize;
+                // Phase 6 + 9: side-exit detection happens here, but the
+                // blacklist counter increment is deferred to the VM-side
+                // chained-dispatch path. If the VM finds a side trace at
+                // `resume_ip` and runs it, the deopt is being handled
+                // productively and shouldn't count toward blacklisting the
+                // main trace. The VM calls `trace_bump_side_exit` only when
+                // no side trace was available.
+                return super::TraceLookup::Ran { resume_ip };
+            }
+
+            entry.hot_count = entry.hot_count.saturating_add(1);
+            if entry.hot_count >= cfg_trace_threshold() {
+                super::TraceLookup::StartRecording
+            } else {
+                super::TraceLookup::NotHot
+            }
+        })
+    }
+
+    /// Mark a trace cache entry as aborted (recording failed).
+    pub(crate) fn trace_abort(chunk: &Chunk, anchor_ip: usize) {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|cache_cell| {
+            if let Some(entry) = cache_cell.borrow_mut().get_mut(&key) {
+                entry.aborted = true;
+            }
+        });
+    }
+
+    /// Compile and install a trace for a closed recording.
+    ///
+    /// `ops` is the captured op sequence (loop body, last op is the closing
+    /// backward branch). `fallthrough_ip` is where the interpreter resumes when
+    /// the loop exits normally. `slot_kinds_at_anchor` is the runtime slot type
+    /// snapshot at trace start; we extract only the kinds of slots the trace
+    /// actually references and store them as the entry guard.
+    ///
+    /// Returns true if compile + install succeeded.
+    pub(crate) fn trace_install(
+        chunk: &Chunk,
+        anchor_ip: usize,
+        fallthrough_ip: usize,
+        ops: &[Op],
+        recorded_ips: &[usize],
+        slot_kinds_at_anchor: &[super::SlotKind],
+        constants: &[FuseValue],
+    ) -> bool {
+        trace_install_with_kind(
+            chunk,
+            anchor_ip,
+            anchor_ip, // close_anchor == record_anchor for main traces
+            fallthrough_ip,
+            ops,
+            recorded_ips,
+            slot_kinds_at_anchor,
+            constants,
+        )
+    }
+
+    /// Phase 9: install a trace with explicit `record_anchor_ip` (cache key)
+    /// and `close_anchor_ip` (loop header where the close branch lands).
+    /// For main traces these are equal; for side traces `record_anchor_ip`
+    /// is the side-exit IP. When they differ, the compiled IR's "loop
+    /// continuation" branch DOES NOT jump back to its own loop header —
+    /// instead it exits returning `close_anchor_ip`, so the VM can resume
+    /// the main trace (or interpreter) at the loop header for the next
+    /// iteration. Side traces are one-shot completions of the post-side-
+    /// exit portion of the loop body, not standalone loops.
+    pub(crate) fn trace_install_with_kind(
+        chunk: &Chunk,
+        record_anchor_ip: usize,
+        close_anchor_ip: usize,
+        fallthrough_ip: usize,
+        ops: &[Op],
+        recorded_ips: &[usize],
+        slot_kinds_at_anchor: &[super::SlotKind],
+        constants: &[FuseValue],
+    ) -> bool {
+        let is_side_trace = record_anchor_ip != close_anchor_ip;
+        // Build the per-trace slot guard list from the kinds-at-anchor snapshot.
+        // Float slots are supported alongside Int slots — each entry's kind
+        // is checked at trace entry and used during compile to bit-cast
+        // i64-stored slot values to/from f64.
+        let used_slots = collect_trace_slots(ops);
+        let mut slot_types: Vec<(u16, JitTy)> = Vec::with_capacity(used_slots.len());
+        for &slot in &used_slots {
+            let kind = slot_kinds_at_anchor
+                .get(slot as usize)
+                .copied()
+                .unwrap_or(super::SlotKind::Int);
+            let ty = slot_kind_to_jitty(kind);
+            slot_types.push((slot, ty));
+        }
+
+        let key = (chunk.op_hash, record_anchor_ip);
+        let compiled = match compile_trace_kinded(
+            ops,
+            recorded_ips,
+            close_anchor_ip,
+            fallthrough_ip,
+            is_side_trace,
+            &slot_types,
+            constants,
+        ) {
+            Some(c) => c,
+            None => {
+                trace_abort(chunk, record_anchor_ip);
+                return false;
+            }
+        };
+        TRACE_CACHE_TLS.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            let entry = cache.entry(key).or_insert(TraceCacheEntry {
+                hot_count: 0,
+                compiled: None,
+                aborted: false,
+                deopt_count: 0,
+                side_exit_count: 0,
+                blacklisted: false,
+                fallthrough_ip,
+                slot_types: Vec::new(),
+                saved_metadata: None,
+            });
+            entry.compiled = Some(Box::new(compiled));
+            entry.fallthrough_ip = fallthrough_ip;
+            entry.slot_types = slot_types;
+            // Phase 7: retain the recording so callers can export it for
+            // persistent caching. The saved metadata records the
+            // `close_anchor_ip` rather than `record_anchor_ip`, so on
+            // import we re-derive the (record, close) pair from the
+            // metadata's `chunk_op_hash` + `anchor_ip` lookup.
+            entry.saved_metadata = Some(super::TraceMetadata {
+                chunk_op_hash: chunk.op_hash,
+                anchor_ip: close_anchor_ip,
+                fallthrough_ip,
+                ops: ops.to_vec(),
+                recorded_ips: recorded_ips.to_vec(),
+                slot_kinds_at_anchor: slot_kinds_at_anchor.to_vec(),
+            });
+        });
+        true
+    }
+
+    /// Whether an op is allowed to appear inside a recorded trace, ignoring
+    /// frame boundaries. Superset of `is_block_eligible_op`: tracing JIT
+    /// additionally accepts `Op::Call` / `Op::Return` / `Op::ReturnValue`
+    /// (cross-call inlining, phase 2). `Op::CallBuiltin` is rejected because
+    /// builtin handlers are arbitrary Rust we can't lower to Cranelift IR.
+    /// `Op::PushFrame` / `Op::PopFrame` are rejected — the trace JIT models
+    /// scopes implicitly via Call/Return only. The fused control-flow ops
+    /// (`SlotLtIntJumpIfFalse`, `SlotIncLtIntJumpBack`, `AccumSumLoop`) carry
+    /// embedded jumps and are rejected — chunks that contain these are
+    /// already block-JIT-optimized and tracing them would just compile the
+    /// same loop pattern twice.
+    fn is_trace_op_allowed(op: &Op) -> bool {
+        match op {
+            Op::Call(_, _) | Op::Return | Op::ReturnValue => true,
+            Op::CallBuiltin(_, _) | Op::PushFrame | Op::PopFrame => false,
+            Op::SlotLtIntJumpIfFalse(_, _, _)
+            | Op::SlotIncLtIntJumpBack(_, _, _)
+            | Op::AccumSumLoop(_, _, _) => false,
+            _ => is_block_eligible_op(op),
+        }
+    }
+
+    /// Compile-time per-frame state for the tracing JIT.
+    ///
+    /// Each entry on the `frames` stack tracks the slot-variable scope of a
+    /// (possibly inlined) frame and the abstract-stack length at frame entry,
+    /// so that `Op::Return` / `Op::ReturnValue` can truncate the abstract
+    /// stack to mirror interpreter semantics.
+    ///
+    /// Phase 4: `return_ip` is the IP just after the corresponding `Op::Call`
+    /// in the parent frame — used at side-exit time to materialize a
+    /// synthetic interpreter `Frame` so the dispatch loop can resume mid-
+    /// callee with a correctly shaped call stack. For the caller frame
+    /// (frames\[0\]) `return_ip` is unused (the caller frame already exists
+    /// in `vm.frames` at trace entry).
+    struct CompileFrame {
+        slot_vars: HashMap<u16, Variable>,
+        stack_base: usize,
+        return_ip: usize,
+    }
+
+    // ── Cranelift IR offsets into super::DeoptInfo / super::DeoptFrame ──
+    //
+    // These are derived from the `#[repr(C)]` layouts of the public structs
+    // and verified via `const _ assertions` on each compile_trace invocation.
+    // Hardcoded so we can write store offsets directly without runtime
+    // pointer math at codegen time.
+
+    const DEOPT_INFO_RESUME_IP_OFFSET: i32 = 0;
+    const DEOPT_INFO_FRAME_COUNT_OFFSET: i32 = 8;
+    const DEOPT_INFO_STACK_COUNT_OFFSET: i32 = 16;
+    const DEOPT_INFO_FRAMES_OFFSET: i32 = 24;
+    const DEOPT_FRAME_RETURN_IP_OFFSET: i32 = 0;
+    const DEOPT_FRAME_SLOT_COUNT_OFFSET: i32 = 8;
+    const DEOPT_FRAME_SLOTS_OFFSET: i32 = 16;
+    /// Stride of a `super::DeoptFrame`. With `MAX_DEOPT_SLOTS_PER_FRAME=16`,
+    /// each frame is 8 (return_ip) + 8 (slot_count) + 16*8 (slots) = 144 bytes.
+    const DEOPT_FRAME_STRIDE: i32 = 16 + (super::MAX_DEOPT_SLOTS_PER_FRAME as i32) * 8;
+    /// Offset of `stack_buf[0]` from the start of `DeoptInfo`. Lives after
+    /// the frames array.
+    const DEOPT_INFO_STACK_BUF_OFFSET: i32 =
+        DEOPT_INFO_FRAMES_OFFSET + (super::MAX_DEOPT_FRAMES as i32) * DEOPT_FRAME_STRIDE;
+    /// Offset of `stack_kinds[0]` from the start of `DeoptInfo`. Lives after
+    /// the stack value buffer.
+    const DEOPT_INFO_STACK_KINDS_OFFSET: i32 =
+        DEOPT_INFO_STACK_BUF_OFFSET + (super::MAX_DEOPT_STACK as i32) * 8;
+
+    /// Compile-time validation of struct layouts so the offsets above stay
+    /// consistent with the Rust types. Triggered on every `compile_trace`
+    /// call; if the layouts ever change without updating constants, builds
+    /// catch the mismatch via the runtime `assert!`s below.
+    fn assert_deopt_layout() {
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptInfo, resume_ip),
+            DEOPT_INFO_RESUME_IP_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptInfo, frame_count),
+            DEOPT_INFO_FRAME_COUNT_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptInfo, stack_count),
+            DEOPT_INFO_STACK_COUNT_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptInfo, frames),
+            DEOPT_INFO_FRAMES_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptInfo, stack_buf),
+            DEOPT_INFO_STACK_BUF_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptInfo, stack_kinds),
+            DEOPT_INFO_STACK_KINDS_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptFrame, return_ip),
+            DEOPT_FRAME_RETURN_IP_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptFrame, slot_count),
+            DEOPT_FRAME_SLOT_COUNT_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::DeoptFrame, slots),
+            DEOPT_FRAME_SLOTS_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::size_of::<super::DeoptFrame>(),
+            DEOPT_FRAME_STRIDE as usize
+        );
+    }
+
+    /// Emit IR that writes `value` (an `i64` Cranelift value) to a field at
+    /// `offset` from the deopt-info pointer.
+    fn store_deopt_i64(
+        bcx: &mut FunctionBuilder,
+        deopt_ptr: cranelift_codegen::ir::Value,
+        offset: i32,
+        value: cranelift_codegen::ir::Value,
+    ) {
+        bcx.ins()
+            .store(MemFlags::trusted(), value, deopt_ptr, offset);
+    }
+
+    /// Emit the IR sequence shared by every trace exit (normal loop
+    /// fallthrough OR a per-branch side-exit):
+    /// 1. Spill caller-frame slot Variables back to `*slot_base`.
+    /// 2. Write `resume_ip`, `frame_count`, `stack_count` to `*deopt_info`.
+    /// 3. Write per-frame materialization records.
+    /// 4. Write abstract-stack values to `stack_buf` so the VM can push them
+    ///    onto `vm.stack` after the trace returns.
+    /// 5. Emit a `return resume_ip`.
+    ///
+    /// `frames_to_materialize` is a slice of (return_ip, slot_count,
+    /// Vec<(slot_idx, current_var)>) tuples for callee frames. For caller-
+    /// only side-exits this is empty and `frame_count` is 0.
+    /// `abstract_stack` is the trace's abstract stack at the exit point;
+    /// each entry's i64 value is written to `stack_buf` in order. Phase 5a
+    /// only supports Int entries — Float entries should be rejected by the
+    /// caller before invoking emit_exit.
+    fn emit_exit(
+        bcx: &mut FunctionBuilder,
+        slot_base: cranelift_codegen::ir::Value,
+        deopt_ptr: cranelift_codegen::ir::Value,
+        caller_slot_vars: &HashMap<u16, Variable>,
+        frames_to_materialize: &[(usize, usize, Vec<(u16, Variable)>)],
+        abstract_stack: &[(cranelift_codegen::ir::Value, JitTy)],
+        resume_ip: usize,
+    ) {
+        // 1. Spill caller-frame slots.
+        for (&slot, &var) in caller_slot_vars {
+            let val = bcx.use_var(var);
+            bcx.ins()
+                .store(MemFlags::trusted(), val, slot_base, (slot as i32) * 8);
+        }
+        // 2. Write resume_ip / frame_count / stack_count.
+        let resume_v = bcx.ins().iconst(types::I64, resume_ip as i64);
+        store_deopt_i64(bcx, deopt_ptr, DEOPT_INFO_RESUME_IP_OFFSET, resume_v);
+        let frame_count_v = bcx
+            .ins()
+            .iconst(types::I64, frames_to_materialize.len() as i64);
+        store_deopt_i64(bcx, deopt_ptr, DEOPT_INFO_FRAME_COUNT_OFFSET, frame_count_v);
+        let stack_count_v = bcx.ins().iconst(types::I64, abstract_stack.len() as i64);
+        store_deopt_i64(bcx, deopt_ptr, DEOPT_INFO_STACK_COUNT_OFFSET, stack_count_v);
+        // 3. Per-frame records.
+        for (i, (return_ip, slot_count, slot_vals)) in frames_to_materialize.iter().enumerate() {
+            let frame_off = DEOPT_INFO_FRAMES_OFFSET + (i as i32) * DEOPT_FRAME_STRIDE;
+            let rip_v = bcx.ins().iconst(types::I64, *return_ip as i64);
+            store_deopt_i64(
+                bcx,
+                deopt_ptr,
+                frame_off + DEOPT_FRAME_RETURN_IP_OFFSET,
+                rip_v,
+            );
+            let sc_v = bcx.ins().iconst(types::I64, *slot_count as i64);
+            store_deopt_i64(
+                bcx,
+                deopt_ptr,
+                frame_off + DEOPT_FRAME_SLOT_COUNT_OFFSET,
+                sc_v,
+            );
+            for (slot_idx, var) in slot_vals {
+                let val = bcx.use_var(*var);
+                let off = frame_off + DEOPT_FRAME_SLOTS_OFFSET + (*slot_idx as i32) * 8;
+                store_deopt_i64(bcx, deopt_ptr, off, val);
+            }
+        }
+        // 4. Abstract stack values + kinds. Order: trace's abstract stack[0]
+        // → stack_buf[0]; the VM pushes them onto vm.stack in this order so
+        // stack[N-1] ends up at the top. Float entries bit-cast f64→i64
+        // (preserving the bit pattern so VM-side `f64::from_bits` recovers
+        // the original value) and tag with STACK_KIND_FLOAT.
+        for (i, (val, ty)) in abstract_stack.iter().enumerate() {
+            let val_off = DEOPT_INFO_STACK_BUF_OFFSET + (i as i32) * 8;
+            let stored: cranelift_codegen::ir::Value = match ty {
+                JitTy::Int => *val,
+                JitTy::Float => {
+                    bcx.ins()
+                        .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), *val)
+                }
+            };
+            bcx.ins()
+                .store(MemFlags::trusted(), stored, deopt_ptr, val_off);
+            // Kind tag byte.
+            let kind_off = DEOPT_INFO_STACK_KINDS_OFFSET + (i as i32);
+            let kind_v = bcx.ins().iconst(
+                types::I8,
+                match ty {
+                    JitTy::Int => super::STACK_KIND_INT as i64,
+                    JitTy::Float => super::STACK_KIND_FLOAT as i64,
+                },
+            );
+            bcx.ins()
+                .store(MemFlags::trusted(), kind_v, deopt_ptr, kind_off);
+        }
+        // 5. Return.
+        bcx.ins().return_(&[resume_v]);
+    }
+
+    /// Look up (or lazily allocate) the slot variable for the current frame.
+    /// Caller-frame slots are eagerly populated from the slot pointer at trace
+    /// entry; if a caller-frame access misses here, `collect_trace_slots`
+    /// missed a referenced slot — that's a bug, return None to fail compile.
+    /// Inlined frames lazily allocate their slot vars zero-initialized,
+    /// matching the interpreter's "out-of-bounds slot reads as Undef → 0".
+    fn get_or_alloc_slot_var(
+        frames: &mut Vec<CompileFrame>,
+        slot: u16,
+        bcx: &mut FunctionBuilder,
+    ) -> Option<Variable> {
+        let depth = frames.len().checked_sub(1)?;
+        let frame = frames.last_mut()?;
+        if let Some(&v) = frame.slot_vars.get(&slot) {
+            return Some(v);
+        }
+        if depth == 0 {
+            // Caller frame must have been pre-populated. Missing slot = bug.
+            return None;
+        }
+        let var = bcx.declare_var(types::I64);
+        let zero = bcx.ins().iconst(types::I64, 0);
+        bcx.def_var(var, zero);
+        frame.slot_vars.insert(slot, var);
+        Some(var)
+    }
+
+    /// Validate a recorded trace before compilation. Phase 2 rules:
+    ///
+    /// - All ops are trace-allowed (block-eligible + Call/Return/ReturnValue).
+    /// - Slot indices stay below `MAX_TRACE_SLOT`.
+    /// - Frame depth, simulated by `Call` (push) and `Return`/`ReturnValue`
+    ///   (pop), stays non-negative throughout and is exactly 0 at the close.
+    /// - Inside any callee body (depth > 0), no `Jump*` ops (branchless
+    ///   callees only — internal branches need side-exit machinery).
+    /// - In the caller frame (depth == 0), only the FINAL op may be a Jump*,
+    ///   and it must be a backward branch with target == `anchor_ip`.
+    /// - Length is bounded by `MAX_TRACE_LEN`.
+    pub(crate) fn is_trace_eligible(ops: &[Op], anchor_ip: usize) -> bool {
+        if ops.is_empty() || ops.len() > cfg_max_trace_len() {
+            return false;
+        }
+
+        // Per-op allowance + slot-index bound check.
+        for op in ops {
+            if !is_trace_op_allowed(op) {
+                return false;
+            }
+            let bad_slot = match op {
+                Op::GetSlot(s)
+                | Op::SetSlot(s)
+                | Op::PreIncSlot(s)
+                | Op::PreIncSlotVoid(s)
+                | Op::SlotLtIntJumpIfFalse(s, _, _)
+                | Op::SlotIncLtIntJumpBack(s, _, _) => *s >= MAX_TRACE_SLOT,
+                Op::AccumSumLoop(a, b, _) | Op::AddAssignSlotVoid(a, b) => {
+                    *a >= MAX_TRACE_SLOT || *b >= MAX_TRACE_SLOT
+                }
+                _ => false,
+            };
+            if bad_slot {
+                return false;
+            }
+        }
+
+        // Last op must be a backward branch to anchor_ip in the caller frame.
+        let last = ops.last().unwrap();
+        let closes = matches!(
+            last,
+            Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t)
+                if *t == anchor_ip
+        );
+        if !closes {
+            return false;
+        }
+
+        // Walk the body (everything except the closing branch) tracking frame
+        // depth. Phase 4: branches allowed in any frame; max inlining depth at
+        // any side-exit is bounded by `MAX_DEOPT_FRAMES`.
+        let mut depth: i32 = 0;
+        let mut max_depth_at_branch: i32 = 0;
+        for op in &ops[..ops.len() - 1] {
+            match op {
+                Op::Call(_, _) => depth += 1,
+                Op::Return | Op::ReturnValue => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
+                    // Backward jumps to anchor BEFORE the final close are
+                    // duplicate closes — malformed trace.
+                    if depth == 0 && *t == anchor_ip {
+                        return false;
+                    }
+                    if depth > max_depth_at_branch {
+                        max_depth_at_branch = depth;
+                    }
+                }
+                Op::JumpIfTrueKeep(_) | Op::JumpIfFalseKeep(_) => {
+                    // Keep variants leave the condition on the stack post-
+                    // branch; we still require empty stack at branch points.
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        // Closing branch must be in the caller frame (depth 0).
+        if depth != 0 {
+            return false;
+        }
+        // Phase 4 cap on inlined-frame materialization at side-exit.
+        if max_depth_at_branch > super::MAX_DEOPT_FRAMES as i32 {
+            return false;
+        }
+        true
+    }
+
+    /// Collect the set of slot indices referenced by the trace's CALLER
+    /// frame (depth 0). Inlined callee frames have ephemeral slot variables
+    /// allocated lazily at compile time — they don't need entry-guard
+    /// snapshots and aren't reflected in the slot buffer.
+    pub(crate) fn collect_trace_slots(ops: &[Op]) -> Vec<u16> {
+        let mut seen = Vec::new();
+        let mut depth: i32 = 0;
+        for op in ops {
+            match op {
+                Op::Call(_, _) => {
+                    depth += 1;
+                    continue;
+                }
+                Op::Return | Op::ReturnValue => {
+                    depth -= 1;
+                    continue;
+                }
+                _ => {}
+            }
+            if depth != 0 {
+                continue; // skip slot ops inside callees
+            }
+            let mark = |s: u16, seen: &mut Vec<u16>| {
+                if !seen.contains(&s) {
+                    seen.push(s);
+                }
+            };
+            match op {
+                Op::GetSlot(s) | Op::SetSlot(s) | Op::PreIncSlot(s) | Op::PreIncSlotVoid(s) => {
+                    mark(*s, &mut seen)
+                }
+                Op::SlotLtIntJumpIfFalse(s, _, _) | Op::SlotIncLtIntJumpBack(s, _, _) => {
+                    mark(*s, &mut seen)
+                }
+                Op::AccumSumLoop(a, b, _) => {
+                    mark(*a, &mut seen);
+                    mark(*b, &mut seen);
+                }
+                Op::AddAssignSlotVoid(a, b) => {
+                    mark(*a, &mut seen);
+                    mark(*b, &mut seen);
+                }
+                _ => {}
+            }
+        }
+        seen
+    }
+
+    /// Compile a recorded trace to native code.
+    ///
+    /// IR shape:
+    /// ```text
+    /// entry:
+    ///     load slot vars from *slots
+    ///     jump loop_hdr
+    /// loop_hdr:
+    ///     <emit body ops, except last (the closing branch)>
+    ///     <emit closing branch as conditional brif:
+    ///       - if continues, branch to loop_hdr
+    ///       - if exits,    branch to exit_block>
+    /// exit_block:
+    ///     spill slot vars back to *slots
+    ///     return iconst(fallthrough_ip)
+    /// ```
+    /// Phase 9 + float slots: compile a trace.
+    ///
+    /// `is_side_trace = true` means the closing branch's "loop continuation"
+    /// direction exits returning `close_anchor_ip` rather than looping back
+    /// to the IR's own loop header (side traces are one-shot completions).
+    ///
+    /// `slot_types` carries the (slot_idx, JitTy) pairs from the trace's
+    /// entry guard. Slots marked Float are stored in their Cranelift
+    /// Variables as i64 bit patterns; GetSlot bit-casts to f64 on read,
+    /// SetSlot bit-casts back on write. Fused arithmetic ops on slots
+    /// (PreIncSlot, AddAssignSlotVoid, etc.) reject Float slots — those
+    /// remain Int-only by design (they exist for tight integer counter
+    /// loops).
+    fn compile_trace_kinded(
+        ops: &[Op],
+        recorded_ips: &[usize],
+        close_anchor_ip: usize,
+        fallthrough_ip: usize,
+        is_side_trace: bool,
+        slot_types: &[(u16, JitTy)],
+        constants: &[FuseValue],
+    ) -> Option<CompiledTrace> {
+        let _ = close_anchor_ip;
+        compile_trace_inner(
+            ops,
+            recorded_ips,
+            fallthrough_ip,
+            is_side_trace,
+            slot_types,
+            constants,
+        )
+    }
+
+    fn compile_trace_inner(
+        ops: &[Op],
+        recorded_ips: &[usize],
+        fallthrough_ip: usize,
+        is_side_trace: bool,
+        slot_types: &[(u16, JitTy)],
+        constants: &[FuseValue],
+    ) -> Option<CompiledTrace> {
+        // Quick lookup: slot index → its kind (Int / Float).
+        let slot_kind_of: HashMap<u16, JitTy> = slot_types.iter().copied().collect();
+        // Defensive: catch struct-layout drift between Rust types and the
+        // hardcoded offsets used in IR codegen below.
+        assert_deopt_layout();
+        if recorded_ips.len() != ops.len() {
+            return None;
+        }
+        let mut module = new_jit_module()?;
+
+        // Helper signatures (call out to fmod/pow/lognot when needed).
+        let needs_pow = ops.iter().any(|o| matches!(o, Op::Pow));
+        let pow_i64_id = if needs_pow {
+            let mut ps = module.make_signature();
+            ps.params.push(AbiParam::new(types::I64));
+            ps.params.push(AbiParam::new(types::I64));
+            ps.returns.push(AbiParam::new(types::I64));
+            Some(
+                module
+                    .declare_function("fusevm_jit_pow_i64", Linkage::Import, &ps)
+                    .ok()?,
+            )
+        } else {
+            None
+        };
+        let pow_f64_id = if needs_pow {
+            let mut ps = module.make_signature();
+            ps.params.push(AbiParam::new(types::F64));
+            ps.params.push(AbiParam::new(types::F64));
+            ps.returns.push(AbiParam::new(types::F64));
+            Some(
+                module
+                    .declare_function("fusevm_jit_pow_f64", Linkage::Import, &ps)
+                    .ok()?,
+            )
+        } else {
+            None
+        };
+        let needs_fmod = ops.iter().any(|o| matches!(o, Op::Mod));
+        let fmod_f64_id = if needs_fmod {
+            let mut ps = module.make_signature();
+            ps.params.push(AbiParam::new(types::F64));
+            ps.params.push(AbiParam::new(types::F64));
+            ps.returns.push(AbiParam::new(types::F64));
+            Some(
+                module
+                    .declare_function("fusevm_jit_fmod_f64", Linkage::Import, &ps)
+                    .ok()?,
+            )
+        } else {
+            None
+        };
+        let needs_lognot = ops.iter().any(|o| matches!(o, Op::LogNot));
+        let lognot_id = if needs_lognot {
+            let mut ps = module.make_signature();
+            ps.params.push(AbiParam::new(types::I64));
+            ps.returns.push(AbiParam::new(types::I64));
+            Some(
+                module
+                    .declare_function("fusevm_jit_lognot_i64", Linkage::Import, &ps)
+                    .ok()?,
+            )
+        } else {
+            None
+        };
+
+        let ptr_ty = module.target_config().pointer_type();
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 slots
+        sig.params.push(AbiParam::new(ptr_ty)); // *mut DeoptInfo
+        sig.returns.push(AbiParam::new(types::I64));
+        let fid = module
+            .declare_function("trace", Linkage::Local, &sig)
+            .ok()?;
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        ctx.func.name = UserFuncName::user(0, fid.as_u32());
+
+        // Slots referenced by trace, ordered. Each becomes a Cranelift Variable
+        // promoted in the entry block and spilled in the exit block.
+        let trace_slots = collect_trace_slots(ops);
+
+        let mut fctx = FunctionBuilderContext::new();
+        {
+            let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+            let entry = bcx.create_block();
+            let loop_hdr = bcx.create_block();
+            let exit_block = bcx.create_block();
+
+            bcx.append_block_params_for_function_params(entry);
+            bcx.switch_to_block(entry);
+            let slot_base = bcx.block_params(entry)[0];
+            let deopt_ptr = bcx.block_params(entry)[1];
+
+            let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+            let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+            let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+            let lognot_ref = lognot_id.map(|lid| module.declare_func_in_func(lid, bcx.func));
+
+            // Caller frame: eagerly promote slot variables from the slot
+            // pointer. Inlined frames are pushed lazily on Op::Call.
+            let mut frames: Vec<CompileFrame> = Vec::with_capacity(4);
+            frames.push(CompileFrame {
+                slot_vars: HashMap::new(),
+                stack_base: 0,
+                return_ip: 0, // unused for caller frame
+            });
+            for &slot in &trace_slots {
+                let var = bcx.declare_var(types::I64);
+                let off = (slot as i32) * 8;
+                let v = bcx
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), slot_base, off);
+                bcx.def_var(var, v);
+                frames[0].slot_vars.insert(slot, var);
+            }
+
+            // Jump to loop header.
+            bcx.ins().jump(loop_hdr, &[]);
+
+            // Loop header block. As internal caller-frame branches are
+            // encountered, we allocate a fresh `continue_block` per branch
+            // and switch to it; the IR ends up as a chain of blocks
+            // separated by brif guards leading either forward (recorded
+            // direction) or to a side-exit.
+            bcx.switch_to_block(loop_hdr);
+            let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::with_capacity(32);
+
+            // Helper: emit a side-exit block that spills caller-frame slots
+            // and returns the given IP. Caller positions the cursor in the
+            // side-exit block on entry; we restore to the previous block on
+            // exit. Closure-style is awkward across borrows, so this is a
+            // macro-style inline pattern reused below.
+
+            // Emit all ops except the final closing branch.
+            let body = &ops[..ops.len() - 1];
+            for (i, op) in body.iter().enumerate() {
+                // For internal branches we infer the recorded direction by
+                // comparing the recorded IP of the NEXT executed op against
+                // the branch target. This is well-defined for all body
+                // positions because `recorded_ips` is parallel to `ops` and
+                // the closing branch has its own recorded IP at the end.
+                let next_recorded_ip = recorded_ips.get(i + 1).copied();
+
+                match op {
+                    Op::Nop => {}
+
+                    // ── Frame management (cross-call inlining) ──
+                    Op::Call(_, argc) => {
+                        // Op::Call resolution is implicit: the recorded ops
+                        // immediately following are the callee body. We just
+                        // open a new slot scope; abstract stack carries args
+                        // in place (no movement to slots — bytecode handles
+                        // arg consumption explicitly).
+                        let new_base = stack.len().saturating_sub(*argc as usize);
+                        // The caller's resume IP after this Call is the IP
+                        // immediately after the recorded Call op. Used at
+                        // side-exit to materialize this synthetic frame's
+                        // return address so the interpreter resumes the
+                        // caller correctly when the callee eventually
+                        // returns.
+                        let return_ip = recorded_ips[i] + 1;
+                        frames.push(CompileFrame {
+                            slot_vars: HashMap::new(),
+                            stack_base: new_base,
+                            return_ip,
+                        });
+                    }
+                    Op::Return => {
+                        // Callee returns no value: truncate stack to the
+                        // frame's entry mark, drop the slot scope.
+                        let frame = frames.pop()?;
+                        if frames.is_empty() {
+                            // Underflow — recorded an extra Return.
+                            return None;
+                        }
+                        stack.truncate(frame.stack_base);
+                    }
+                    Op::ReturnValue => {
+                        // Callee returns top-of-stack: save, truncate, push.
+                        let saved = stack.pop()?;
+                        let frame = frames.pop()?;
+                        if frames.is_empty() {
+                            return None;
+                        }
+                        stack.truncate(frame.stack_base);
+                        stack.push(saved);
+                    }
+
+                    // ── Slot ops route through the current frame's scope ──
+                    // Float-kinded caller slots are stored as i64 bit
+                    // patterns; bit-cast through f64 on use. Inlined-callee
+                    // slots are always Int (they're zero-init scratch).
+                    Op::GetSlot(slot) => {
+                        let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
+                        let raw = bcx.use_var(var);
+                        let kind = if frames.len() == 1 {
+                            slot_kind_of.get(slot).copied().unwrap_or(JitTy::Int)
+                        } else {
+                            JitTy::Int
+                        };
+                        match kind {
+                            JitTy::Int => stack.push((raw, JitTy::Int)),
+                            JitTy::Float => {
+                                let f = bcx.ins().bitcast(
+                                    types::F64,
+                                    cranelift_codegen::ir::MemFlags::new(),
+                                    raw,
+                                );
+                                stack.push((f, JitTy::Float));
+                            }
+                        }
+                    }
+                    Op::SetSlot(slot) => {
+                        let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
+                        let (v, ty) = stack.pop()?;
+                        // Coerce stored value to i64 bit pattern. For Int
+                        // values this is identity; for Float values we
+                        // bit-cast (preserving the f64's bit pattern).
+                        let v_i = match ty {
+                            JitTy::Int => v,
+                            JitTy::Float => bcx.ins().bitcast(
+                                types::I64,
+                                cranelift_codegen::ir::MemFlags::new(),
+                                v,
+                            ),
+                        };
+                        bcx.def_var(var, v_i);
+                    }
+                    Op::PreIncSlot(slot) => {
+                        // Fused-arithmetic ops on slots are int-only by
+                        // design (emitted by the bytecode optimizer for
+                        // tight integer counter loops). Reject if the slot
+                        // is Float-kinded.
+                        if frames.len() == 1 {
+                            if let Some(JitTy::Float) = slot_kind_of.get(slot).copied() {
+                                return None;
+                            }
+                        }
+                        let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
+                        let old = bcx.use_var(var);
+                        let one = bcx.ins().iconst(types::I64, 1);
+                        let new = bcx.ins().iadd(old, one);
+                        bcx.def_var(var, new);
+                        stack.push((new, JitTy::Int));
+                    }
+                    Op::PreIncSlotVoid(slot) => {
+                        if frames.len() == 1 {
+                            if let Some(JitTy::Float) = slot_kind_of.get(slot).copied() {
+                                return None;
+                            }
+                        }
+                        let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
+                        let old = bcx.use_var(var);
+                        let one = bcx.ins().iconst(types::I64, 1);
+                        let new = bcx.ins().iadd(old, one);
+                        bcx.def_var(var, new);
+                    }
+                    Op::AddAssignSlotVoid(a_slot, b_slot) => {
+                        if frames.len() == 1 {
+                            let a_kind = slot_kind_of.get(a_slot).copied().unwrap_or(JitTy::Int);
+                            let b_kind = slot_kind_of.get(b_slot).copied().unwrap_or(JitTy::Int);
+                            if a_kind != JitTy::Int || b_kind != JitTy::Int {
+                                return None;
+                            }
+                        }
+                        let a_var = get_or_alloc_slot_var(&mut frames, *a_slot, &mut bcx)?;
+                        let b_var = get_or_alloc_slot_var(&mut frames, *b_slot, &mut bcx)?;
+                        let va = bcx.use_var(a_var);
+                        let vb = bcx.use_var(b_var);
+                        let sum = bcx.ins().iadd(va, vb);
+                        bcx.def_var(a_var, sum);
+                    }
+
+                    // ── Internal caller-frame branches with side-exits ──
+                    Op::Jump(t) => {
+                        // Unconditional jump — the recorder must have followed
+                        // it. If the next recorded IP doesn't match the target,
+                        // the trace is malformed.
+                        if next_recorded_ip != Some(*t) {
+                            return None;
+                        }
+                        // No IR emitted: control falls through linearly to
+                        // the next recorded op.
+                    }
+                    Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
+                        let target = *t;
+                        let (cond, ty) = stack.pop()?;
+                        // Phase 5b: non-empty abstract stack at branch with
+                        // mixed Int/Float entries OK — each entry's kind is
+                        // tagged in `DeoptInfo.stack_kinds` so the VM can
+                        // materialize Value::Int vs Value::Float correctly.
+                        if stack.len() > super::MAX_DEOPT_STACK {
+                            return None;
+                        }
+                        let took_jump = next_recorded_ip == Some(target);
+                        // The un-recorded direction's target — where we'd
+                        // resume in the interpreter on guard fail.
+                        let side_exit_ip = if took_jump {
+                            recorded_ips[i] + 1
+                        } else {
+                            target
+                        };
+                        // Coerce the condition to an i64 truthy value for brif.
+                        let cond_pred = match ty {
+                            JitTy::Int => cond,
+                            JitTy::Float => {
+                                let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
+                                let p = bcx.ins().fcmp(FloatCC::OrderedNotEqual, cond, z);
+                                let one = bcx.ins().iconst(types::I64, 1);
+                                let zero = bcx.ins().iconst(types::I64, 0);
+                                bcx.ins().select(p, one, zero)
+                            }
+                        };
+                        // Was the cond truthy at recording time?
+                        let recorded_truthy = match op {
+                            Op::JumpIfTrue(_) => took_jump,
+                            Op::JumpIfFalse(_) => !took_jump,
+                            _ => unreachable!(),
+                        };
+                        // Build materialization records for inlined callee
+                        // frames (frames[1..]). Caller frame is implicit —
+                        // it already exists in vm.frames at trace entry.
+                        let mut frames_to_materialize: Vec<(usize, usize, Vec<(u16, Variable)>)> =
+                            Vec::new();
+                        for callee_frame in &frames[1..] {
+                            let slot_count = if callee_frame.slot_vars.is_empty() {
+                                0
+                            } else {
+                                let max = *callee_frame.slot_vars.keys().max().unwrap();
+                                (max as usize) + 1
+                            };
+                            if slot_count > super::MAX_DEOPT_SLOTS_PER_FRAME {
+                                return None;
+                            }
+                            let slot_vals: Vec<(u16, Variable)> = callee_frame
+                                .slot_vars
+                                .iter()
+                                .map(|(&slot, &var)| (slot, var))
+                                .collect();
+                            frames_to_materialize.push((
+                                callee_frame.return_ip,
+                                slot_count,
+                                slot_vals,
+                            ));
+                        }
+                        if frames_to_materialize.len() > super::MAX_DEOPT_FRAMES {
+                            return None;
+                        }
+                        let cont = bcx.create_block();
+                        let side = bcx.create_block();
+                        if recorded_truthy {
+                            bcx.ins().brif(cond_pred, cont, &[], side, &[]);
+                        } else {
+                            bcx.ins().brif(cond_pred, side, &[], cont, &[]);
+                        }
+                        // Side-exit: spill caller slots, materialize inlined
+                        // frames, write the remaining abstract stack to the
+                        // deopt buffer, return resume_ip.
+                        bcx.switch_to_block(side);
+                        emit_exit(
+                            &mut bcx,
+                            slot_base,
+                            deopt_ptr,
+                            &frames[0].slot_vars,
+                            &frames_to_materialize,
+                            &stack,
+                            side_exit_ip,
+                        );
+                        // Resume IR emission in the continue block.
+                        bcx.switch_to_block(cont);
+                    }
+                    // Phase 3 doesn't support Keep variants (post-branch
+                    // stack non-empty). Eligibility rejects upstream; this
+                    // is a defensive double-check.
+                    Op::JumpIfTrueKeep(_) | Op::JumpIfFalseKeep(_) => return None,
+
+                    // Fused-loop ops contain embedded control flow; rejected.
+                    Op::SlotLtIntJumpIfFalse(_, _, _)
+                    | Op::SlotIncLtIntJumpBack(_, _, _)
+                    | Op::AccumSumLoop(_, _, _) => return None,
+
+                    // Frame markers and builtin calls aren't traceable.
+                    Op::PushFrame | Op::PopFrame | Op::CallBuiltin(_, _) => return None,
+
+                    // Everything else delegates to emit_data_op (slot_base is
+                    // unused since slot ops are handled above).
+                    _ => {
+                        emit_data_op(
+                            &mut bcx,
+                            op,
+                            &mut stack,
+                            Some(slot_base),
+                            pow_i64_ref,
+                            pow_f64_ref,
+                            fmod_f64_ref,
+                            lognot_ref,
+                            constants,
+                        )?;
+                    }
+                }
+            }
+
+            // Closing branch must be in caller frame (depth == 0). Validation
+            // already enforced this in `is_trace_eligible`, but re-check at
+            // compile time — in case the recorder gave us a malformed trace.
+            if frames.len() != 1 {
+                return None;
+            }
+
+            // Closing branch — direction determines which side jumps back vs exits.
+            let last = ops.last()?;
+            match last {
+                Op::Jump(_) => {
+                    // Unconditional close — loop never exits via this op.
+                    // Phase 1: still need an exit somewhere; for this case
+                    // the trace is an infinite loop, which we reject upstream
+                    // (eligibility currently allows it, but we'd never compile
+                    // it productively). Bail.
+                    return None;
+                }
+                Op::JumpIfTrue(t) => {
+                    // True → "continue loop" direction; false → exit.
+                    // For main traces "continue" loops back to loop_hdr;
+                    // for side traces "continue" exits returning the close
+                    // target (so the main trace / interpreter can take
+                    // over the next iteration from the loop header).
+                    let target_ip = *t;
+                    let (cond, ty) = stack.pop()?;
+                    let pred = match ty {
+                        JitTy::Int => cond,
+                        JitTy::Float => {
+                            let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
+                            let p = bcx.ins().fcmp(FloatCC::OrderedNotEqual, cond, z);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let zero = bcx.ins().iconst(types::I64, 0);
+                            bcx.ins().select(p, one, zero)
+                        }
+                    };
+                    if is_side_trace {
+                        // Both directions exit. "Continue" exits with the
+                        // close target IP; "exit" exits with the trace's
+                        // fallthrough_ip (the post-loop IP).
+                        let cont_exit = bcx.create_block();
+                        bcx.ins().brif(pred, cont_exit, &[], exit_block, &[]);
+                        bcx.switch_to_block(cont_exit);
+                        emit_exit(
+                            &mut bcx,
+                            slot_base,
+                            deopt_ptr,
+                            &frames[0].slot_vars,
+                            &[],
+                            &[],
+                            target_ip,
+                        );
+                    } else {
+                        bcx.ins().brif(pred, loop_hdr, &[], exit_block, &[]);
+                    }
+                }
+                Op::JumpIfFalse(t) => {
+                    // False → "continue loop"; true → exit.
+                    let target_ip = *t;
+                    let (cond, ty) = stack.pop()?;
+                    let pred = match ty {
+                        JitTy::Int => cond,
+                        JitTy::Float => {
+                            let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
+                            let p = bcx.ins().fcmp(FloatCC::OrderedNotEqual, cond, z);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let zero = bcx.ins().iconst(types::I64, 0);
+                            bcx.ins().select(p, one, zero)
+                        }
+                    };
+                    if is_side_trace {
+                        let cont_exit = bcx.create_block();
+                        bcx.ins().brif(pred, exit_block, &[], cont_exit, &[]);
+                        bcx.switch_to_block(cont_exit);
+                        emit_exit(
+                            &mut bcx,
+                            slot_base,
+                            deopt_ptr,
+                            &frames[0].slot_vars,
+                            &[],
+                            &[],
+                            target_ip,
+                        );
+                    } else {
+                        bcx.ins().brif(pred, exit_block, &[], loop_hdr, &[]);
+                    }
+                }
+                _ => return None,
+            }
+
+            // Exit block: spill caller-frame slot vars, write deopt info
+            // (frame_count = 0, stack_count = 0 — closing branch leaves an
+            // empty abstract stack and is at depth 0 by eligibility), and
+            // return the loop's fallthrough IP.
+            bcx.switch_to_block(exit_block);
+            emit_exit(
+                &mut bcx,
+                slot_base,
+                deopt_ptr,
+                &frames[0].slot_vars,
+                &[],
+                &[],
+                fallthrough_ip,
+            );
+
+            bcx.seal_all_blocks();
+            bcx.finalize();
+        }
+
+        module.define_function(fid, &mut ctx).ok()?;
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().ok()?;
+        let ptr = module.get_finalized_function(fid);
+        let run = unsafe { std::mem::transmute::<*const u8, TraceFn>(ptr) };
+        Some(CompiledTrace { module, run })
+    }
+
+    /// Test-only: clear the trace cache. Public for tests within this crate.
+    #[cfg(test)]
+    pub(crate) fn trace_cache_clear() {
+        TRACE_CACHE_TLS.with(|c| c.borrow_mut().clear());
+    }
+
+    /// Public-ish: return whether a compiled trace exists for (chunk, anchor).
+    pub(crate) fn trace_is_compiled(chunk: &Chunk, anchor_ip: usize) -> bool {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|c| c.borrow().get(&key).map_or(false, |e| e.compiled.is_some()))
+    }
+
+    /// Public-ish: return the deopt count for a trace (for tests/blacklist obs).
+    pub(crate) fn trace_deopt_count(chunk: &Chunk, anchor_ip: usize) -> u32 {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|c| c.borrow().get(&key).map_or(0, |e| e.deopt_count))
+    }
+
+    /// Public-ish: return the side-exit count for a trace.
+    pub(crate) fn trace_side_exit_count(chunk: &Chunk, anchor_ip: usize) -> u32 {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|c| c.borrow().get(&key).map_or(0, |e| e.side_exit_count))
+    }
+
+    /// Phase 9: bump the side-exit counter for a trace when a deopt fires
+    /// AND no side trace was available to absorb it. Auto-blacklists after
+    /// `MAX_SIDE_EXITS`. Called from VM-side chained dispatch.
+    pub(crate) fn trace_bump_side_exit(chunk: &Chunk, anchor_ip: usize) {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|c| {
+            if let Some(entry) = c.borrow_mut().get_mut(&key) {
+                entry.side_exit_count = entry.side_exit_count.saturating_add(1);
+                if entry.side_exit_count >= cfg_max_side_exits() {
+                    entry.blacklisted = true;
+                }
+            }
+        });
+    }
+
+    /// Phase 9: read the recorded close_anchor_ip / fallthrough_ip pair
+    /// for an installed trace. The VM uses this when arming side-trace
+    /// recording at a hot side-exit — the side trace must close at the
+    /// same loop header (close_anchor_ip) and fall through to the same
+    /// post-loop IP (fallthrough_ip) as the main trace.
+    pub(crate) fn trace_loop_anchors(chunk: &Chunk, anchor_ip: usize) -> Option<(usize, usize)> {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|c| {
+            c.borrow().get(&key).and_then(|e| {
+                e.saved_metadata
+                    .as_ref()
+                    .map(|m| (m.anchor_ip, m.fallthrough_ip))
+            })
+        })
+    }
+
+    /// Public-ish: whether a trace was blacklisted.
+    pub(crate) fn trace_is_blacklisted(chunk: &Chunk, anchor_ip: usize) -> bool {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|c| c.borrow().get(&key).map_or(false, |e| e.blacklisted))
+    }
+
+    /// Phase 7: export retained recording metadata for a compiled trace so
+    /// the caller can serialize it (file, sqlite, etc.) and re-install on
+    /// next process start. Returns `None` if no compiled trace exists at
+    /// `(chunk, anchor_ip)`.
+    pub(crate) fn trace_export(chunk: &Chunk, anchor_ip: usize) -> Option<super::TraceMetadata> {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|c| c.borrow().get(&key).and_then(|e| e.saved_metadata.clone()))
+    }
+
+    /// Phase 7: re-install a previously-exported trace. Verifies the
+    /// metadata's `chunk_op_hash` matches the current chunk; mismatch
+    /// (chunk has been modified since export) returns false rather than
+    /// silently mis-compiling. On success the cache entry is populated
+    /// with a freshly-compiled trace, ready for invocation.
+    pub(crate) fn trace_import(
+        chunk: &Chunk,
+        meta: &super::TraceMetadata,
+        constants: &[FuseValue],
+    ) -> bool {
+        if meta.chunk_op_hash != chunk.op_hash {
+            return false;
+        }
+        trace_install(
+            chunk,
+            meta.anchor_ip,
+            meta.fallthrough_ip,
+            &meta.ops,
+            &meta.recorded_ips,
+            &meta.slot_kinds_at_anchor,
+            constants,
+        )
+    }
+
+    /// Bulk-export every compiled trace whose `chunk_op_hash` matches the
+    /// given chunk. Useful for persisting the entire cache after a hot
+    /// run — pair with `trace_import_all` on the next process start.
+    pub(crate) fn trace_export_all(chunk: &Chunk) -> Vec<super::TraceMetadata> {
+        TRACE_CACHE_TLS.with(|c| {
+            c.borrow()
+                .values()
+                .filter_map(|e| e.saved_metadata.clone())
+                .filter(|m| m.chunk_op_hash == chunk.op_hash)
+                .collect()
+        })
+    }
+
+    /// Bulk-import a slice of trace metadata. Each entry must match the
+    /// chunk's hash; mismatched entries are silently skipped. Returns the
+    /// number successfully re-installed.
+    pub(crate) fn trace_import_all(
+        chunk: &Chunk,
+        metas: &[super::TraceMetadata],
+        constants: &[FuseValue],
+    ) -> usize {
+        let mut installed = 0;
+        for m in metas {
+            if trace_import(chunk, m, constants) {
+                installed += 1;
+            }
+        }
+        installed
+    }
 }
 
 // ── Public API (always available) ──
@@ -1987,6 +3581,333 @@ impl JitCompiler {
     #[cfg(not(feature = "jit"))]
     pub fn is_block_eligible(&self, _chunk: &crate::Chunk) -> bool {
         false
+    }
+
+    // ── Tracing JIT (Tier 2) ──
+
+    /// Consult the trace cache at a backward-branch site.
+    ///
+    /// `anchor_ip` is the IP of the loop header (target of the backward branch).
+    /// `slots` is a mutable slot array — passed to the trace fn if it runs.
+    /// `slot_kinds_at_anchor` is the runtime types of slots at the anchor; used
+    /// for the entry guard.
+    /// `deopt_info` is a reusable scratch buffer the trace populates on exit.
+    /// On `TraceLookup::Ran`, the caller materializes any inlined frames the
+    /// trace recorded into `deopt_info.frames[..deopt_info.frame_count]`.
+    ///
+    /// Returns a `TraceLookup` describing what the interpreter should do next.
+    #[cfg(feature = "jit")]
+    pub fn trace_lookup(
+        &self,
+        chunk: &crate::Chunk,
+        anchor_ip: usize,
+        slots: &mut [i64],
+        slot_kinds_at_anchor: &[SlotKind],
+        deopt_info: &mut DeoptInfo,
+    ) -> TraceLookup {
+        let ptr = if slots.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            slots.as_mut_ptr()
+        };
+        cranelift_jit_impl::trace_lookup(chunk, anchor_ip, ptr, slot_kinds_at_anchor, deopt_info)
+    }
+
+    /// Compile and install a recorded trace.
+    ///
+    /// `ops` is the recorded op sequence; `recorded_ips` is the parallel
+    /// bytecode IP each op was dispatched from (used to infer branch
+    /// directions at compile time); `fallthrough_ip` is where the
+    /// interpreter resumes when the loop exits normally;
+    /// `slot_kinds_at_anchor` is the slot type snapshot used to install the
+    /// entry guard.
+    #[cfg(feature = "jit")]
+    pub fn trace_install(
+        &self,
+        chunk: &crate::Chunk,
+        anchor_ip: usize,
+        fallthrough_ip: usize,
+        ops: &[crate::Op],
+        recorded_ips: &[usize],
+        slot_kinds_at_anchor: &[SlotKind],
+    ) -> bool {
+        cranelift_jit_impl::trace_install(
+            chunk,
+            anchor_ip,
+            fallthrough_ip,
+            ops,
+            recorded_ips,
+            slot_kinds_at_anchor,
+            &chunk.constants,
+        )
+    }
+
+    /// Mark the trace cache entry at this anchor as aborted (recording failed).
+    #[cfg(feature = "jit")]
+    pub fn trace_abort(&self, chunk: &crate::Chunk, anchor_ip: usize) {
+        cranelift_jit_impl::trace_abort(chunk, anchor_ip);
+    }
+
+    /// Whether a recorded sequence is eligible for trace JIT compilation.
+    #[cfg(feature = "jit")]
+    pub fn is_trace_eligible(&self, ops: &[crate::Op], anchor_ip: usize) -> bool {
+        cranelift_jit_impl::is_trace_eligible(ops, anchor_ip)
+    }
+
+    /// Whether a compiled trace exists for (chunk, anchor_ip).
+    #[cfg(feature = "jit")]
+    pub fn trace_is_compiled(&self, chunk: &crate::Chunk, anchor_ip: usize) -> bool {
+        cranelift_jit_impl::trace_is_compiled(chunk, anchor_ip)
+    }
+
+    /// Number of entry-guard deopts at runtime (slot type mismatch).
+    #[cfg(feature = "jit")]
+    pub fn trace_deopt_count(&self, chunk: &crate::Chunk, anchor_ip: usize) -> u32 {
+        cranelift_jit_impl::trace_deopt_count(chunk, anchor_ip)
+    }
+
+    /// Number of mid-trace side-exits at runtime (brif guard mismatch).
+    #[cfg(feature = "jit")]
+    pub fn trace_side_exit_count(&self, chunk: &crate::Chunk, anchor_ip: usize) -> u32 {
+        cranelift_jit_impl::trace_side_exit_count(chunk, anchor_ip)
+    }
+
+    /// Phase 9: bump the side-exit counter for a trace and auto-blacklist
+    /// past the threshold. The VM's chained-dispatch path calls this only
+    /// when no side trace was found at the deopt's `resume_ip` — if a side
+    /// trace handled the deopt productively, the main trace shouldn't be
+    /// penalized.
+    #[cfg(feature = "jit")]
+    pub fn trace_bump_side_exit(&self, chunk: &crate::Chunk, anchor_ip: usize) {
+        cranelift_jit_impl::trace_bump_side_exit(chunk, anchor_ip);
+    }
+
+    /// Phase 9: install a trace with separate `record_anchor_ip` (cache key)
+    /// and `close_anchor_ip` (loop header where the closing branch lands).
+    /// For main traces the two values are identical; for side traces
+    /// recorded at a hot side-exit, `record_anchor_ip` is the side-exit IP
+    /// while `close_anchor_ip` is the enclosing loop's header. Side traces
+    /// don't loop in their own IR — both directions of the closing branch
+    /// exit, returning either the close target (continuation) or
+    /// fallthrough_ip (exit). Main traces compile via the simpler
+    /// `trace_install`.
+    #[cfg(feature = "jit")]
+    pub fn trace_install_with_kind(
+        &self,
+        chunk: &crate::Chunk,
+        record_anchor_ip: usize,
+        close_anchor_ip: usize,
+        fallthrough_ip: usize,
+        ops: &[crate::Op],
+        recorded_ips: &[usize],
+        slot_kinds_at_anchor: &[SlotKind],
+    ) -> bool {
+        cranelift_jit_impl::trace_install_with_kind(
+            chunk,
+            record_anchor_ip,
+            close_anchor_ip,
+            fallthrough_ip,
+            ops,
+            recorded_ips,
+            slot_kinds_at_anchor,
+            &chunk.constants,
+        )
+    }
+
+    /// Phase 9: read the (close_anchor_ip, fallthrough_ip) pair recorded
+    /// for an installed trace. Used by the VM when arming side-trace
+    /// recording at a hot side-exit so the side trace closes correctly.
+    #[cfg(feature = "jit")]
+    pub fn trace_loop_anchors(
+        &self,
+        chunk: &crate::Chunk,
+        anchor_ip: usize,
+    ) -> Option<(usize, usize)> {
+        cranelift_jit_impl::trace_loop_anchors(chunk, anchor_ip)
+    }
+
+    /// Whether the trace was blacklisted (too many deopts).
+    #[cfg(feature = "jit")]
+    pub fn trace_is_blacklisted(&self, chunk: &crate::Chunk, anchor_ip: usize) -> bool {
+        cranelift_jit_impl::trace_is_blacklisted(chunk, anchor_ip)
+    }
+
+    /// Phase 7: export the compiled trace's recording metadata so callers
+    /// can serialize it for persistent caching across process restarts.
+    /// Returns `None` if no compiled trace exists at `(chunk, anchor_ip)`.
+    #[cfg(feature = "jit")]
+    pub fn trace_export(&self, chunk: &crate::Chunk, anchor_ip: usize) -> Option<TraceMetadata> {
+        cranelift_jit_impl::trace_export(chunk, anchor_ip)
+    }
+
+    /// Phase 7: re-install a previously-exported trace. The metadata's
+    /// `chunk_op_hash` must match `chunk.op_hash`; otherwise returns false
+    /// (stale metadata, chunk has changed). On success the trace is
+    /// re-compiled and ready for the next invocation through `trace_lookup`.
+    #[cfg(feature = "jit")]
+    pub fn trace_import(&self, chunk: &crate::Chunk, meta: &TraceMetadata) -> bool {
+        cranelift_jit_impl::trace_import(chunk, meta, &chunk.constants)
+    }
+
+    /// Bulk export every compiled trace whose `chunk_op_hash` matches
+    /// `chunk.op_hash`. Use to persist the full cache for this chunk to
+    /// disk in a single pass.
+    #[cfg(feature = "jit")]
+    pub fn trace_export_all(&self, chunk: &crate::Chunk) -> Vec<TraceMetadata> {
+        cranelift_jit_impl::trace_export_all(chunk)
+    }
+
+    /// Bulk import a slice of trace metadata. Entries with mismatched
+    /// `chunk_op_hash` are skipped. Returns the count successfully
+    /// re-installed.
+    #[cfg(feature = "jit")]
+    pub fn trace_import_all(&self, chunk: &crate::Chunk, metas: &[TraceMetadata]) -> usize {
+        cranelift_jit_impl::trace_import_all(chunk, metas, &chunk.constants)
+    }
+
+    /// Maximum number of ops a single trace can record.
+    #[cfg(feature = "jit")]
+    pub fn trace_max_len(&self) -> usize {
+        cranelift_jit_impl::cfg_max_trace_len()
+    }
+
+    /// Apply a tracing JIT configuration to the current thread. Affects
+    /// subsequent recording, dispatch, and blacklist behavior. Existing
+    /// compiled traces are unaffected.
+    #[cfg(feature = "jit")]
+    pub fn set_config(&self, cfg: TraceJitConfig) {
+        cranelift_jit_impl::set_config(cfg);
+    }
+
+    /// Read the current thread's tracing JIT configuration.
+    #[cfg(feature = "jit")]
+    pub fn get_config(&self) -> TraceJitConfig {
+        cranelift_jit_impl::get_config()
+    }
+
+    /// Maximum slot index a trace can reference.
+    #[cfg(feature = "jit")]
+    pub fn trace_max_slot(&self) -> u16 {
+        cranelift_jit_impl::MAX_TRACE_SLOT
+    }
+
+    // ── Tracing JIT stubs (no-jit feature) ──
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_lookup(
+        &self,
+        _chunk: &crate::Chunk,
+        _anchor_ip: usize,
+        _slots: &mut [i64],
+        _slot_kinds_at_anchor: &[SlotKind],
+        _deopt_info: &mut DeoptInfo,
+    ) -> TraceLookup {
+        TraceLookup::Skip
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_install(
+        &self,
+        _chunk: &crate::Chunk,
+        _anchor_ip: usize,
+        _fallthrough_ip: usize,
+        _ops: &[crate::Op],
+        _recorded_ips: &[usize],
+        _slot_kinds_at_anchor: &[SlotKind],
+    ) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_abort(&self, _chunk: &crate::Chunk, _anchor_ip: usize) {}
+
+    #[cfg(not(feature = "jit"))]
+    pub fn is_trace_eligible(&self, _ops: &[crate::Op], _anchor_ip: usize) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_is_compiled(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_deopt_count(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> u32 {
+        0
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_side_exit_count(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> u32 {
+        0
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_bump_side_exit(&self, _chunk: &crate::Chunk, _anchor_ip: usize) {}
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_install_with_kind(
+        &self,
+        _chunk: &crate::Chunk,
+        _record_anchor_ip: usize,
+        _close_anchor_ip: usize,
+        _fallthrough_ip: usize,
+        _ops: &[crate::Op],
+        _recorded_ips: &[usize],
+        _slot_kinds_at_anchor: &[SlotKind],
+    ) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_loop_anchors(
+        &self,
+        _chunk: &crate::Chunk,
+        _anchor_ip: usize,
+    ) -> Option<(usize, usize)> {
+        None
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_is_blacklisted(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_export(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> Option<TraceMetadata> {
+        None
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_import(&self, _chunk: &crate::Chunk, _meta: &TraceMetadata) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_export_all(&self, _chunk: &crate::Chunk) -> Vec<TraceMetadata> {
+        Vec::new()
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_import_all(&self, _chunk: &crate::Chunk, _metas: &[TraceMetadata]) -> usize {
+        0
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_max_len(&self) -> usize {
+        256
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn trace_max_slot(&self) -> u16 {
+        64
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn set_config(&self, _cfg: TraceJitConfig) {}
+
+    #[cfg(not(feature = "jit"))]
+    pub fn get_config(&self) -> TraceJitConfig {
+        TraceJitConfig::defaults()
     }
 }
 

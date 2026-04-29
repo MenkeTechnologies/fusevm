@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and Cranelift JIT. The shared execution engine behind strykelang, zshrs, and awkrs.">
+  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT (linear, block, tracing). The shared execution engine behind strykelang, zshrs, and awkrs.">
   <title>fusevm — Documentation</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -126,7 +126,7 @@
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.9.7 · Fused superinstructions · Extension dispatch · Cranelift JIT</p>
+          <p class="docs-build-line">fusevm v0.11.0 · Fused superinstructions · Extension dispatch · 3-tier Cranelift JIT (linear · block · tracing)</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -147,20 +147,20 @@
 
     <main class="tutorial-main">
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>FUSEVM REFERENCE</h2>
-      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and Cranelift JIT. The shared execution engine behind strykelang, zshrs, and awkrs.</p>
+      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 10), tracing (hot loop body, full side-exit machinery). The shared execution engine behind strykelang, zshrs, and awkrs.</p>
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
         <p class="motto">ONE VM TO RUN THEM ALL.</p>
-        <p class="motto" style="font-size: 12px; color: var(--cyan); margin-top: -1rem;">FUSED SUPERINSTRUCTIONS. EXTENSION DISPATCH. CRANELIFT JIT.</p>
+        <p class="motto" style="font-size: 12px; color: var(--cyan); margin-top: -1rem;">FUSED SUPERINSTRUCTIONS. EXTENSION DISPATCH. 3-TIER CRANELIFT JIT.</p>
 
         <div class="stat-grid">
           <div><div class="stat">129</div><div class="stat-label">opcodes</div></div>
           <div><div class="stat">10</div><div class="stat-label">op categories</div></div>
           <div><div class="stat">8</div><div class="stat-label">fused superinstructions</div></div>
           <div><div class="stat">24</div><div class="stat-label">shell ops</div></div>
-          <div><div class="stat">4,258</div><div class="stat-label">lines of Rust</div></div>
-          <div><div class="stat">0</div><div class="stat-label">unsafe blocks</div></div>
+          <div><div class="stat">7,242</div><div class="stat-label">lines of Rust</div></div>
+          <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
           <div><div class="stat">3</div><div class="stat-label">language frontends</div></div>
           <div><div class="stat">&le;24B</div><div class="stat-label">op size (cache-friendly)</div></div>
         </div>
@@ -188,28 +188,32 @@
   ┌─────────────────────────────────────────────────────────────────┐
   │                     LANGUAGE FRONTENDS                          │
   │                                                                 │
-  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐       │
-  │  ���  strykelang    │  │    zshrs       │  │    awkrs       │      │
-  │  │ Perl 5 compat  │  │ shell compiler │  │ awk compiler   │      │
-  │  │ ~450 ext ops   │  │ ~20 ext ops    │  │ ~95 ext ops    │      │
-  │  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘       │
-  │          │       compile     │                   │               │
-  │          └──────────────────┬───────────────────┘               │
-  │                     ▼                                            │
-  │          ┌─────────────────────┐                                 │
-  │          │  ChunkBuilder       │                                 │
-  │          │  .emit(Op, line)    │                                 │
-  │          │  .build() → Chunk   │                                 │
-  │          └─────────┬───────────┘                                 │
-  │                    │                                             │
-  │          ┌─────────┴──────────────────┐                          │
-  │          ▼                            ▼                          │
-  │  ┌─────────────────┐     ┌──────────────────────┐               │
-  │  │   VM::run()     │     │   JitCompiler        │               │
-  │  │  match-dispatch │     │  is_eligible(chunk)   │               │
-  │  │  interpreter    │     │  compile() → native   │               │
-  │  │                 │     │  (Cranelift codegen)   │               │
-  │  └─────────────────┘     └──────────────────────┘               │
+  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐        │
+  │  │  strykelang   │  │    zshrs      │  │    awkrs      │        │
+  │  │ Perl 5 compat │  │ shell compiler│  │ awk compiler  │        │
+  │  │ ~450 ext ops  │  │ ~20 ext ops   │  │ ~95 ext ops   │        │
+  │  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘        │
+  │          │       compile    │                  │                │
+  │          └──────────────────┼──────────────────┘                │
+  │                             ▼                                   │
+  │                  ┌─────────────────────┐                        │
+  │                  │  ChunkBuilder       │                        │
+  │                  │  .emit(Op, line)    │                        │
+  │                  │  .build() → Chunk   │                        │
+  │                  └─────────┬───────────┘                        │
+  │                            │                                    │
+  │              ┌─────────────┴─────────────┐                      │
+  │              ▼                           ▼                      │
+  │      ┌──────────────┐         ┌────────────────────────┐        │
+  │      │  VM::run()   │ ◀──────▶│   JitCompiler tiers    │        │
+  │      │ match-       │  trace  │ ┌──────────────────┐   │        │
+  │      │ dispatch     │  invoke │ │ Linear  (instant)│   │        │
+  │      │ interpreter  │  ◀─────▶│ │ Block   (≥10x)   │   │        │
+  │      │              │  deopt  │ │ Tracing (≥50x)   │   │        │
+  │      └──────────────┘         │ └──────────────────┘   │        │
+  │                               │  Cranelift 0.130       │        │
+  │                               │  native x86-64/aarch64 │        │
+  │                               └────────────────────────┘        │
   └─────────────────────────────────────────────────────────────────┘
         </div>
 
@@ -449,32 +453,73 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         <h2><span class="section-num">[0x06]</span> JIT COMPILATION</h2>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
-        The <code>JitCompiler</code> analyzes chunks for eligibility and compiles hot paths to native
-        code via Cranelift. Frontends implement <code>JitExtension</code> to provide custom eligibility
-        logic and extension op compilation.</p>
-
-        <div class="code-block"><span class="keyword">use</span> fusevm::jit::{JitCompiler, JitExtension, NativeCode};
-
-<span class="keyword">struct</span> MyJit;
-<span class="keyword">impl</span> JitExtension <span class="keyword">for</span> MyJit {
-    <span class="keyword">fn</span> is_eligible(&amp;self, chunk: &amp;Chunk) -&gt; bool {
-        <span class="comment">// custom eligibility logic</span>
-        <span class="keyword">true</span>
-    }
-}
-
-<span class="keyword">let</span> compiler = JitCompiler::new();
-<span class="keyword">if</span> compiler.is_eligible(&amp;chunk) {
-    <span class="keyword">let</span> native: NativeCode = compiler.compile(&amp;chunk);
-    <span class="comment">// execute native code instead of interpreter dispatch</span>
-}</div>
+        The <code>JitCompiler</code> runs three tiers in increasing order of optimization power and
+        compile cost. Each tier covers a disjoint slice of the workload — they don't compete.
+        Compile-time decisions and runtime invocation are mediated through one stateless
+        <code>JitCompiler</code> handle (the actual cache is thread-local).</p>
 
         <table class="arch-table">
-          <tr><th>Component</th><th>Role</th></tr>
-          <tr><td><code>JitCompiler</code></td><td>Eligibility analysis + Cranelift IR generation</td></tr>
-          <tr><td><code>JitExtension</code></td><td>Frontend-provided trait for custom eligibility + extension op compilation</td></tr>
-          <tr><td><code>NativeCode</code></td><td>Compiled native function pointer + metadata</td></tr>
-          <tr><td><code>is_eligible()</code></td><td>Checks op mix, loop depth, extension usage to decide if JIT is profitable</td></tr>
+          <tr><th>Tier</th><th>Trigger</th><th>Coverage</th><th>Speculation</th></tr>
+          <tr><td><code>Linear</code></td><td>first call</td><td>Straight-line expression chunks; returns <code>Value</code> (int or float)</td><td>None — IR matches bytecode exactly</td></tr>
+          <tr><td><code>Block</code></td><td>≥ 10 invocations</td><td>Whole-chunk CFG (loops, branches, fused backedges)</td><td>None — slot ops assume i64</td></tr>
+          <tr><td><code>Tracing</code></td><td>≥ 50 backedges through any loop header</td><td>Hot path through anything; recorded loop body compiled with type-specialized IR</td><td>Slot-type entry guard + per-branch <code>brif</code> guards; deopts to interpreter on guard miss</td></tr>
+        </table>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Tracing JIT is opt-in per <code>VM</code> via <code>vm.enable_tracing_jit()</code>. The recorder
+        anchors at backward branches, captures the executed op sequence on the next iteration through
+        the header, and installs a compiled trace. Subsequent loop iterations dispatch through native
+        code until either the loop exit condition becomes false or a guard side-exits.</p>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Tracing JIT capability matrix</h3>
+
+        <table class="arch-table">
+          <tr><th>Capability</th><th>Phase</th><th>Detail</th></tr>
+          <tr><td>Loop bodies, int slots, no calls</td><td>1</td><td>Loops with ≤<code>MAX_TRACE_SLOT</code> int slots, single backward closing branch</td></tr>
+          <tr><td>Cross-call inlining (branchless callees)</td><td>2</td><td>Op::Call inlines callee body into trace IR; per-frame slot-variable scope</td></tr>
+          <tr><td>Caller-frame internal branches with side-exits</td><td>3</td><td><code>if</code>/<code>else</code> in caller frame compiles with <code>brif</code> guards + per-branch side-exit blocks</td></tr>
+          <tr><td>Callee-frame branches, frame materialization on deopt</td><td>4</td><td>Branches inside inlined callees; <code>DeoptInfo</code> out-param materializes synthetic <code>Frame</code>s on <code>vm.frames</code></td></tr>
+          <tr><td>Value-stack reconstruction on deopt (Int + Float)</td><td>5 + 5b</td><td>Non-empty abstract stack at branch is OK; <code>stack_kinds</code> tag distinguishes Int from Float entries</td></tr>
+          <tr><td>Side-exit deopt counter + auto-blacklist</td><td>6</td><td>Per-trace <code>side_exit_count</code>; blacklist after <code>MAX_SIDE_EXITS</code> (50) misses</td></tr>
+          <tr><td>Persistent metadata export/import</td><td>7</td><td><code>TraceMetadata</code> (serde-serializable) round-trips through <code>trace_export</code> / <code>trace_import</code></td></tr>
+          <tr><td>Bounded recursion inlining</td><td>8</td><td>Self-recursive calls inline up to <code>MAX_INLINE_RECURSION</code> (4) levels deep before aborting</td></tr>
+          <tr><td>Side-trace stitching from hot deopt sites</td><td>9</td><td>Recorder splits <code>record_anchor_ip</code> (cache key) from <code>close_anchor_ip</code> (loop header); side traces compile via <code>trace_install_with_kind</code> and don't loop in their own IR; chained dispatch up to <code>MAX_TRACE_CHAIN</code> (4) hops</td></tr>
+        </table>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Usage</h3>
+
+        <div class="code-block"><span class="keyword">use</span> fusevm::{ChunkBuilder, JitCompiler, Op, VM, VMResult, Value};
+
+<span class="keyword">let</span> mut b = ChunkBuilder::new();
+<span class="comment">// ... emit a counter loop ...</span>
+<span class="keyword">let</span> chunk = b.build();
+
+<span class="keyword">let</span> mut vm = VM::new(chunk.clone());
+<span class="comment">// Tracing JIT is opt-in per VM.</span>
+vm.enable_tracing_jit();
+<span class="keyword">match</span> vm.run() {
+    VMResult::Ok(val) =&gt; <span class="comment">// hot loop ran via native trace ...</span>
+    _ =&gt; {}
+}
+
+<span class="comment">// Phase 7: persist the compiled trace's metadata.</span>
+<span class="keyword">let</span> jit = JitCompiler::new();
+<span class="keyword">if let</span> Some(meta) = jit.trace_export(&amp;chunk, anchor_ip) {
+    <span class="keyword">let</span> bytes = serde_json::to_vec(&amp;meta)?;
+    std::fs::write(<span class="string">"trace.json"</span>, bytes)?;
+}
+<span class="comment">// On next process start: re-import + re-compile.</span>
+<span class="keyword">let</span> meta: TraceMetadata = serde_json::from_slice(&amp;std::fs::read(<span class="string">"trace.json"</span>)?)?;
+jit.trace_import(&amp;chunk, &amp;meta);</div>
+
+        <table class="arch-table">
+          <tr><th>Type</th><th>Role</th></tr>
+          <tr><td><code>JitCompiler</code></td><td>Stateless handle over the thread-local trace cache; entry point for all tier APIs</td></tr>
+          <tr><td><code>JitExtension</code></td><td>Frontend-provided trait registering language-specific extended op JIT support</td></tr>
+          <tr><td><code>SlotKind</code></td><td>Slot type tag (Int / Float) for the tracing JIT's entry guard</td></tr>
+          <tr><td><code>TraceLookup</code></td><td>Dispatch outcome at a backward branch (<code>NotHot</code> / <code>StartRecording</code> / <code>Ran</code> / <code>GuardMismatch</code> / <code>Skip</code>)</td></tr>
+          <tr><td><code>DeoptInfo</code> / <code>DeoptFrame</code></td><td><code>#[repr(C)]</code> out-params trace fns populate to materialize inlined frames + value-stack on side-exit</td></tr>
+          <tr><td><code>TraceMetadata</code></td><td>Serde-serializable record for persistent trace cache (phase 7)</td></tr>
         </table>
       </section>
 

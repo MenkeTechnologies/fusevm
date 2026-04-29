@@ -25,8 +25,70 @@
 
 use crate::chunk::Chunk;
 use crate::host::ShellHost;
+#[cfg(feature = "jit")]
+use crate::jit::{DeoptInfo, JitCompiler, SlotKind, TraceLookup};
 use crate::op::Op;
 use crate::value::Value;
+
+// Tracing-JIT thresholds previously sourced from `vm.rs` constants are
+// now read through `JitCompiler::get_config()` so callers can override
+// per-thread via `JitCompiler::set_config(...)`. The defaults match the
+// historical phase-by-phase constants:
+//   trace_threshold      = 50  (backedges before recording arms)
+//   max_side_exits       = 50  (side-exits before main-trace blacklist)
+//   max_inline_recursion = 4   (self-recursive call depth cap)
+//   max_trace_chain      = 4   (chained side-trace dispatch depth cap)
+//   max_trace_len        = 256 (recorded ops cap)
+
+/// In-progress trace recording state.
+///
+/// The recorder is armed when `trace_lookup` returns `StartRecording`.
+/// While armed, every dispatched op is appended to `ops` before the op's
+/// effect is applied. The recording closes when the interpreter takes a
+/// backward jump that lands at `close_anchor_ip`.
+///
+/// Phase 9 split: `record_anchor_ip` is where the recording STARTED (the
+/// trace cache key); `close_anchor_ip` is where the recording is expected
+/// to LAND on close. For main traces the two are identical (a loop header
+/// is both the recording start and the closing-branch target). For side
+/// traces (recordings armed at a hot side-exit), `record_anchor_ip` is the
+/// side-exit IP the recorder started from, while `close_anchor_ip` remains
+/// the enclosing loop's header — so the trace closes correctly when the
+/// loop's backward branch fires.
+///
+/// `entered_ips` simulates the inlined frame stack so the recorder can
+/// (a) bound self-recursion to `MAX_INLINE_RECURSION` levels, and
+/// (b) reject unbalanced Returns. The values pushed are bytecode entry IPs
+/// resolved from `Op::Call(name_idx, _)`.
+#[cfg(feature = "jit")]
+struct TraceRecorder {
+    /// Phase 9: IP recording started from. Used as the trace cache key
+    /// `(chunk.op_hash, record_anchor_ip)`.
+    record_anchor_ip: usize,
+    /// Phase 9: IP the closing backward branch is expected to land at.
+    /// For main traces this equals `record_anchor_ip`; for side traces
+    /// it's the enclosing loop's header.
+    close_anchor_ip: usize,
+    /// IP just past the closing branch (where the interpreter resumes on
+    /// normal loop exit).
+    fallthrough_ip: usize,
+    /// Recorded op sequence (body + closing branch as final op).
+    ops: Vec<Op>,
+    /// Original bytecode IP each recorded op was dispatched from. Parallel to
+    /// `ops`. Used at compile time to infer direction taken at conditional
+    /// branches: for op at index `i`, if `recorded_ips[i+1]` equals the op's
+    /// jump target, the jump was taken; otherwise the fallthrough was.
+    recorded_ips: Vec<usize>,
+    /// Slot type snapshot at recording start; installed as the entry guard.
+    slot_kinds_at_anchor: Vec<SlotKind>,
+    /// Stack of bytecode entry IPs for currently inlined callees. Empty in
+    /// the caller frame; pushed on Op::Call, popped on Op::Return /
+    /// Op::ReturnValue. Used for recursion detection.
+    entered_ips: Vec<usize>,
+    /// True if any condition aborted the recording. Causes cleanup-only on
+    /// next jump dispatch.
+    aborted: bool,
+}
 
 /// Call frame on the frame stack.
 #[derive(Debug, Clone)]
@@ -72,6 +134,27 @@ pub struct VM {
     pub host: Option<Box<dyn ShellHost>>,
     /// Halted flag
     halted: bool,
+    /// Tracing JIT enabled. When true, backward branches consult the trace
+    /// cache and may invoke compiled traces or arm the recorder.
+    #[cfg(feature = "jit")]
+    tracing_jit: bool,
+    /// JIT compiler instance — stateless wrapper over the thread-local cache.
+    #[cfg(feature = "jit")]
+    jit: JitCompiler,
+    /// Active trace recording, if any.
+    #[cfg(feature = "jit")]
+    recorder: Option<TraceRecorder>,
+    /// Reusable scratch i64 buffer of slot values, passed to compiled traces.
+    #[cfg(feature = "jit")]
+    slot_buf: Vec<i64>,
+    /// Reusable scratch slot-kind snapshot for the trace entry guard.
+    #[cfg(feature = "jit")]
+    slot_kinds_buf: Vec<SlotKind>,
+    /// Reusable scratch buffer the trace fn populates on every invocation
+    /// with the resume IP and (on callee-frame side-exits) inlined-frame
+    /// materialization records the VM uses to reshape `vm.frames`.
+    #[cfg(feature = "jit")]
+    deopt_info: Box<DeoptInfo>,
 }
 
 /// Result of VM execution
@@ -106,7 +189,40 @@ impl VM {
             builtin_table: Vec::new(),
             host: None,
             halted: false,
+            #[cfg(feature = "jit")]
+            tracing_jit: false,
+            #[cfg(feature = "jit")]
+            jit: JitCompiler::new(),
+            #[cfg(feature = "jit")]
+            recorder: None,
+            #[cfg(feature = "jit")]
+            slot_buf: Vec::new(),
+            #[cfg(feature = "jit")]
+            slot_kinds_buf: Vec::new(),
+            #[cfg(feature = "jit")]
+            deopt_info: Box::new(DeoptInfo::zeroed()),
         }
+    }
+
+    /// Enable the tracing JIT for this VM. After this call, hot loops
+    /// (loops crossing the backedge threshold) will be recorded and JIT-
+    /// compiled at runtime; subsequent iterations dispatch through the
+    /// compiled trace.
+    ///
+    /// Phase 1 limits: only int-slot loops with a single backward branch and
+    /// no internal jumps are traceable. Loops outside that envelope continue
+    /// to run in the interpreter.
+    #[cfg(feature = "jit")]
+    pub fn enable_tracing_jit(&mut self) {
+        self.tracing_jit = true;
+    }
+
+    /// Disable the tracing JIT. Existing compiled traces remain in the
+    /// thread-local cache but are no longer consulted from this VM.
+    #[cfg(feature = "jit")]
+    pub fn disable_tracing_jit(&mut self) {
+        self.tracing_jit = false;
+        self.recorder = None;
     }
 
     /// Register the frontend shell host. Replaces any prior host.
@@ -132,6 +248,273 @@ impl VM {
             self.builtin_table.resize(idx + 1, None);
         }
         self.builtin_table[idx] = Some(handler);
+    }
+
+    // ── Tracing JIT integration helpers ──
+
+    /// Snapshot the current frame's slots into the i64 + slot-kind buffers.
+    ///
+    /// Slots that don't fit cleanly into i64 (Array/Hash/String/etc) are
+    /// reported as `SlotKind::Int` with i64 value 0 — they will fail the
+    /// trace's entry guard if the recorded trace expected Int there, which
+    /// is the desired behavior (skip the trace, fall back to interpreter).
+    #[cfg(feature = "jit")]
+    fn refresh_slot_buffers(&mut self) {
+        let frame = match self.frames.last() {
+            Some(f) => f,
+            None => return,
+        };
+        let n = frame.slots.len();
+        self.slot_buf.clear();
+        self.slot_kinds_buf.clear();
+        self.slot_buf.reserve(n);
+        self.slot_kinds_buf.reserve(n);
+        for v in &frame.slots {
+            let (i, kind) = match v {
+                Value::Int(n) => (*n, SlotKind::Int),
+                Value::Float(f) => (f.to_bits() as i64, SlotKind::Float),
+                Value::Bool(b) => (*b as i64, SlotKind::Int),
+                _ => (0, SlotKind::Int),
+            };
+            self.slot_buf.push(i);
+            self.slot_kinds_buf.push(kind);
+        }
+    }
+
+    /// Copy the i64 slot buffer back into the current frame's slots,
+    /// materializing Int and Float kinds. Float slots are stored as i64
+    /// bit patterns in the buffer; recover via `f64::from_bits`. Slots of
+    /// other kinds (Array, Hash, etc.) are left untouched — those slots
+    /// would have prevented trace install if referenced.
+    #[cfg(feature = "jit")]
+    fn write_slots_back(&mut self) {
+        let frame = match self.frames.last_mut() {
+            Some(f) => f,
+            None => return,
+        };
+        let n = frame.slots.len().min(self.slot_buf.len());
+        for i in 0..n {
+            match self.slot_kinds_buf.get(i) {
+                Some(SlotKind::Int) => {
+                    frame.slots[i] = Value::Int(self.slot_buf[i]);
+                }
+                Some(SlotKind::Float) => {
+                    frame.slots[i] = Value::Float(f64::from_bits(self.slot_buf[i] as u64));
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Consult the trace cache at a backward-branch site and return the IP
+    /// the interpreter should resume at. If a compiled trace runs, slot state
+    /// is copied back from the trace's i64 buffer into the frame, and any
+    /// inlined callee frames the trace recorded at a side-exit are
+    /// materialized as synthetic `Frame`s on `self.frames` so the
+    /// interpreter can resume mid-callee with a correctly shaped call stack.
+    #[cfg(feature = "jit")]
+    fn lookup_trace_for_backward(&mut self, anchor_ip: usize, fallthrough_ip: usize) -> usize {
+        self.refresh_slot_buffers();
+        let lookup = self.jit.trace_lookup(
+            &self.chunk,
+            anchor_ip,
+            &mut self.slot_buf,
+            &self.slot_kinds_buf,
+            &mut self.deopt_info,
+        );
+        match lookup {
+            TraceLookup::Ran { resume_ip } => {
+                self.write_slots_back();
+                self.materialize_deopt_frames();
+                // Phase 9: if the trace deopted (returned non-fallthrough),
+                // try to chain into a side trace at the resume IP.
+                self.chain_side_traces(anchor_ip, fallthrough_ip, resume_ip)
+            }
+            TraceLookup::StartRecording => {
+                // Main-trace path: record_anchor_ip == close_anchor_ip
+                // (the loop header). Side-trace recording is armed via the
+                // chained-dispatch path below.
+                self.recorder = Some(TraceRecorder {
+                    record_anchor_ip: anchor_ip,
+                    close_anchor_ip: anchor_ip,
+                    fallthrough_ip,
+                    ops: Vec::new(),
+                    recorded_ips: Vec::new(),
+                    slot_kinds_at_anchor: self.slot_kinds_buf.clone(),
+                    entered_ips: Vec::new(),
+                    aborted: false,
+                });
+                anchor_ip
+            }
+            TraceLookup::NotHot | TraceLookup::GuardMismatch | TraceLookup::Skip => anchor_ip,
+        }
+    }
+
+    /// Phase 9: chained dispatch through linked traces.
+    ///
+    /// When the main trace's `compiled.invoke` returns a non-fallthrough
+    /// resume IP (a brif guard fired and we side-exited), this method
+    /// attempts to dispatch a side trace registered at that resume IP.
+    /// Iterates up to `MAX_TRACE_CHAIN` times so a sequence of linked
+    /// side-exits can resolve through their respective side traces.
+    ///
+    /// Side-trace recording is armed when a side-exit IP becomes hot (the
+    /// `StartRecording` branch). The recorder is set up with
+    /// `close_anchor_ip = main_anchor`, so the side trace closes correctly
+    /// when the enclosing loop's backward branch fires.
+    ///
+    /// The main trace's `side_exit_count` is incremented only when the
+    /// chain bottoms out without finding a side trace — exits that are
+    /// being absorbed productively shouldn't push the main trace toward
+    /// blacklisting.
+    #[cfg(feature = "jit")]
+    fn chain_side_traces(
+        &mut self,
+        main_anchor: usize,
+        main_fallthrough: usize,
+        first_resume: usize,
+    ) -> usize {
+        let mut current = first_resume;
+        if current == main_fallthrough {
+            return current;
+        }
+        let max_chain = self.jit.get_config().max_trace_chain;
+        for _ in 0..max_chain {
+            // The chained trace at `current` may itself have a different
+            // fallthrough; we re-fetch on each iteration.
+            let chained_fallthrough = self
+                .jit
+                .trace_loop_anchors(&self.chunk, current)
+                .map(|(_, fallthrough)| fallthrough);
+
+            self.refresh_slot_buffers();
+            let lookup = self.jit.trace_lookup(
+                &self.chunk,
+                current,
+                &mut self.slot_buf,
+                &self.slot_kinds_buf,
+                &mut self.deopt_info,
+            );
+            match lookup {
+                TraceLookup::Ran { resume_ip } => {
+                    self.write_slots_back();
+                    self.materialize_deopt_frames();
+                    current = resume_ip;
+                    if Some(current) == chained_fallthrough {
+                        return current;
+                    }
+                }
+                TraceLookup::StartRecording => {
+                    // Arm side-trace recording. The side trace's close
+                    // anchor is the main loop's header; its fallthrough is
+                    // the main loop's post-loop IP. Slot-kind snapshot is
+                    // taken at THIS moment (post-deopt state).
+                    self.recorder = Some(TraceRecorder {
+                        record_anchor_ip: current,
+                        close_anchor_ip: main_anchor,
+                        fallthrough_ip: main_fallthrough,
+                        ops: Vec::new(),
+                        recorded_ips: Vec::new(),
+                        slot_kinds_at_anchor: self.slot_kinds_buf.clone(),
+                        entered_ips: Vec::new(),
+                        aborted: false,
+                    });
+                    return current;
+                }
+                _ => {
+                    // No side trace available; count toward main trace's
+                    // blacklist budget.
+                    self.jit.trace_bump_side_exit(&self.chunk, main_anchor);
+                    return current;
+                }
+            }
+        }
+        current
+    }
+
+    /// Push synthetic `Frame`s onto `self.frames` for each inlined callee
+    /// frame the trace recorded at side-exit, then push any remaining
+    /// abstract-stack values from the trace onto `self.stack` as
+    /// `Value::Int`. Order matters: stack values are pushed BEFORE the
+    /// frames are pushed, because each frame's `stack_base` snapshots
+    /// `self.stack.len()` AFTER the stack values are placed — that way
+    /// when the synthetic frame eventually returns and truncates to
+    /// `stack_base`, those values are correctly retained. Phase 5+.
+    #[cfg(feature = "jit")]
+    fn materialize_deopt_frames(&mut self) {
+        // 1. Push the abstract stack (in trace order; entry [0] ends up at
+        //    the bottom, [N-1] at the top). Float entries are bit-cast back
+        //    via `f64::from_bits`; everything else is treated as `i64`.
+        let stack_count = self.deopt_info.stack_count;
+        for i in 0..stack_count {
+            let raw = self.deopt_info.stack_buf[i];
+            let v = match self.deopt_info.stack_kinds[i] {
+                crate::jit::STACK_KIND_FLOAT => Value::Float(f64::from_bits(raw as u64)),
+                _ => Value::Int(raw),
+            };
+            self.stack.push(v);
+        }
+        // 2. Materialize inlined frames.
+        let count = self.deopt_info.frame_count;
+        if count == 0 {
+            return;
+        }
+        for i in 0..count {
+            let df = &self.deopt_info.frames[i];
+            let mut slots: Vec<Value> = Vec::with_capacity(df.slot_count);
+            for j in 0..df.slot_count {
+                slots.push(Value::Int(df.slots[j]));
+            }
+            self.frames.push(Frame {
+                return_ip: df.return_ip,
+                stack_base: self.stack.len(),
+                slots,
+            });
+        }
+    }
+
+    /// Finalize the active recording: either close (install) when the just-
+    /// dispatched jump landed back at the anchor and the trace is eligible,
+    /// or abort and discard. Safe to call only when `self.recorder.is_some()`.
+    #[cfg(feature = "jit")]
+    fn finalize_recorder(&mut self) {
+        let Some(rec) = self.recorder.as_ref() else {
+            return;
+        };
+        let aborted = rec.aborted;
+        let close_anchor = rec.close_anchor_ip;
+        let record_anchor = rec.record_anchor_ip;
+        // Trace closes when the just-dispatched jump lands at the recorded
+        // close anchor. For main traces this is the loop header; for side
+        // traces it's the enclosing loop's header (the side trace
+        // started at a side-exit IP but still closes when the loop iterates).
+        if !aborted && self.ip == close_anchor {
+            let r = self.recorder.take().unwrap();
+            if self.jit.is_trace_eligible(&r.ops, r.close_anchor_ip) {
+                // Phase 9: when record != close (side trace), install via
+                // the kinded variant so the IR's "continuation" branch
+                // exits rather than looping back.
+                let installed = self.jit.trace_install_with_kind(
+                    &self.chunk,
+                    r.record_anchor_ip,
+                    r.close_anchor_ip,
+                    r.fallthrough_ip,
+                    &r.ops,
+                    &r.recorded_ips,
+                    &r.slot_kinds_at_anchor,
+                );
+                if !installed {
+                    self.jit.trace_abort(&self.chunk, r.record_anchor_ip);
+                }
+            } else {
+                self.jit.trace_abort(&self.chunk, r.record_anchor_ip);
+            }
+        } else {
+            // Trace dispatch landed somewhere unexpected — abort. The
+            // record_anchor_ip captured before take() is the cache key.
+            let _ = self.recorder.take();
+            self.jit.trace_abort(&self.chunk, record_anchor);
+        }
     }
 
     // ── Stack operations ──
@@ -201,6 +584,74 @@ impl VM {
             // Zero-clone: borrow the op instead of cloning
             let ip = self.ip;
             self.ip += 1;
+
+            // Tracing JIT: capture this op into the active recording, if any.
+            // Push happens before dispatch so the closing branch is included.
+            // Track whether the recorder was armed BEFORE this dispatch step —
+            // a recorder armed inside this step (via `StartRecording`) must not
+            // finalize until the NEXT iteration, otherwise the very dispatch
+            // step that armed it would also close it with an empty op list.
+            #[cfg(feature = "jit")]
+            let recorder_was_armed = self.recorder.is_some();
+            #[cfg(feature = "jit")]
+            if self.recorder.is_some() {
+                let cfg = self.jit.get_config();
+                let max_len = cfg.max_trace_len;
+                let max_inline_recursion = cfg.max_inline_recursion;
+                let cur_op = ops[ip].clone();
+                // Resolve sub-entry up front (immutable chunk borrow) so the
+                // mutable recorder borrow below doesn't collide.
+                let resolved_entry = if let Op::Call(name_idx, _) = &cur_op {
+                    self.chunk.find_sub(*name_idx)
+                } else {
+                    None
+                };
+                let rec = self.recorder.as_mut().unwrap();
+                if !rec.aborted {
+                    rec.ops.push(cur_op.clone());
+                    rec.recorded_ips.push(ip);
+                    if rec.ops.len() > max_len {
+                        rec.aborted = true;
+                    } else {
+                        // Maintain inlined-frame stack and abort on patterns
+                        // the trace JIT can't represent in phase 2.
+                        match cur_op {
+                            Op::Call(_, _) => match resolved_entry {
+                                Some(entry_ip) => {
+                                    // Phase 8: bounded recursion. Allow a
+                                    // self-call to be inlined up to
+                                    // `MAX_INLINE_RECURSION` levels deep
+                                    // before aborting. Each push is one
+                                    // level — the depth limit naturally
+                                    // bounds tail-recursive helpers without
+                                    // explicit base-case detection.
+                                    let occurrences = rec
+                                        .entered_ips
+                                        .iter()
+                                        .filter(|&&ip| ip == entry_ip)
+                                        .count();
+                                    if occurrences >= max_inline_recursion {
+                                        rec.aborted = true;
+                                    } else {
+                                        rec.entered_ips.push(entry_ip);
+                                    }
+                                }
+                                None => rec.aborted = true, // unknown sub
+                            },
+                            Op::Return | Op::ReturnValue => {
+                                if rec.entered_ips.is_empty() {
+                                    rec.aborted = true; // unbalanced — would
+                                                        // pop the caller frame
+                                } else {
+                                    rec.entered_ips.pop();
+                                }
+                            }
+                            Op::CallBuiltin(_, _) => rec.aborted = true,
+                            _ => {}
+                        }
+                    }
+                }
+            }
 
             match &ops[ip] {
                 Op::Nop => {}
@@ -479,25 +930,77 @@ impl VM {
                 }
 
                 // ── Control flow ──
-                Op::Jump(target) => self.ip = *target,
+                Op::Jump(target) => {
+                    let target = *target;
+                    #[cfg(feature = "jit")]
+                    if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                        self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                    } else {
+                        self.ip = target;
+                    }
+                    #[cfg(not(feature = "jit"))]
+                    {
+                        self.ip = target;
+                    }
+                }
                 Op::JumpIfTrue(target) => {
+                    let target = *target;
                     if self.pop().is_truthy() {
-                        self.ip = *target;
+                        #[cfg(feature = "jit")]
+                        if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                            self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                        } else {
+                            self.ip = target;
+                        }
+                        #[cfg(not(feature = "jit"))]
+                        {
+                            self.ip = target;
+                        }
                     }
                 }
                 Op::JumpIfFalse(target) => {
+                    let target = *target;
                     if !self.pop().is_truthy() {
-                        self.ip = *target;
+                        #[cfg(feature = "jit")]
+                        if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                            self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                        } else {
+                            self.ip = target;
+                        }
+                        #[cfg(not(feature = "jit"))]
+                        {
+                            self.ip = target;
+                        }
                     }
                 }
                 Op::JumpIfTrueKeep(target) => {
+                    let target = *target;
                     if self.peek().is_truthy() {
-                        self.ip = *target;
+                        #[cfg(feature = "jit")]
+                        if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                            self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                        } else {
+                            self.ip = target;
+                        }
+                        #[cfg(not(feature = "jit"))]
+                        {
+                            self.ip = target;
+                        }
                     }
                 }
                 Op::JumpIfFalseKeep(target) => {
+                    let target = *target;
                     if !self.peek().is_truthy() {
-                        self.ip = *target;
+                        #[cfg(feature = "jit")]
+                        if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                            self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                        } else {
+                            self.ip = target;
+                        }
+                        #[cfg(not(feature = "jit"))]
+                        {
+                            self.ip = target;
+                        }
                     }
                 }
 
@@ -1437,6 +1940,42 @@ impl VM {
                         let result = handler(self, argc);
                         self.push(result);
                     }
+                }
+            }
+
+            // Tracing JIT: finalize an active recording on either:
+            //   (a) the recorder was marked aborted earlier (e.g. trace
+            //       exceeded MAX_TRACE_LEN, observed CallBuiltin, etc.) —
+            //       discard and clean up the cache entry, OR
+            //   (b) the just-dispatched jump landed at the anchor IP —
+            //       this is the loop-closing backward branch.
+            // Internal mid-trace branches that DON'T land at the anchor
+            // continue recording; their direction is captured in
+            // `recorded_ips` for later compile-time guard emission.
+            // Only run finalize if the recorder was armed *before* this step;
+            // a recorder freshly armed inside this step starts recording on
+            // the next iteration.
+            #[cfg(feature = "jit")]
+            if recorder_was_armed && self.recorder.is_some() {
+                let aborted = self.recorder.as_ref().map_or(false, |r| r.aborted);
+                // Phase 9: close on the recorded `close_anchor_ip` rather
+                // than `record_anchor_ip` — for side traces these differ.
+                let close_ip = self
+                    .recorder
+                    .as_ref()
+                    .map(|r| r.close_anchor_ip)
+                    .unwrap_or(0);
+                let was_jump = matches!(
+                    &ops[ip],
+                    Op::Jump(_)
+                        | Op::JumpIfTrue(_)
+                        | Op::JumpIfFalse(_)
+                        | Op::JumpIfTrueKeep(_)
+                        | Op::JumpIfFalseKeep(_)
+                );
+                let landed_at_anchor = self.ip == close_ip;
+                if aborted || (was_jump && landed_at_anchor) {
+                    self.finalize_recorder();
                 }
             }
         }

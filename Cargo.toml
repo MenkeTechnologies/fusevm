@@ -1,8 +1,8 @@
 [package]
 name = "fusevm"
-version = "0.10.1"
+version = "0.11.2"
 edition = "2021"
-description = "Language-agnostic bytecode VM with fused superinstructions and Cranelift JIT path"
+description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear, block, tracing with side-exits and frame materialization)"
 license = "MIT"
 authors = ["MenkeTechnologies"]
 repository = "https://github.com/MenkeTechnologies/fusevm"
@@ -45,5 +45,10 @@ harness = false
 
 [[bench]]
 name = "jit_crossover"
+harness = false
+required-features = ["jit"]
+
+[[bench]]
+name = "jit_trace"
 harness = false
 required-features = ["jit"]
