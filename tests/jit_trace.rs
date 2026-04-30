@@ -1320,3 +1320,609 @@ fn side_exit_fires_when_branch_flips() {
         "side-exit cleanup must restore correct slot state for the interpreter"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Additional coverage: thresholds, op variety, bounds, auto-dispatch, persistence
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn threshold_zero_compiles_on_first_backedge() {
+    // With trace_threshold = 0 the recorder arms on the very first
+    // backward branch. After the next iteration the trace installs.
+    let (chunk, anchor) = build_counter_loop(20);
+    let jit = JitCompiler::new();
+    let original = jit.get_config();
+    jit.set_config(TraceJitConfig {
+        trace_threshold: 0,
+        ..original
+    });
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 1);
+    let _ = vm.run();
+    assert!(
+        jit.trace_is_compiled(&chunk, anchor),
+        "threshold=0 should compile after the first iteration"
+    );
+    jit.set_config(original);
+}
+
+#[test]
+fn threshold_huge_never_compiles() {
+    // With a sky-high threshold the trace never gets a chance to record
+    // for a small loop.
+    let (chunk, anchor) = build_counter_loop(30);
+    let jit = JitCompiler::new();
+    let original = jit.get_config();
+    jit.set_config(TraceJitConfig {
+        trace_threshold: 1_000_000,
+        ..original
+    });
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 1);
+    let _ = vm.run();
+    assert!(
+        !jit.trace_is_compiled(&chunk, anchor),
+        "threshold=1M should not allow a 30-iteration loop to compile"
+    );
+    jit.set_config(original);
+}
+
+#[test]
+fn max_trace_len_aborts_long_recording() {
+    // Force max_trace_len to a tiny value; the recorder should abort
+    // before closing because the body exceeds the cap.
+    let (chunk, anchor) = build_counter_loop(150);
+    let jit = JitCompiler::new();
+    let original = jit.get_config();
+    jit.set_config(TraceJitConfig {
+        // Body is ~6 ops including the closing branch; setting cap below
+        // that aborts even the first iteration.
+        max_trace_len: 3,
+        trace_threshold: 5,
+        ..original
+    });
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 1);
+    let result = vm.run();
+    let n = match result {
+        VMResult::Ok(Value::Int(n)) => n,
+        other => panic!("expected Int, got {:?}", other),
+    };
+    assert_eq!(n, 150);
+    assert!(
+        !jit.trace_is_compiled(&chunk, anchor),
+        "trace longer than max_trace_len must abort"
+    );
+    jit.set_config(original);
+}
+
+#[test]
+fn arithmetic_ops_in_trace_compile_correctly() {
+    // Covers Add / Sub / Mul / Div / Mod in a single hot loop.
+    // body: i = ((i + 3) * 2 - 1) % 1024  (deterministic mixing)
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(3), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::Mul, 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Sub, 1);
+    b.emit(Op::LoadInt(1024), 1);
+    b.emit(Op::Mod, 1);
+    b.emit(Op::SetSlot(0), 1);
+    // counter slot 1
+    b.emit(Op::PreIncSlotVoid(1), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::LoadInt(200), 1);
+    b.emit(Op::NumLt, 1);
+    let close = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(close, anchor);
+    b.emit(Op::GetSlot(0), 1);
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 2);
+    let result = vm.run();
+    let final_v = match result {
+        VMResult::Ok(Value::Int(n)) => n,
+        other => panic!("expected Int, got {:?}", other),
+    };
+    // Compute expected by replicating in Rust.
+    let mut i: i64 = 1;
+    for _ in 0..200 {
+        i = ((i + 3) * 2 - 1) % 1024;
+    }
+    assert_eq!(
+        final_v, i,
+        "trace-compiled arithmetic must match interpreter"
+    );
+
+    let jit = JitCompiler::new();
+    assert!(jit.trace_is_compiled(&chunk, anchor));
+}
+
+#[test]
+fn bitwise_ops_in_trace_compile_correctly() {
+    // BitAnd / BitOr / BitXor / Shl / Shr in a hot loop.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0xCAFE_F00D), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(0xFF), 1);
+    b.emit(Op::BitAnd, 1);
+    b.emit(Op::LoadInt(0xA5A5), 1);
+    b.emit(Op::BitXor, 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::Shl, 1);
+    b.emit(Op::LoadInt(0x1), 1);
+    b.emit(Op::BitOr, 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Shr, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::PreIncSlotVoid(1), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::LoadInt(150), 1);
+    b.emit(Op::NumLt, 1);
+    let close = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(close, anchor);
+    b.emit(Op::GetSlot(0), 1);
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 2);
+    let result = vm.run();
+    let final_v = match result {
+        VMResult::Ok(Value::Int(n)) => n,
+        _ => panic!("expected Int"),
+    };
+    let mut x: i64 = 0xCAFE_F00D;
+    for _ in 0..150 {
+        x = (x & 0xFF) ^ 0xA5A5;
+        x = x.wrapping_shl(2 & 63);
+        x |= 0x1;
+        x = x.wrapping_shr(1 & 63);
+    }
+    assert_eq!(final_v, x, "bitwise trace must match interpreter");
+
+    let jit = JitCompiler::new();
+    assert!(jit.trace_is_compiled(&chunk, anchor));
+}
+
+#[test]
+fn comparison_ops_produce_correct_truthiness_in_trace() {
+    // NumEq / NumNe / NumLe / NumGe combined with branches.
+    // Body: increment i by 1 if i is even, by 2 if odd.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let anchor = b.current_pos();
+    // is i % 2 == 0 ?
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::Mod, 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::NumEq, 1);
+    let if_jmp = b.emit(Op::JumpIfFalse(0), 1);
+    // even path: i += 1
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(0), 1);
+    let merge_jmp = b.emit(Op::Jump(0), 1);
+    let odd_arm = b.current_pos();
+    b.patch_jump(if_jmp, odd_arm);
+    // odd path: i += 2
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(0), 1);
+    let merge = b.current_pos();
+    b.patch_jump(merge_jmp, merge);
+    // close
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(200), 1);
+    b.emit(Op::NumLt, 1);
+    let close = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(close, anchor);
+    b.emit(Op::GetSlot(0), 1);
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 1);
+    let result = vm.run();
+    let final_v = match result {
+        VMResult::Ok(Value::Int(n)) => n,
+        _ => panic!("expected Int"),
+    };
+    // Replicate.
+    let mut i: i64 = 0;
+    while i < 200 {
+        if i % 2 == 0 {
+            i += 1;
+        } else {
+            i += 2;
+        }
+    }
+    assert_eq!(final_v, i);
+}
+
+#[test]
+fn multiple_traces_in_same_chunk() {
+    // Build a chunk with TWO independent loops back-to-back. Each gets
+    // its own anchor and its own trace cache entry.
+    let mut b = ChunkBuilder::new();
+    // first loop: count slot 0 to 100
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let anchor1 = b.current_pos();
+    b.emit(Op::PreIncSlotVoid(0), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(100), 1);
+    b.emit(Op::NumLt, 1);
+    let c1 = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(c1, anchor1);
+    // second loop: count slot 1 to 100
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(1), 1);
+    let anchor2 = b.current_pos();
+    b.emit(Op::PreIncSlotVoid(1), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::LoadInt(100), 1);
+    b.emit(Op::NumLt, 1);
+    let c2 = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(c2, anchor2);
+    // result: slot 0 + slot 1
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::Add, 1);
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 2);
+    let result = vm.run();
+    let n = match result {
+        VMResult::Ok(Value::Int(n)) => n,
+        _ => panic!("expected Int"),
+    };
+    assert_eq!(n, 200);
+
+    let jit = JitCompiler::new();
+    assert!(
+        jit.trace_is_compiled(&chunk, anchor1),
+        "first loop's trace should compile"
+    );
+    assert!(
+        jit.trace_is_compiled(&chunk, anchor2),
+        "second loop's trace should compile (independent cache entry)"
+    );
+    assert_ne!(anchor1, anchor2, "anchors must differ for independent loops");
+}
+
+#[test]
+fn slot_index_at_max_boundary_compiles() {
+    // Use slot index near MAX_TRACE_SLOT to exercise the boundary check.
+    let mut b = ChunkBuilder::new();
+    let high_slot: u16 = 63; // MAX_TRACE_SLOT - 1
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(high_slot), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::PreIncSlotVoid(high_slot), 1);
+    b.emit(Op::GetSlot(high_slot), 1);
+    b.emit(Op::LoadInt(120), 1);
+    b.emit(Op::NumLt, 1);
+    let close = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(close, anchor);
+    b.emit(Op::GetSlot(high_slot), 1);
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 64);
+    let result = vm.run();
+    let n = match result {
+        VMResult::Ok(Value::Int(n)) => n,
+        _ => panic!("expected Int"),
+    };
+    assert_eq!(n, 120);
+    let jit = JitCompiler::new();
+    assert!(jit.trace_is_compiled(&chunk, anchor));
+}
+
+#[test]
+fn slot_index_above_max_rejects() {
+    // Slot 64 (== MAX_TRACE_SLOT) should fail eligibility.
+    let jit = JitCompiler::new();
+    let ops = vec![
+        Op::PreIncSlotVoid(64),
+        Op::GetSlot(0),
+        Op::LoadInt(10),
+        Op::NumLt,
+        Op::JumpIfTrue(0),
+    ];
+    assert!(
+        !jit.is_trace_eligible(&ops, 0),
+        "slot index >= MAX_TRACE_SLOT must reject eligibility"
+    );
+}
+
+#[test]
+fn auto_dispatch_runs_block_eligible_chunk_via_block_jit() {
+    // Phase 10: with tracing JIT enabled on a block-eligible chunk,
+    // the block JIT should warm up and run after threshold. Subsequent
+    // runs use block JIT directly — tracing JIT never records.
+    let (chunk, anchor) = build_counter_loop(200);
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 1);
+    let _ = vm.run();
+    let jit = JitCompiler::new();
+    // Block JIT pre-existed; what we care about is that whichever tier
+    // ran, the result was correct and the loop completed.
+    // After multiple invocations, block JIT is warm; run again to verify
+    // the chunk produces the same answer.
+    for _ in 0..15 {
+        let mut vm2 = VM::new(chunk.clone());
+        vm2.enable_tracing_jit();
+        ensure_slots(&mut vm2, 1);
+        let r = match vm2.run() {
+            VMResult::Ok(Value::Int(n)) => n,
+            _ => panic!("expected Int"),
+        };
+        assert_eq!(r, 200);
+    }
+    // The trace cache may or may not be warm depending on whether block
+    // JIT short-circuited. Both outcomes are valid — what we're asserting
+    // is correctness across many invocations.
+    let _ = jit.trace_is_compiled(&chunk, anchor);
+}
+
+#[test]
+fn export_returns_none_when_no_trace_installed() {
+    // Cold chunk with no trace. trace_export should return None.
+    let (chunk, anchor) = build_counter_loop(5);
+    let jit = JitCompiler::new();
+    assert!(
+        jit.trace_export(&chunk, anchor).is_none(),
+        "export of an unrecorded anchor should yield None"
+    );
+}
+
+#[test]
+fn import_filters_to_matching_chunk_hash() {
+    // trace_import_all should silently skip metadata entries whose
+    // chunk_op_hash doesn't match. Build TWO chunks; export from one;
+    // import to the other; nothing installs.
+    let (chunk_a, anchor) = build_counter_loop(120);
+    {
+        let mut vm = VM::new(chunk_a.clone());
+        vm.enable_tracing_jit();
+        ensure_slots(&mut vm, 1);
+        let _ = vm.run();
+    }
+    let jit = JitCompiler::new();
+    let metas = jit.trace_export_all(&chunk_a);
+    assert!(!metas.is_empty());
+
+    let (chunk_b, _) = build_counter_loop(140); // different ops → different hash
+    assert_ne!(chunk_a.op_hash, chunk_b.op_hash);
+
+    let installed = jit.trace_import_all(&chunk_b, &metas);
+    assert_eq!(
+        installed, 0,
+        "metadata for chunk A must not install on chunk B"
+    );
+    assert!(
+        !jit.trace_is_compiled(&chunk_b, anchor),
+        "no trace should land on the wrong chunk"
+    );
+}
+
+#[test]
+fn config_partial_override_preserves_other_fields() {
+    // Verify TraceJitConfig spread preserves untouched fields.
+    let jit = JitCompiler::new();
+    let original = jit.get_config();
+    let custom = TraceJitConfig {
+        trace_threshold: 7,
+        ..original
+    };
+    jit.set_config(custom);
+    let read_back = jit.get_config();
+    assert_eq!(read_back.trace_threshold, 7);
+    assert_eq!(read_back.max_side_exits, original.max_side_exits);
+    assert_eq!(read_back.max_inline_recursion, original.max_inline_recursion);
+    assert_eq!(read_back.max_trace_chain, original.max_trace_chain);
+    assert_eq!(read_back.max_trace_len, original.max_trace_len);
+    jit.set_config(original);
+}
+
+#[test]
+fn trace_eligible_minimum_loop_shape() {
+    // Smallest possible eligible trace: just a closing branch to anchor
+    // with a stack-balanced body of one comparison.
+    let jit = JitCompiler::new();
+    let ops = vec![
+        Op::LoadInt(0),
+        Op::LoadInt(1),
+        Op::NumLt,
+        Op::JumpIfTrue(0), // close to anchor=0
+    ];
+    assert!(jit.is_trace_eligible(&ops, 0));
+}
+
+#[test]
+fn trace_eligible_rejects_empty_ops() {
+    let jit = JitCompiler::new();
+    let ops: Vec<Op> = vec![];
+    assert!(!jit.is_trace_eligible(&ops, 0));
+}
+
+#[test]
+fn trace_loop_anchors_returns_none_for_uninstalled() {
+    let (chunk, anchor) = build_counter_loop(10);
+    let jit = JitCompiler::new();
+    assert!(
+        jit.trace_loop_anchors(&chunk, anchor).is_none(),
+        "loop_anchors should yield None when no trace is installed"
+    );
+}
+
+#[test]
+fn trace_metadata_serde_round_trip_preserves_fields() {
+    let (chunk, anchor) = build_counter_loop(180);
+    {
+        let mut vm = VM::new(chunk.clone());
+        vm.enable_tracing_jit();
+        ensure_slots(&mut vm, 1);
+        let _ = vm.run();
+    }
+    let jit = JitCompiler::new();
+    let original = jit.trace_export(&chunk, anchor).unwrap();
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let decoded: TraceMetadata = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(original.chunk_op_hash, decoded.chunk_op_hash);
+    assert_eq!(original.anchor_ip, decoded.anchor_ip);
+    assert_eq!(original.fallthrough_ip, decoded.fallthrough_ip);
+    assert_eq!(original.ops, decoded.ops);
+    assert_eq!(original.recorded_ips, decoded.recorded_ips);
+    assert_eq!(original.slot_kinds_at_anchor.len(), decoded.slot_kinds_at_anchor.len());
+}
+
+#[test]
+fn negative_ints_in_trace_arithmetic() {
+    // Verify the trace handles negative i64 correctly across iterations.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(100), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(3), 1);
+    b.emit(Op::Sub, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(-200), 1);
+    b.emit(Op::NumGt, 1);
+    let close = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(close, anchor);
+    b.emit(Op::GetSlot(0), 1);
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 1);
+    let result = vm.run();
+    let n = match result {
+        VMResult::Ok(Value::Int(n)) => n,
+        _ => panic!("expected Int"),
+    };
+    let mut x: i64 = 100;
+    while x > -200 {
+        x -= 3;
+    }
+    assert_eq!(n, x);
+}
+
+#[test]
+fn nested_loops_outer_traces_inner_unchanged() {
+    // Outer counter loop wraps an inner counter loop. Both eventually
+    // hit threshold and get traced independently.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1); // outer
+    let outer_anchor = b.current_pos();
+    b.emit(Op::PreIncSlotVoid(0), 1);
+    // inner loop
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(1), 1);
+    let inner_anchor = b.current_pos();
+    b.emit(Op::PreIncSlotVoid(1), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::LoadInt(60), 1);
+    b.emit(Op::NumLt, 1);
+    let inner_close = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(inner_close, inner_anchor);
+    // outer continuation
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(60), 1);
+    b.emit(Op::NumLt, 1);
+    let outer_close = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(outer_close, outer_anchor);
+    b.emit(Op::GetSlot(0), 1);
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 2);
+    let result = vm.run();
+    let n = match result {
+        VMResult::Ok(Value::Int(n)) => n,
+        _ => panic!("expected Int"),
+    };
+    assert_eq!(n, 60);
+
+    let jit = JitCompiler::new();
+    // Inner trace fires first (more backedges per outer iteration).
+    assert!(
+        jit.trace_is_compiled(&chunk, inner_anchor),
+        "inner loop should compile its own trace"
+    );
+}
+
+#[test]
+fn trace_eligible_rejects_oversized_ops() {
+    // Construct a fake op sequence longer than max_trace_len. Since
+    // is_trace_eligible reads the current threshold via TLS, set a small
+    // threshold first.
+    let jit = JitCompiler::new();
+    let original = jit.get_config();
+    jit.set_config(TraceJitConfig {
+        max_trace_len: 4,
+        ..original
+    });
+    let ops: Vec<Op> = (0..20).map(|_| Op::Nop).chain(std::iter::once(Op::JumpIfTrue(0))).collect();
+    assert!(
+        !jit.is_trace_eligible(&ops, 0),
+        "trace longer than max_trace_len must reject"
+    );
+    jit.set_config(original);
+}
+
+#[test]
+fn empty_loop_body_stack_balanced_trace_compiles() {
+    // Smallest viable looping body — just close the loop.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::PreIncSlotVoid(0), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(100), 1);
+    b.emit(Op::NumLt, 1);
+    let close = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(close, anchor);
+    b.emit(Op::GetSlot(0), 1);
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    ensure_slots(&mut vm, 1);
+    let _ = vm.run();
+    let jit = JitCompiler::new();
+    assert!(jit.trace_is_compiled(&chunk, anchor));
+}

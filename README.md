@@ -346,12 +346,12 @@ The block JIT compiles the full CFG to native code via Cranelift. All mutable st
 
 | Benchmark | Iterations | Interpreter | Block JIT (direct) | Tracing-JIT VM | VM vs Interp | VM vs Block |
 |---|---|---|---|---|---|---|
-| `counter_loop` | 1,000 | 23.4 µs | 305 ns | **506 ns** | **46x** | 1.66x slower |
-| `counter_loop` | 10,000 | 235.5 µs | 2.80 µs | **2.96 µs** | **80x** | 1.06x slower |
-| `counter_loop` | 100,000 | 2,474 µs | 29.07 µs | **27.88 µs** | **89x** | **1.04x faster** |
-| `loop_with_branch` | 1,000 | 39.8 µs | 310 ns | **487 ns** | **82x** | 1.57x slower |
-| `loop_with_branch` | 10,000 | 410.7 µs | 2.78 µs | **2.97 µs** | **138x** | 1.07x slower |
-| `loop_with_branch` | 100,000 | 4,058 µs | 27.48 µs | **27.75 µs** | **146x** | 1.01x slower |
+| `counter_loop` | 1,000 | 24.0 µs | 309 ns | **474 ns** | **51x** | 1.53x slower |
+| `counter_loop` | 10,000 | 236.1 µs | 2.69 µs | **2.79 µs** | **84x** | 1.04x slower |
+| `counter_loop` | 100,000 | 2,354 µs | 26.71 µs | **26.95 µs** | **87x** | 1.01x slower |
+| `loop_with_branch` | 1,000 | 40.2 µs | 300 ns | **474 ns** | **85x** | 1.58x slower |
+| `loop_with_branch` | 10,000 | 410.3 µs | 2.68 µs | **2.83 µs** | **145x** | 1.06x slower |
+| `loop_with_branch` | 100,000 | 3,942 µs | 26.46 µs | **26.64 µs** | **148x** | 1.01x slower |
 
 `counter_loop` is a tight `for i { i++ }` integer counter — about as friendly to a JIT as bytecode gets. `loop_with_branch` adds an internal `if i > 0 { ... }` inside the body to exercise the phase-3 branch-guard machinery; the recorded path's brif compares slot value to zero each iteration.
 

@@ -1413,9 +1413,27 @@ mod cranelift_jit_impl {
         )
     }
 
+    thread_local! {
+        /// Per-thread cache of block-JIT eligibility decisions. Keyed on
+        /// `chunk.op_hash` so the same chunk's eligibility is decided once
+        /// then reused across `is_block_eligible` calls (notably from
+        /// `VM::run`'s phase-10 auto-dispatch path, which would otherwise
+        /// linear-scan the ops on every invocation).
+        static BLOCK_ELIGIBLE_TLS: RefCell<HashMap<u64, bool>> =
+            RefCell::new(HashMap::new());
+    }
+
+    #[inline]
     pub(crate) fn is_block_eligible(chunk: &Chunk) -> bool {
+        // Fast path: cached decision.
+        if let Some(hit) = BLOCK_ELIGIBLE_TLS.with(|c| c.borrow().get(&chunk.op_hash).copied()) {
+            return hit;
+        }
+        // Slow path: scan ops, cache result.
         let ops = &chunk.ops;
-        !ops.is_empty() && ops.iter().all(is_block_eligible_op)
+        let result = !ops.is_empty() && ops.iter().all(is_block_eligible_op);
+        BLOCK_ELIGIBLE_TLS.with(|c| c.borrow_mut().insert(chunk.op_hash, result));
+        result
     }
 
     /// Find the largest contiguous JIT-eligible region in a chunk.
@@ -2057,25 +2075,27 @@ mod cranelift_jit_impl {
             RefCell::new(super::TraceJitConfig::defaults());
     }
 
+    // Field readers used internally by trace_lookup / is_trace_eligible /
+    // recorder push hook. Other thresholds (max_inline_recursion,
+    // max_trace_chain) are read directly via `get_config()` from the VM
+    // because they're already in scope where VM holds the config-snapshot.
+    #[inline(always)]
     fn cfg_trace_threshold() -> u32 {
         TRACE_CONFIG.with(|c| c.borrow().trace_threshold)
     }
+    #[inline(always)]
     fn cfg_max_side_exits() -> u32 {
         TRACE_CONFIG.with(|c| c.borrow().max_side_exits)
     }
+    #[inline(always)]
     pub(crate) fn cfg_max_trace_len() -> usize {
         TRACE_CONFIG.with(|c| c.borrow().max_trace_len)
     }
-    pub(crate) fn cfg_max_inline_recursion() -> usize {
-        TRACE_CONFIG.with(|c| c.borrow().max_inline_recursion)
-    }
-    #[allow(dead_code)]
-    pub(crate) fn cfg_max_trace_chain() -> usize {
-        TRACE_CONFIG.with(|c| c.borrow().max_trace_chain)
-    }
+    #[inline]
     pub(crate) fn set_config(cfg: super::TraceJitConfig) {
         TRACE_CONFIG.with(|c| *c.borrow_mut() = cfg);
     }
+    #[inline]
     pub(crate) fn get_config() -> super::TraceJitConfig {
         TRACE_CONFIG.with(|c| *c.borrow())
     }
@@ -2102,56 +2122,66 @@ mod cranelift_jit_impl {
         let key = (chunk.op_hash, anchor_ip);
         TRACE_CACHE_TLS.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
-            let entry = cache.entry(key).or_insert(TraceCacheEntry {
-                hot_count: 0,
-                compiled: None,
-                aborted: false,
-                deopt_count: 0,
-                side_exit_count: 0,
-                blacklisted: false,
-                fallthrough_ip: 0,
-                slot_types: Vec::new(),
-                saved_metadata: None,
-            });
 
-            if entry.blacklisted || entry.aborted {
-                return super::TraceLookup::Skip;
-            }
-
-            if let Some(ref compiled) = entry.compiled {
-                // Entry guard: verify all referenced slots still hold expected types.
-                for &(slot, ty) in &entry.slot_types {
-                    let actual = slot_kinds_at_anchor
-                        .get(slot as usize)
-                        .copied()
-                        .map(slot_kind_to_jitty)
-                        .unwrap_or(JitTy::Int);
-                    if actual != ty {
-                        entry.deopt_count = entry.deopt_count.saturating_add(1);
-                        if entry.deopt_count >= 5 {
-                            entry.blacklisted = true;
-                        }
-                        return super::TraceLookup::GuardMismatch;
-                    }
+            // Hot path: existing entry. Avoid the always-allocated
+            // `TraceCacheEntry` construction that `entry().or_insert(...)`
+            // would force; only build a default entry on cold miss.
+            if let Some(entry) = cache.get_mut(&key) {
+                if entry.blacklisted || entry.aborted {
+                    return super::TraceLookup::Skip;
                 }
-                // Reset deopt info before each invocation so stale records
-                // from prior calls don't leak through.
-                deopt_info.resume_ip = 0;
-                deopt_info.frame_count = 0;
-                deopt_info.stack_count = 0;
-                let resume_ip = compiled.invoke(slots, deopt_info) as usize;
-                // Phase 6 + 9: side-exit detection happens here, but the
-                // blacklist counter increment is deferred to the VM-side
-                // chained-dispatch path. If the VM finds a side trace at
-                // `resume_ip` and runs it, the deopt is being handled
-                // productively and shouldn't count toward blacklisting the
-                // main trace. The VM calls `trace_bump_side_exit` only when
-                // no side trace was available.
-                return super::TraceLookup::Ran { resume_ip };
+                if let Some(ref compiled) = entry.compiled {
+                    // Entry guard: verify referenced slots still match
+                    // recorded types.
+                    for &(slot, ty) in &entry.slot_types {
+                        let actual = slot_kinds_at_anchor
+                            .get(slot as usize)
+                            .copied()
+                            .map(slot_kind_to_jitty)
+                            .unwrap_or(JitTy::Int);
+                        if actual != ty {
+                            entry.deopt_count = entry.deopt_count.saturating_add(1);
+                            if entry.deopt_count >= 5 {
+                                entry.blacklisted = true;
+                            }
+                            return super::TraceLookup::GuardMismatch;
+                        }
+                    }
+                    // Reset deopt info before each invocation so stale
+                    // records from prior calls don't leak through.
+                    deopt_info.resume_ip = 0;
+                    deopt_info.frame_count = 0;
+                    deopt_info.stack_count = 0;
+                    let resume_ip = compiled.invoke(slots, deopt_info) as usize;
+                    return super::TraceLookup::Ran { resume_ip };
+                }
+                // Not compiled yet — bump hot counter, decide arming.
+                entry.hot_count = entry.hot_count.saturating_add(1);
+                return if entry.hot_count >= cfg_trace_threshold() {
+                    super::TraceLookup::StartRecording
+                } else {
+                    super::TraceLookup::NotHot
+                };
             }
 
-            entry.hot_count = entry.hot_count.saturating_add(1);
-            if entry.hot_count >= cfg_trace_threshold() {
+            // Cold path: first time seeing this anchor. Insert default
+            // entry, return NotHot. The threshold check on subsequent
+            // calls hits the hot path above.
+            cache.insert(
+                key,
+                TraceCacheEntry {
+                    hot_count: 1,
+                    compiled: None,
+                    aborted: false,
+                    deopt_count: 0,
+                    side_exit_count: 0,
+                    blacklisted: false,
+                    fallthrough_ip: 0,
+                    slot_types: Vec::new(),
+                    saved_metadata: None,
+                },
+            );
+            if 1 >= cfg_trace_threshold() {
                 super::TraceLookup::StartRecording
             } else {
                 super::TraceLookup::NotHot
