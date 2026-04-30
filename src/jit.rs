@@ -1423,6 +1423,20 @@ mod cranelift_jit_impl {
             RefCell::new(HashMap::new());
     }
 
+    /// Whether the block JIT cache has a compiled (post-warmup) entry for
+    /// this chunk. Used by the VM to avoid paying slot-buffer refresh cost
+    /// when block JIT is still warming up — until then `try_run_block`
+    /// returns `None` and the refresh was wasted.
+    #[inline]
+    pub(crate) fn block_jit_is_compiled(chunk: &Chunk) -> bool {
+        BLOCK_CACHE_TLS.with(|cache_cell| {
+            cache_cell
+                .borrow()
+                .get(&chunk.op_hash)
+                .map_or(false, |e| e.compiled.is_some())
+        })
+    }
+
     #[inline]
     pub(crate) fn is_block_eligible(chunk: &Chunk) -> bool {
         // Fast path: cached decision.
@@ -3567,6 +3581,15 @@ impl JitCompiler {
         cranelift_jit_impl::is_block_eligible(chunk)
     }
 
+    /// Whether a compiled block-JIT entry exists for this chunk (i.e.,
+    /// the chunk has crossed `try_run_block`'s warmup threshold and the
+    /// next call will run native code, not return `None`). Lets the VM
+    /// skip slot-buffer refresh when block JIT isn't ready yet.
+    #[cfg(feature = "jit")]
+    pub fn block_jit_is_compiled(&self, chunk: &crate::Chunk) -> bool {
+        cranelift_jit_impl::block_jit_is_compiled(chunk)
+    }
+
     /// Find the largest contiguous JIT-eligible region in a chunk.
     /// Returns `(start, end)` op indices, or None if no useful region exists.
     /// Useful for partial JIT compilation of chunks that aren't entirely eligible.
@@ -3610,6 +3633,12 @@ impl JitCompiler {
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
     pub fn is_block_eligible(&self, _chunk: &crate::Chunk) -> bool {
+        false
+    }
+
+    /// Stub when JIT feature is disabled.
+    #[cfg(not(feature = "jit"))]
+    pub fn block_jit_is_compiled(&self, _chunk: &crate::Chunk) -> bool {
         false
     }
 

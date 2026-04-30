@@ -18,7 +18,9 @@
 
 > *"One VM to run them all."*
 
-A language-agnostic bytecode virtual machine with fused superinstructions and Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 129 opcodes across 10 categories. Cranelift 0.130 behind `jit` feature flag.
+## `[PATENT PENDING]`
+
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 129 opcodes across 10 categories. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -358,6 +360,39 @@ The block JIT compiles the full CFG to native code via Cranelift. All mutable st
 The "Block JIT (direct)" column measures `JitCompiler::try_run_block` invoked directly with no VM around it — the floor for what's achievable through the JIT pipeline. The "Tracing-JIT VM" column measures `VM::run()` with `enable_tracing_jit()` set on a block-eligible chunk; the VM auto-dispatches block JIT before reaching the interpreter. The remaining 1.0–1.7x gap between the two is purely VM construction + slot copy-in/out overhead per `vm.run()` call (constant, ~150-200 ns); native execution itself is identical.
 
 For chunks that aren't block-eligible (anything with extension ops, host builtins, or polymorphic types), block JIT bows out and the same `VM::run` path falls through to the interpreter with tracing JIT's recorder armed at backward branches — that's where tracing JIT earns its keep, accelerating loops in code block JIT can't take. The two tiers cover disjoint cases at runtime.
+
+### `VMPool` — VM reuse for callers running many small chunks
+
+`VMPool` recycles `VM` instances so callers running many short-lived chunks (REPL, eval loops, batch evaluation) can skip the per-call `VM::new()` cost. `acquire` pops a recycled VM and resets its state via `VM::reset`; `release` returns it for reuse.
+
+```rust
+use fusevm::{ChunkBuilder, Op, VMPool, VMResult, Value};
+
+let mut pool = VMPool::new();
+for _ in 0..1000 {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(40), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::Add, 1);
+    pool.with(b.build(), |vm| {
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Int(42))));
+    });
+}
+```
+
+**When the pool actually helps:** chunks where `VM::new()` cost dominates the run. Measured on a 3-op chunk (`LoadInt(40); LoadInt(2); Add`):
+
+| Pattern | Time/call |
+|---|---|
+| `VM::new(chunk)` per call | 130 ns |
+| `pool.acquire(chunk)` per call | 163 ns |
+
+For tiny chunks the pool is *slower* — `reset` does more bookkeeping (drop the old chunk, clear globals, zero the deopt buffer) than `VM::new` skips. The pool wins for chunks where:
+- Globals/name pool is large (>16 entries — reset's resize is amortized vs `vec![Value::Undef; n]`)
+- Many slots get used (frame.slots Vec capacity is preserved across reuse)
+- Tracing JIT runs (deopt buffer is already zeroed and cached eligibility carries over… well, doesn't, since chunk hash differs — gets recomputed)
+
+Honest read: VMPool is useful for **multi-chunk evaluation loops with non-trivial chunk shapes**. For uniform tight loops, pure `VM::new` is fine. The API is shipped so callers can pick. ~10 LOC if your call site looks like `for chunk in ... { VM::new(chunk).run() }`.
 
 ### Tracking improvements
 

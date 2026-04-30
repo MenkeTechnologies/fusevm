@@ -1610,7 +1610,10 @@ fn multiple_traces_in_same_chunk() {
         jit.trace_is_compiled(&chunk, anchor2),
         "second loop's trace should compile (independent cache entry)"
     );
-    assert_ne!(anchor1, anchor2, "anchors must differ for independent loops");
+    assert_ne!(
+        anchor1, anchor2,
+        "anchors must differ for independent loops"
+    );
 }
 
 #[test]
@@ -1745,7 +1748,10 @@ fn config_partial_override_preserves_other_fields() {
     let read_back = jit.get_config();
     assert_eq!(read_back.trace_threshold, 7);
     assert_eq!(read_back.max_side_exits, original.max_side_exits);
-    assert_eq!(read_back.max_inline_recursion, original.max_inline_recursion);
+    assert_eq!(
+        read_back.max_inline_recursion,
+        original.max_inline_recursion
+    );
     assert_eq!(read_back.max_trace_chain, original.max_trace_chain);
     assert_eq!(read_back.max_trace_len, original.max_trace_len);
     jit.set_config(original);
@@ -1801,7 +1807,10 @@ fn trace_metadata_serde_round_trip_preserves_fields() {
     assert_eq!(original.fallthrough_ip, decoded.fallthrough_ip);
     assert_eq!(original.ops, decoded.ops);
     assert_eq!(original.recorded_ips, decoded.recorded_ips);
-    assert_eq!(original.slot_kinds_at_anchor.len(), decoded.slot_kinds_at_anchor.len());
+    assert_eq!(
+        original.slot_kinds_at_anchor.len(),
+        decoded.slot_kinds_at_anchor.len()
+    );
 }
 
 #[test]
@@ -1895,7 +1904,10 @@ fn trace_eligible_rejects_oversized_ops() {
         max_trace_len: 4,
         ..original
     });
-    let ops: Vec<Op> = (0..20).map(|_| Op::Nop).chain(std::iter::once(Op::JumpIfTrue(0))).collect();
+    let ops: Vec<Op> = (0..20)
+        .map(|_| Op::Nop)
+        .chain(std::iter::once(Op::JumpIfTrue(0)))
+        .collect();
     assert!(
         !jit.is_trace_eligible(&ops, 0),
         "trace longer than max_trace_len must reject"

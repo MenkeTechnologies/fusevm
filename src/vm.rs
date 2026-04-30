@@ -153,8 +153,18 @@ pub struct VM {
     /// Reusable scratch buffer the trace fn populates on every invocation
     /// with the resume IP and (on callee-frame side-exits) inlined-frame
     /// materialization records the VM uses to reshape `vm.frames`.
+    /// Stored inline (~888 bytes) to avoid heap indirection on the hot
+    /// trace path; the size cost is paid once per VM and the access
+    /// savings hit every invocation.
     #[cfg(feature = "jit")]
-    deopt_info: Box<DeoptInfo>,
+    deopt_info: DeoptInfo,
+    /// Cached block-JIT eligibility for `self.chunk`. `None` until first
+    /// `VM::run` call evaluates it; reused across subsequent runs since
+    /// `Chunk` is immutable for the VM's lifetime. Saves the TLS HashMap
+    /// lookup that `JitCompiler::is_block_eligible` would otherwise
+    /// perform on every run.
+    #[cfg(feature = "jit")]
+    block_eligible_cached: Option<bool>,
 }
 
 /// Result of VM execution
@@ -200,7 +210,9 @@ impl VM {
             #[cfg(feature = "jit")]
             slot_kinds_buf: Vec::new(),
             #[cfg(feature = "jit")]
-            deopt_info: Box::new(DeoptInfo::zeroed()),
+            deopt_info: DeoptInfo::zeroed(),
+            #[cfg(feature = "jit")]
+            block_eligible_cached: None,
         }
     }
 
@@ -223,6 +235,51 @@ impl VM {
     pub fn disable_tracing_jit(&mut self) {
         self.tracing_jit = false;
         self.recorder = None;
+    }
+
+    /// Reset the VM for re-use with a new chunk, preserving internal
+    /// `Vec` allocations to avoid the construction cost of `VM::new`.
+    ///
+    /// State that's cleared:
+    /// - Value stack (truncated, capacity preserved)
+    /// - Frame stack (rebuilt with one entry pointing at the new chunk)
+    /// - Globals (resized to match the new chunk's name pool)
+    /// - Instruction pointer, halted flag, exit status
+    /// - Tracing JIT recorder / slot buffers / deopt info
+    /// - Cached block-JIT eligibility (the new chunk has a different hash)
+    ///
+    /// State that's preserved:
+    /// - Tracing JIT enabled flag
+    /// - Extension handlers (`ext_handler`, `ext_wide_handler`)
+    /// - Builtin table
+    /// - Shell host
+    ///
+    /// This pairs with [`VMPool`] for hot-path callers that run many
+    /// chunks back-to-back and want to skip the per-call allocation cost
+    /// of `VM::new`.
+    pub fn reset(&mut self, chunk: Chunk) {
+        self.stack.clear();
+        self.frames.clear();
+        let num_names = chunk.names.len();
+        self.globals.clear();
+        self.globals.resize(num_names, Value::Undef);
+        self.frames.push(Frame {
+            return_ip: 0,
+            stack_base: 0,
+            slots: Vec::with_capacity(16),
+        });
+        self.ip = 0;
+        self.last_status = 0;
+        self.halted = false;
+        self.chunk = chunk;
+        #[cfg(feature = "jit")]
+        {
+            self.recorder = None;
+            self.slot_buf.clear();
+            self.slot_kinds_buf.clear();
+            self.deopt_info = DeoptInfo::zeroed();
+            self.block_eligible_cached = None;
+        }
     }
 
     /// Register the frontend shell host. Replaces any prior host.
@@ -342,8 +399,7 @@ impl VM {
                             frame.slots[i] = Value::Int(self.slot_buf[i]);
                         }
                         Some(SlotKind::Float) => {
-                            frame.slots[i] =
-                                Value::Float(f64::from_bits(self.slot_buf[i] as u64));
+                            frame.slots[i] = Value::Float(f64::from_bits(self.slot_buf[i] as u64));
                         }
                         None => {}
                     }
@@ -644,9 +700,24 @@ impl VM {
         // block-JIT cache has its own threshold (10 invocations); the
         // call returns None until it warms up, at which point the whole
         // chunk runs in native code.
+        //
+        // VM-side eligibility cache (`block_eligible_cached`) saves the
+        // TLS HashMap lookup `JitCompiler::is_block_eligible` would
+        // otherwise do on every run. The slot buffer must be valid on
+        // every invocation because `try_run_block` may compile + invoke
+        // the same call (on threshold cross), so we can't skip the
+        // refresh based on warmup state.
         #[cfg(feature = "jit")]
         if self.tracing_jit && self.frames.len() == 1 && self.ip == 0 {
-            if self.jit.is_block_eligible(&self.chunk) {
+            let eligible = match self.block_eligible_cached {
+                Some(v) => v,
+                None => {
+                    let v = self.jit.is_block_eligible(&self.chunk);
+                    self.block_eligible_cached = Some(v);
+                    v
+                }
+            };
+            if eligible {
                 self.refresh_slot_buffers();
                 if let Some(result_i64) = self.jit.try_run_block(&self.chunk, &mut self.slot_buf) {
                     self.write_slots_back();
@@ -2102,6 +2173,100 @@ impl VM {
             }
             frame.slots[idx] = val;
         }
+    }
+}
+
+/// Pool of reusable `VM` instances.
+///
+/// `VM::new` does ~3 `Vec` allocations (stack, frames, globals) at
+/// construction. Callers that run many small chunks back-to-back —
+/// REPL-style invocation, batch script execution, eval loops — pay
+/// that cost on every call. `VMPool` recycles the allocations: the
+/// first `acquire` allocates, subsequent acquires pop a previously-
+/// released VM and reset it via `VM::reset`.
+///
+/// # Example
+///
+/// ```
+/// use fusevm::{ChunkBuilder, Op, VMPool, VMResult, Value};
+///
+/// let mut pool = VMPool::new();
+///
+/// for _ in 0..1000 {
+///     let mut b = ChunkBuilder::new();
+///     b.emit(Op::LoadInt(40), 1);
+///     b.emit(Op::LoadInt(2), 1);
+///     b.emit(Op::Add, 1);
+///
+///     let mut vm = pool.acquire(b.build());
+///     let result = vm.run();
+///     assert!(matches!(result, VMResult::Ok(Value::Int(42))));
+///     pool.release(vm);
+/// }
+/// ```
+pub struct VMPool {
+    pool: Vec<VM>,
+}
+
+impl VMPool {
+    /// Construct an empty pool.
+    pub fn new() -> Self {
+        Self { pool: Vec::new() }
+    }
+
+    /// Construct with a pre-allocated capacity.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            pool: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Acquire a VM ready to run `chunk`. Pops a recycled VM if
+    /// available; otherwise constructs a fresh one. The returned VM
+    /// inherits the pool's previously-released VMs' allocations
+    /// (Vec capacities preserved).
+    pub fn acquire(&mut self, chunk: Chunk) -> VM {
+        if let Some(mut vm) = self.pool.pop() {
+            vm.reset(chunk);
+            vm
+        } else {
+            VM::new(chunk)
+        }
+    }
+
+    /// Return a VM to the pool for later reuse. The VM's allocations
+    /// are kept; only state is cleared on the next `acquire`.
+    pub fn release(&mut self, vm: VM) {
+        self.pool.push(vm);
+    }
+
+    /// Run a closure against an acquired VM, returning it to the pool
+    /// after the closure finishes (RAII-style scope).
+    pub fn with<F, T>(&mut self, chunk: Chunk, f: F) -> T
+    where
+        F: FnOnce(&mut VM) -> T,
+    {
+        let mut vm = self.acquire(chunk);
+        let r = f(&mut vm);
+        self.release(vm);
+        r
+    }
+
+    /// Number of VMs currently held in the pool (released, ready for
+    /// reuse). Doesn't count VMs currently checked out via `acquire`.
+    pub fn len(&self) -> usize {
+        self.pool.len()
+    }
+
+    /// Whether the pool is empty.
+    pub fn is_empty(&self) -> bool {
+        self.pool.is_empty()
+    }
+}
+
+impl Default for VMPool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

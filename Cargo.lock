@@ -395,7 +395,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fusevm"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "bincode",
  "cranelift-codegen",

@@ -169,5 +169,48 @@ fn bench_loop_with_branch(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_counter_loop, bench_loop_with_branch);
+fn build_simple_expr_chunk() -> fusevm::Chunk {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(40), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::Add, 1);
+    b.build()
+}
+
+fn bench_vm_pool_vs_fresh(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vm_pool");
+    let chunk = build_simple_expr_chunk();
+
+    // Fresh VM per call — measures VM::new() overhead.
+    group.bench_function("fresh_vm_per_call", |b| {
+        b.iter(|| {
+            let mut vm = VM::new(chunk.clone());
+            let r = vm.run();
+            black_box(r);
+        });
+    });
+
+    // Pooled VM — measures the steady-state cost after the first acquire
+    // has populated the pool.
+    group.bench_function("pooled_vm_per_call", |b| {
+        let mut pool = fusevm::VMPool::new();
+        // Warm the pool with one acquire/release cycle.
+        let v = pool.acquire(chunk.clone());
+        pool.release(v);
+        b.iter(|| {
+            let mut vm = pool.acquire(chunk.clone());
+            let r = vm.run();
+            black_box(r);
+            pool.release(vm);
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_counter_loop,
+    bench_loop_with_branch,
+    bench_vm_pool_vs_fresh,
+);
 criterion_main!(benches);
