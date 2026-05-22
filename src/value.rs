@@ -308,6 +308,148 @@ mod tests {
     }
 
     #[test]
+    fn as_str_cow_for_undef_and_bool_is_borrowed() {
+        assert!(matches!(Value::Undef.as_str_cow(), Cow::Borrowed("")));
+        assert!(matches!(Value::Bool(true).as_str_cow(), Cow::Borrowed("1")));
+        assert!(matches!(Value::Bool(false).as_str_cow(), Cow::Borrowed("")));
+    }
+
+    #[test]
+    fn as_str_cow_for_status_and_float_is_owned() {
+        match Value::Status(127).as_str_cow() {
+            Cow::Owned(s) => assert_eq!(s, "127"),
+            _ => panic!("expected owned"),
+        }
+        match Value::Float(1.5).as_str_cow() {
+            Cow::Owned(s) => assert_eq!(s, "1.5"),
+            _ => panic!("expected owned"),
+        }
+    }
+
+    #[test]
+    fn native_fn_to_str_formats_id() {
+        assert_eq!(Value::NativeFn(42).to_str(), "(builtin:42)");
+    }
+
+    #[test]
+    fn hash_to_str_is_placeholder() {
+        let mut m = HashMap::new();
+        m.insert("k".to_string(), Value::Int(1));
+        assert_eq!(Value::Hash(m).to_str(), "(hash)");
+    }
+
+    #[test]
+    fn ref_to_str_is_placeholder_and_is_truthy() {
+        let r = Value::Ref(Box::new(Value::Int(0)));
+        assert!(r.is_truthy(), "Ref is always truthy regardless of inner");
+        assert_eq!(r.to_str(), "(ref)");
+    }
+
+    #[test]
+    fn nested_array_to_str_recurses() {
+        let inner = Value::Array(vec![Value::Int(1), Value::Int(2)]);
+        let outer = Value::Array(vec![inner, Value::Int(3)]);
+        // Inner array stringifies to "1 2", then outer joins with space.
+        assert_eq!(outer.to_str(), "1 2 3");
+    }
+
+    #[test]
+    fn to_int_from_negative_string_parses() {
+        assert_eq!(Value::str("-123").to_int(), -123);
+    }
+
+    #[test]
+    fn to_int_unhandled_variants_return_zero() {
+        assert_eq!(Value::Hash(HashMap::new()).to_int(), 0);
+        assert_eq!(Value::Ref(Box::new(Value::Int(99))).to_int(), 0);
+        assert_eq!(Value::NativeFn(5).to_int(), 0);
+    }
+
+    #[test]
+    fn to_float_unhandled_variants_return_zero() {
+        assert_eq!(Value::Undef.to_float(), 0.0);
+        assert_eq!(Value::Array(vec![Value::Int(1)]).to_float(), 0.0);
+        assert_eq!(Value::Bool(false).to_float(), 0.0);
+    }
+
+    #[test]
+    fn len_for_hash_counts_entries() {
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Value::Int(1));
+        m.insert("b".to_string(), Value::Int(2));
+        assert_eq!(Value::Hash(m).len(), 2);
+    }
+
+    #[test]
+    fn constructors_produce_expected_variants() {
+        assert!(matches!(Value::int(1), Value::Int(1)));
+        assert!(matches!(Value::float(1.0), Value::Float(_)));
+        assert!(matches!(Value::bool(true), Value::Bool(true)));
+        assert!(matches!(Value::status(7), Value::Status(7)));
+        assert!(matches!(Value::array(vec![]), Value::Array(_)));
+    }
+
+    #[test]
+    fn str_constructor_accepts_string_and_str() {
+        let from_str = Value::str("hi");
+        let from_string = Value::str(String::from("hi"));
+        assert_eq!(from_str, from_string);
+    }
+
+    #[test]
+    fn clone_of_str_shares_arc() {
+        // Arc<String> means clones are cheap and point to same allocation.
+        let a = Value::str("hello");
+        let b = a.clone();
+        if let (Value::Str(sa), Value::Str(sb)) = (&a, &b) {
+            assert!(Arc::ptr_eq(sa, sb));
+        } else {
+            panic!("expected Str variants");
+        }
+    }
+
+    #[test]
+    fn default_is_undef() {
+        let v: Value = Default::default();
+        assert_eq!(v, Value::Undef);
+    }
+
+    #[test]
+    fn hash_distinguishes_variants_with_same_payload_bytes() {
+        // Int(0) and Bool(false) and Status(0) all have payload 0, but their
+        // discriminants must make the hashes differ.
+        use std::collections::hash_map::DefaultHasher;
+        let h = |v: &Value| {
+            let mut hs = DefaultHasher::new();
+            v.hash(&mut hs);
+            hs.finish()
+        };
+        let a = h(&Value::Int(0));
+        let b = h(&Value::Bool(false));
+        let c = h(&Value::Status(0));
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn hash_for_hashmap_value_is_deterministic_per_value() {
+        // Hashing the SAME Value::Hash twice yields identical hashes even
+        // though HashMap iteration order is unspecified — because the impl
+        // accumulates contributions and discriminant.
+        use std::collections::hash_map::DefaultHasher;
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Value::Int(1));
+        m.insert("b".to_string(), Value::Int(2));
+        let v = Value::Hash(m);
+        let mut h1 = DefaultHasher::new();
+        v.hash(&mut h1);
+        let mut h2 = DefaultHasher::new();
+        v.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
     fn serde_roundtrip_preserves_value() {
         // Verify Value survives serialization without information loss.
         let cases = vec![

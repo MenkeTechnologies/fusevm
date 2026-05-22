@@ -204,3 +204,104 @@ pub trait ShellHost: Send {
 pub struct DefaultHost;
 
 impl ShellHost for DefaultHost {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::Chunk;
+
+    #[test]
+    fn tilde_expand_is_identity_by_default() {
+        let mut h = DefaultHost;
+        assert_eq!(h.tilde_expand("~/foo"), "~/foo");
+        assert_eq!(h.tilde_expand(""), "");
+    }
+
+    #[test]
+    fn brace_expand_returns_single_element_vec_by_default() {
+        let mut h = DefaultHost;
+        assert_eq!(h.brace_expand("{a,b}"), vec!["{a,b}".to_string()]);
+        assert_eq!(h.brace_expand("plain"), vec!["plain".to_string()]);
+    }
+
+    #[test]
+    fn word_split_splits_on_whitespace() {
+        let mut h = DefaultHost;
+        assert_eq!(h.word_split("one two  three"), vec!["one", "two", "three"]);
+        assert!(h.word_split("").is_empty());
+        assert!(h.word_split("   \t  ").is_empty());
+    }
+
+    #[test]
+    fn expand_param_default_returns_empty_string() {
+        let mut h = DefaultHost;
+        let v = h.expand_param("VAR", 0, &[]);
+        assert_eq!(v, Value::str(""));
+    }
+
+    #[test]
+    fn array_index_default_returns_undef() {
+        let mut h = DefaultHost;
+        assert_eq!(h.array_index("arr", &Value::Int(0)), Value::Undef);
+    }
+
+    #[test]
+    fn cmd_subst_and_process_sub_default_to_empty_string() {
+        let mut h = DefaultHost;
+        let c = Chunk::new();
+        assert_eq!(h.cmd_subst(&c), "");
+        assert_eq!(h.process_sub_in(&c), "");
+        assert_eq!(h.process_sub_out(&c), "");
+    }
+
+    #[test]
+    fn pipeline_end_default_is_success() {
+        let mut h = DefaultHost;
+        h.pipeline_begin(2);
+        h.pipeline_stage();
+        assert_eq!(h.pipeline_end(), 0);
+    }
+
+    #[test]
+    fn call_function_default_returns_none() {
+        let mut h = DefaultHost;
+        assert_eq!(h.call_function("fn", vec!["a".into()]), None);
+    }
+
+    #[test]
+    fn str_match_default_is_exact_equality() {
+        let mut h = DefaultHost;
+        assert!(h.str_match("foo", "foo"));
+        assert!(!h.str_match("foo", "bar"));
+        assert!(!h.str_match("foo", "f*"), "default does not glob");
+    }
+
+    #[test]
+    fn regex_match_default_is_false() {
+        let mut h = DefaultHost;
+        assert!(!h.regex_match("anything", "."));
+    }
+
+    #[test]
+    fn noop_methods_do_not_panic() {
+        // Verify the methods with `()` returns and no observable state are safe to call.
+        let mut h = DefaultHost;
+        h.redirect(1, 0, "file");
+        h.heredoc("body");
+        h.herestring("body");
+        h.subshell_begin();
+        h.subshell_end();
+        h.trap_check();
+        h.with_redirects_begin(1);
+        h.with_redirects_end();
+        h.trap_set("INT", &Chunk::new());
+    }
+
+    #[test]
+    fn exec_with_empty_args_returns_zero() {
+        // First-arg guard avoids spawning anything.
+        let mut h = DefaultHost;
+        assert_eq!(h.exec(vec![]), 0);
+        assert_eq!(h.exec_bg(vec![]), 0);
+    }
+}

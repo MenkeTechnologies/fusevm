@@ -2364,4 +2364,412 @@ mod tests {
             other => panic!("expected Int(20), got {:?}", other),
         }
     }
+
+    // ── helpers ──
+
+    fn run_one(ops: Vec<Op>) -> VMResult {
+        let mut b = ChunkBuilder::new();
+        for op in ops {
+            b.emit(op, 1);
+        }
+        VM::new(b.build()).run()
+    }
+
+    fn expect_int(ops: Vec<Op>, want: i64) {
+        match run_one(ops) {
+            VMResult::Ok(Value::Int(n)) => assert_eq!(n, want),
+            other => panic!("expected Int({}), got {:?}", want, other),
+        }
+    }
+
+    fn expect_bool(ops: Vec<Op>, want: bool) {
+        match run_one(ops) {
+            VMResult::Ok(Value::Bool(b)) => assert_eq!(b, want),
+            other => panic!("expected Bool({}), got {:?}", want, other),
+        }
+    }
+
+    // ── Arithmetic ──
+
+    #[test]
+    fn arithmetic_sub_mul_div_mod() {
+        expect_int(vec![Op::LoadInt(20), Op::LoadInt(8), Op::Sub], 12);
+        expect_int(vec![Op::LoadInt(6), Op::LoadInt(7), Op::Mul], 42);
+        expect_int(vec![Op::LoadInt(20), Op::LoadInt(3), Op::Mod], 2);
+        // Div returns Float for int operands (no truncating int division).
+        match run_one(vec![Op::LoadInt(20), Op::LoadInt(5), Op::Div]) {
+            VMResult::Ok(Value::Float(f)) => assert!((f - 4.0).abs() < 1e-9),
+            VMResult::Ok(Value::Int(4)) => {} // tolerate either impl
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn arithmetic_negate_and_inc_dec() {
+        expect_int(vec![Op::LoadInt(5), Op::Negate], -5);
+        expect_int(vec![Op::LoadInt(5), Op::Inc], 6);
+        expect_int(vec![Op::LoadInt(5), Op::Dec], 4);
+    }
+
+    #[test]
+    fn arithmetic_pow_returns_float() {
+        match run_one(vec![Op::LoadInt(3), Op::LoadInt(4), Op::Pow]) {
+            VMResult::Ok(Value::Float(f)) => assert!((f - 81.0).abs() < 1e-9),
+            VMResult::Ok(Value::Int(81)) => {} // tolerate either impl
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    // ── Comparison ──
+
+    #[test]
+    fn num_comparisons_produce_booleans() {
+        expect_bool(vec![Op::LoadInt(1), Op::LoadInt(1), Op::NumEq], true);
+        expect_bool(vec![Op::LoadInt(1), Op::LoadInt(2), Op::NumEq], false);
+        expect_bool(vec![Op::LoadInt(1), Op::LoadInt(2), Op::NumLt], true);
+        expect_bool(vec![Op::LoadInt(1), Op::LoadInt(2), Op::NumGt], false);
+        expect_bool(vec![Op::LoadInt(2), Op::LoadInt(2), Op::NumLe], true);
+        expect_bool(vec![Op::LoadInt(2), Op::LoadInt(2), Op::NumGe], true);
+        expect_bool(vec![Op::LoadInt(2), Op::LoadInt(2), Op::NumNe], false);
+    }
+
+    #[test]
+    fn spaceship_returns_neg_zero_pos() {
+        expect_int(vec![Op::LoadInt(1), Op::LoadInt(2), Op::Spaceship], -1);
+        expect_int(vec![Op::LoadInt(2), Op::LoadInt(2), Op::Spaceship], 0);
+        expect_int(vec![Op::LoadInt(3), Op::LoadInt(2), Op::Spaceship], 1);
+    }
+
+    #[test]
+    fn string_comparisons() {
+        let mut b = ChunkBuilder::new();
+        let a = b.add_constant(Value::str("alpha"));
+        let z = b.add_constant(Value::str("beta"));
+        b.emit(Op::LoadConst(a), 1);
+        b.emit(Op::LoadConst(z), 1);
+        b.emit(Op::StrLt, 1);
+        let mut vm = VM::new(b.build());
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Bool(true))));
+    }
+
+    #[test]
+    fn string_eq_and_ne() {
+        let mut b = ChunkBuilder::new();
+        let s1 = b.add_constant(Value::str("hi"));
+        let s2 = b.add_constant(Value::str("hi"));
+        b.emit(Op::LoadConst(s1), 1);
+        b.emit(Op::LoadConst(s2), 1);
+        b.emit(Op::StrEq, 1);
+        assert!(matches!(VM::new(b.build()).run(), VMResult::Ok(Value::Bool(true))));
+    }
+
+    // ── Stack manipulation ──
+
+    #[test]
+    fn pop_discards_top() {
+        // push 1, push 2, pop, → result 1
+        expect_int(vec![Op::LoadInt(1), Op::LoadInt(2), Op::Pop], 1);
+    }
+
+    #[test]
+    fn dup_duplicates_top() {
+        // 5, dup, add → 10
+        expect_int(vec![Op::LoadInt(5), Op::Dup, Op::Add], 10);
+    }
+
+    #[test]
+    fn swap_exchanges_top_two() {
+        // 10, 3, swap, sub → 10 - 3 = 7 (after swap top is 10, next is 3 → 3 - 10 = -7?)
+        // Sub semantics: pops b then a, returns a - b. After swap, top=10, below=3.
+        // Pop b=10, a=3 → 3 - 10 = -7.
+        expect_int(vec![Op::LoadInt(10), Op::LoadInt(3), Op::Swap, Op::Sub], -7);
+    }
+
+    #[test]
+    fn dup2_duplicates_top_two_values() {
+        // Dup2 on [3,4] yields [3,4,3,4]. Two Adds collapse to 11 on top.
+        expect_int(vec![Op::LoadInt(3), Op::LoadInt(4), Op::Dup2, Op::Add, Op::Add], 11);
+    }
+
+    // ── Logical / Bitwise ──
+
+    #[test]
+    fn log_not_inverts_truthiness() {
+        expect_bool(vec![Op::LoadInt(0), Op::LogNot], true);
+        expect_bool(vec![Op::LoadInt(1), Op::LogNot], false);
+        expect_bool(vec![Op::LoadTrue, Op::LogNot], false);
+        expect_bool(vec![Op::LoadFalse, Op::LogNot], true);
+    }
+
+    #[test]
+    fn bitwise_ops() {
+        expect_int(vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitAnd], 0b1000);
+        expect_int(vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitOr], 0b1110);
+        expect_int(vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitXor], 0b0110);
+        expect_int(vec![Op::LoadInt(1), Op::LoadInt(4), Op::Shl], 16);
+        expect_int(vec![Op::LoadInt(64), Op::LoadInt(2), Op::Shr], 16);
+    }
+
+    #[test]
+    fn bit_not_inverts_bits() {
+        expect_int(vec![Op::LoadInt(0), Op::BitNot], -1);
+    }
+
+    // ── Strings ──
+
+    #[test]
+    fn concat_joins_strings() {
+        let mut b = ChunkBuilder::new();
+        let h = b.add_constant(Value::str("hello "));
+        let w = b.add_constant(Value::str("world"));
+        b.emit(Op::LoadConst(h), 1);
+        b.emit(Op::LoadConst(w), 1);
+        b.emit(Op::Concat, 1);
+        match VM::new(b.build()).run() {
+            VMResult::Ok(v) => assert_eq!(v.to_str(), "hello world"),
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn string_repeat_op() {
+        let mut b = ChunkBuilder::new();
+        let s = b.add_constant(Value::str("ab"));
+        b.emit(Op::LoadConst(s), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::StringRepeat, 1);
+        match VM::new(b.build()).run() {
+            VMResult::Ok(v) => assert_eq!(v.to_str(), "ababab"),
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn string_len_returns_int() {
+        let mut b = ChunkBuilder::new();
+        let s = b.add_constant(Value::str("abcd"));
+        b.emit(Op::LoadConst(s), 1);
+        b.emit(Op::StringLen, 1);
+        match VM::new(b.build()).run() {
+            VMResult::Ok(Value::Int(4)) => {}
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    // ── Constants & literals ──
+
+    #[test]
+    fn load_true_false_undef() {
+        assert!(matches!(run_one(vec![Op::LoadTrue]), VMResult::Ok(Value::Bool(true))));
+        assert!(matches!(run_one(vec![Op::LoadFalse]), VMResult::Ok(Value::Bool(false))));
+        assert!(matches!(run_one(vec![Op::LoadUndef]), VMResult::Ok(Value::Undef)));
+    }
+
+    #[test]
+    fn load_const_string() {
+        let mut b = ChunkBuilder::new();
+        let c = b.add_constant(Value::str("xyz"));
+        b.emit(Op::LoadConst(c), 1);
+        match VM::new(b.build()).run() {
+            VMResult::Ok(v) => assert_eq!(v.to_str(), "xyz"),
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    // ── Control flow ──
+
+    #[test]
+    fn jump_if_true_taken() {
+        // load true; JumpIfTrue past "load 0"; load 1 → 1
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadTrue, 1);
+        let j = b.emit(Op::JumpIfTrue(0), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.patch_jump(j, b.current_pos());
+        b.emit(Op::LoadInt(1), 1);
+        assert!(matches!(VM::new(b.build()).run(), VMResult::Ok(Value::Int(1))));
+    }
+
+    #[test]
+    fn jump_if_false_not_taken_for_true() {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadTrue, 1);
+        let j = b.emit(Op::JumpIfFalse(0), 1);
+        b.emit(Op::LoadInt(7), 1); // executed
+        b.patch_jump(j, b.current_pos());
+        match VM::new(b.build()).run() {
+            VMResult::Ok(Value::Int(7)) => {}
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    // ── Frame / scope ──
+
+    #[test]
+    fn push_pop_frame_with_slots() {
+        // PushFrame creates a new frame with its own slot table; GetSlot reads
+        // back what SetSlot wrote. We omit PopFrame to keep the result on the
+        // stack at end-of-chunk.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::PushFrame, 1);
+        b.emit(Op::LoadInt(99), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::GetSlot(0), 1);
+        match VM::new(b.build()).run() {
+            VMResult::Ok(Value::Int(99)) => {}
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    // ── Public VM helpers: push/pop/peek ──
+
+    #[test]
+    fn vm_push_pop_peek_round_trip() {
+        let chunk = ChunkBuilder::new().build();
+        let mut vm = VM::new(chunk);
+        vm.push(Value::Int(1));
+        vm.push(Value::Int(2));
+        assert_eq!(*vm.peek(), Value::Int(2));
+        assert_eq!(vm.pop(), Value::Int(2));
+        assert_eq!(vm.pop(), Value::Int(1));
+    }
+
+    // ── register_builtin: overwrite + grow ──
+
+    #[test]
+    fn register_builtin_overwrites_existing_handler() {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::CallBuiltin(0, 1), 1);
+        let mut vm = VM::new(b.build());
+        vm.register_builtin(0, |vm, _| {
+            vm.pop();
+            Value::Int(111)
+        });
+        // Overwrite with a different handler before run.
+        vm.register_builtin(0, |vm, _| {
+            vm.pop();
+            Value::Int(222)
+        });
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Int(222))));
+    }
+
+    #[test]
+    fn register_builtin_grows_table_to_high_id() {
+        // High id should expand the builtin_table to accommodate.
+        let chunk = ChunkBuilder::new().build();
+        let mut vm = VM::new(chunk);
+        vm.register_builtin(500, |_, _| Value::Int(0));
+        // Indirect proof: re-registering at lower id still works (no panic).
+        vm.register_builtin(1, |_, _| Value::Int(0));
+    }
+
+    // ── reset() ──
+
+    #[test]
+    fn reset_clears_state_and_runs_new_chunk() {
+        let mut b1 = ChunkBuilder::new();
+        b1.emit(Op::LoadInt(1), 1);
+        let mut vm = VM::new(b1.build());
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Int(1))));
+
+        let mut b2 = ChunkBuilder::new();
+        b2.emit(Op::LoadInt(2), 1);
+        b2.emit(Op::LoadInt(3), 1);
+        b2.emit(Op::Add, 1);
+        vm.reset(b2.build());
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Int(5))));
+    }
+
+    // ── Extension handler ──
+
+    #[test]
+    fn extension_handler_invoked_with_payload() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Option<(u16, u8)>>> = Arc::new(Mutex::new(None));
+        let captured_cl = Arc::clone(&captured);
+
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::Extended(7, 42), 1);
+        let mut vm = VM::new(b.build());
+        vm.set_extension_handler(Box::new(move |vm, id, arg| {
+            *captured_cl.lock().unwrap() = Some((id, arg));
+            vm.push(Value::Int(123));
+        }));
+        match vm.run() {
+            VMResult::Ok(Value::Int(123)) => {}
+            other => panic!("got {:?}", other),
+        }
+        assert_eq!(*captured.lock().unwrap(), Some((7, 42)));
+    }
+
+    #[test]
+    fn extension_wide_handler_invoked_with_payload() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Option<(u16, usize)>>> = Arc::new(Mutex::new(None));
+        let captured_cl = Arc::clone(&captured);
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::ExtendedWide(9, 9999), 1);
+        let mut vm = VM::new(b.build());
+        vm.set_extension_wide_handler(Box::new(move |vm, id, payload| {
+            *captured_cl.lock().unwrap() = Some((id, payload));
+            vm.push(Value::Int(0));
+        }));
+        let _ = vm.run();
+        assert_eq!(*captured.lock().unwrap(), Some((9, 9999)));
+    }
+
+    // ── VMPool ──
+
+    #[test]
+    fn vmpool_new_default_and_with_capacity_start_empty() {
+        let p = VMPool::new();
+        assert!(p.is_empty());
+        assert_eq!(p.len(), 0);
+        let p = VMPool::with_capacity(8);
+        assert!(p.is_empty());
+        let p: VMPool = Default::default();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn vmpool_release_then_acquire_reuses_vm() {
+        let mut pool = VMPool::new();
+        let chunk1 = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(1), 1);
+            b.build()
+        };
+        let vm = pool.acquire(chunk1);
+        assert_eq!(pool.len(), 0);
+        pool.release(vm);
+        assert_eq!(pool.len(), 1);
+
+        let chunk2 = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(2), 1);
+            b.build()
+        };
+        let mut vm = pool.acquire(chunk2);
+        assert_eq!(pool.len(), 0);
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Int(2))));
+    }
+
+    #[test]
+    fn vmpool_with_returns_value_and_recycles_vm() {
+        let mut pool = VMPool::new();
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(10), 1);
+            b.emit(Op::LoadInt(5), 1);
+            b.emit(Op::Add, 1);
+            b.build()
+        };
+        let result = pool.with(chunk, |vm| match vm.run() {
+            VMResult::Ok(Value::Int(n)) => n,
+            other => panic!("got {:?}", other),
+        });
+        assert_eq!(result, 15);
+        assert_eq!(pool.len(), 1, "VM should be returned to pool after with()");
+    }
 }

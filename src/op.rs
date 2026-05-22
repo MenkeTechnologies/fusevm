@@ -497,4 +497,81 @@ mod tests {
             std::mem::size_of::<Op>()
         );
     }
+
+    #[test]
+    fn equal_ops_hash_equal() {
+        use std::collections::hash_map::DefaultHasher;
+        let h = |op: &Op| {
+            let mut hs = DefaultHasher::new();
+            op.hash(&mut hs);
+            hs.finish()
+        };
+        assert_eq!(h(&Op::LoadInt(42)), h(&Op::LoadInt(42)));
+        assert_eq!(h(&Op::Jump(7)), h(&Op::Jump(7)));
+        assert_eq!(h(&Op::Add), h(&Op::Add));
+    }
+
+    #[test]
+    fn different_ops_typically_hash_differently() {
+        use std::collections::hash_map::DefaultHasher;
+        let h = |op: &Op| {
+            let mut hs = DefaultHasher::new();
+            op.hash(&mut hs);
+            hs.finish()
+        };
+        assert_ne!(h(&Op::LoadInt(1)), h(&Op::LoadInt(2)));
+        assert_ne!(h(&Op::Add), h(&Op::Sub));
+        assert_ne!(h(&Op::Jump(0)), h(&Op::JumpIfTrue(0)));
+    }
+
+    #[test]
+    fn float_load_hash_uses_bit_pattern() {
+        // f64 must hash via bits — NaN, -0.0 etc. need to be hashable.
+        use std::collections::hash_map::DefaultHasher;
+        let h = |op: &Op| {
+            let mut hs = DefaultHasher::new();
+            op.hash(&mut hs);
+            hs.finish()
+        };
+        let a = Op::LoadFloat(f64::NAN);
+        let b = Op::LoadFloat(f64::NAN);
+        // Same bit pattern → equal hash.
+        assert_eq!(h(&a), h(&b));
+        // +0.0 and -0.0 are == under PartialEq but have different bits;
+        // their hashes will differ — verify the impl is bit-based.
+        assert_ne!(h(&Op::LoadFloat(0.0)), h(&Op::LoadFloat(-0.0)));
+    }
+
+    #[test]
+    fn partialeq_works_for_payloaded_ops() {
+        assert_eq!(Op::LoadInt(1), Op::LoadInt(1));
+        assert_ne!(Op::LoadInt(1), Op::LoadInt(2));
+        assert_eq!(Op::Jump(5), Op::Jump(5));
+        assert_ne!(Op::Jump(5), Op::Jump(6));
+    }
+
+    #[test]
+    fn op_clone_is_value_equal() {
+        let a = Op::LoadInt(123);
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn op_serde_roundtrip() {
+        // Verify a representative selection of ops survive serde JSON roundtrip.
+        let cases = vec![
+            Op::Nop,
+            Op::LoadInt(-5),
+            Op::LoadFloat(1.5),
+            Op::Add,
+            Op::Jump(42),
+            Op::GetSlot(7),
+        ];
+        for op in cases {
+            let s = serde_json::to_string(&op).unwrap();
+            let back: Op = serde_json::from_str(&s).unwrap();
+            assert_eq!(op, back);
+        }
+    }
 }
