@@ -27,7 +27,7 @@ cargo add fusevm --features jit   # with Cranelift JIT
 cargo add fusevm                  # interpreter only
 ```
 
-### [`Docs`](https://menketechnologies.github.io/fusevm/) · [`Engineering Report`](https://menketechnologies.github.io/fusevm/report.html) · [`API Reference`](https://docs.rs/fusevm) · [`Crates.io`](https://crates.io/crates/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang) · [`zshrs`](https://github.com/MenkeTechnologies/zshrs)
+### [`Read the Docs`](https://menketechnologies.github.io/fusevm/) &middot; [`Engineering Report`](https://menketechnologies.github.io/fusevm/report.html) · [`API Reference`](https://docs.rs/fusevm) · [`Crates.io`](https://crates.io/crates/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang) · [`zshrs`](https://github.com/MenkeTechnologies/zshrs)
 
 ---
 
