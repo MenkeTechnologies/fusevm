@@ -20,14 +20,14 @@
 
 ## `[PATENT PENDING]`
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 129 opcodes across 10 categories. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 134 opcodes across 20 sections, 8 fused superinstructions, 29 first-class shell ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
 cargo add fusevm                  # interpreter only
 ```
 
-### [`Docs`](https://menketechnologies.github.io/fusevm/) · [`API Reference`](https://docs.rs/fusevm) · [`Crates.io`](https://crates.io/crates/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang) · [`zshrs`](https://github.com/MenkeTechnologies/zshrs)
+### [`Docs`](https://menketechnologies.github.io/fusevm/) · [`Engineering Report`](https://menketechnologies.github.io/fusevm/report.html) · [`API Reference`](https://docs.rs/fusevm) · [`Crates.io`](https://crates.io/crates/fusevm) · [`strykelang`](https://github.com/MenkeTechnologies/strykelang) · [`zshrs`](https://github.com/MenkeTechnologies/zshrs)
 
 ---
 
@@ -154,19 +154,25 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-129 opcodes across 10 categories:
+134 opcodes across 20 sections in `src/op.rs`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
-| Constants & Stack | ~12 | `LoadInt`, `LoadFloat`, `Pop`, `Dup`, `Swap` |
-| Variables | ~8 | `GetVar`, `SetVar`, `GetSlot`, `SetSlot` |
-| Arrays & Hashes | ~25 | `ArrayPush`, `HashGet`, `MakeArray`, `HashKeys` |
-| Arithmetic | ~9 | `Add`, `Sub`, `Mul`, `Div`, `Pow` |
-| Comparison | ~14 | `NumEq`, `StrLt`, `Spaceship` |
-| Control Flow | ~5 | `Jump`, `JumpIfFalse`, `JumpIfTrueKeep` |
-| Functions | ~3 | `Call`, `Return`, `PushFrame` |
-| Shell Ops | ~24 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile` |
-| Fused | ~8 | `AccumSumLoop`, `SlotIncLtIntJumpBack` |
+| Constants & Stack | 12 | `LoadInt`, `LoadFloat`, `Pop`, `Dup`, `Swap` |
+| Variables | 7 | `GetVar`, `SetVar`, `GetSlot`, `SetSlot`, `SlotArrayGet` |
+| Arrays & Hashes | 20 | `ArrayPush`, `HashGet`, `MakeArray`, `HashKeys` |
+| Arithmetic | 9 | `Add`, `Sub`, `Mul`, `Div`, `Pow` |
+| String | 3 | `Concat`, `StringRepeat`, `StringLen` |
+| Comparison | 14 | `NumEq`, `StrLt`, `Spaceship`, `StrCmp` |
+| Logical / Bitwise | 9 | `LogNot`, `LogAnd`, `BitAnd`, `Shl`, `Shr` |
+| Control Flow | 5 | `Jump`, `JumpIfFalse`, `JumpIfTrueKeep` |
+| Functions / Scope | 5 | `Call`, `Return`, `PushFrame`, `PopFrame` |
+| I/O | 3 | `Print`, `PrintLn`, `ReadLine` |
+| Collections | 2 | `Range`, `RangeStep` |
+| Higher-Order | 5 | `MapBlock`, `GrepBlock`, `SortBlock`, `ForEachBlock` |
+| **Fused** | **8** | `AccumSumLoop`, `SlotIncLtIntJumpBack`, `ConcatConstLoop` |
+| Builtins | 1 | `CallBuiltin(id, argc)` (140 IDs in `shell_builtins.rs`) |
+| Shell Ops | 29 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile`, `RegexMatch` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
 ---

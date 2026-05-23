@@ -120,18 +120,21 @@
           <nav class="tutorial-crumbs" aria-label="Breadcrumb">
             <span class="current">Docs</span>
             <span class="sep">/</span>
+            <a href="report.html">Engineering Report</a>
+            <span class="sep">/</span>
             <a href="https://github.com/MenkeTechnologies/fusevm" target="_blank" rel="noopener noreferrer">GitHub</a>
             <span class="sep">/</span>
             <a href="https://crates.io/crates/fusevm" target="_blank" rel="noopener noreferrer">crates.io</a>
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.12.0 · Fused superinstructions · Extension dispatch · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing)</p>
+          <p class="docs-build-line">fusevm v0.12.1 · 134 opcodes · 8 fused superinstructions · 29 shell ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · 9,026 lines Rust · 1,554 #[test] fns</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
           <button type="button" class="btn btn-secondary active" id="btnCrt" title="CRT scanline overlay">CRT</button>
           <button type="button" class="btn btn-secondary active" id="btnNeon" title="Neon border pulse">Neon</button>
+          <a class="btn btn-secondary" href="report.html">Report</a>
           <a class="btn btn-secondary" href="https://github.com/MenkeTechnologies/fusevm" target="_blank" rel="noopener noreferrer">GitHub</a>
           <a class="btn btn-secondary" href="https://github.com/MenkeTechnologies/fusevm/issues" target="_blank" rel="noopener noreferrer">Issues</a>
         </div>
@@ -147,7 +150,7 @@
 
     <main class="tutorial-main">
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>FUSEVM REFERENCE</h2>
-      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 10), tracing (hot loop body with side-exits, frame materialization, side-trace stitching). Auto-dispatched from <code>VM::run()</code> when tracing is enabled. The shared execution engine behind strykelang, zshrs, and awkrs.</p>
+      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 10), tracing (hot loop body with side-exits, frame materialization, side-trace stitching). Auto-dispatched from <code>VM::run()</code> when tracing is enabled. The shared execution engine behind strykelang, zshrs, and awkrs. For full numbers / subsystem breakdown / file inventory see the <a href="report.html" style="color:var(--accent);">Engineering Report</a>.</p>
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
@@ -155,14 +158,14 @@
         <p class="motto" style="font-size: 12px; color: var(--cyan); margin-top: -1rem;">FUSED SUPERINSTRUCTIONS. EXTENSION DISPATCH. 3-TIER CRANELIFT JIT.</p>
 
         <div class="stat-grid">
-          <div><div class="stat">129</div><div class="stat-label">opcodes</div></div>
-          <div><div class="stat">10</div><div class="stat-label">op categories</div></div>
+          <div><div class="stat">134</div><div class="stat-label">opcodes</div></div>
+          <div><div class="stat">20</div><div class="stat-label">op sections</div></div>
           <div><div class="stat">8</div><div class="stat-label">fused superinstructions</div></div>
-          <div><div class="stat">24</div><div class="stat-label">shell ops</div></div>
-          <div><div class="stat">7,792</div><div class="stat-label">lines of Rust</div></div>
+          <div><div class="stat">29</div><div class="stat-label">shell ops</div></div>
+          <div><div class="stat">9,026</div><div class="stat-label">production lines</div></div>
+          <div><div class="stat">1,554</div><div class="stat-label">#[test] fns</div></div>
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
           <div><div class="stat">3</div><div class="stat-label">language frontends</div></div>
-          <div><div class="stat">&le;24B</div><div class="stat-label">op size (cache-friendly)</div></div>
         </div>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
@@ -313,7 +316,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         <h2><span class="section-num">[0x03]</span> OP CATEGORIES</h2>
 
         <p style="font-size: 14px; color: var(--text); margin-bottom: 0.8rem;">
-        129 opcodes across 10 categories. Every op is &le;24 bytes for cache-friendly dispatch.</p>
+        134 opcodes across 20 sections in <code>src/op.rs</code>. Every op is &le;24 bytes for cache-friendly dispatch.</p>
 
         <div class="cat-grid">
           <div class="cat-card">

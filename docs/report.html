@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="fusevm — Engineering report. Language-agnostic bytecode VM in Rust: 9,026 production lines, 21,216 test lines, 134 opcodes, 8 fused superinstructions, three-tier Cranelift JIT (linear/block/tracing with side-exits + frame materialization). The shared execution engine behind strykelang, zshrs, and awkrs.">
+  <title>fusevm &mdash; Engineering Report</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="hud-static.css">
+  <link rel="stylesheet" href="tutorial.css">
+  <style>
+    .tutorial-main { max-width: 76rem; }
+    .bar-wrap { background:var(--bg-primary);border:1px solid var(--border);border-radius:2px;height:18px;position:relative;overflow:hidden; }
+    .bar-fill { height:100%;border-radius:1px;transition:width 1.2s cubic-bezier(.22,1,.36,1); }
+    .bar-fill.green  { background:linear-gradient(90deg,#39ff14,#20c00a);box-shadow:0 0 8px rgba(57,255,20,.4); }
+    .bar-fill.cyan   { background:linear-gradient(90deg,#05d9e8,#0891b2);box-shadow:0 0 8px rgba(5,217,232,.4); }
+    .bar-fill.yellow { background:linear-gradient(90deg,#ffb800,#e8a000);box-shadow:0 0 8px rgba(255,184,0,.35); }
+    .bar-fill.magenta{ background:linear-gradient(90deg,#d300c5,#a000a0);box-shadow:0 0 8px rgba(211,0,197,.35); }
+    .bar-pct { position:absolute;right:6px;top:0;line-height:18px;font-size:10px;font-weight:700;color:#fff;text-shadow:0 0 4px #000;font-family:'Orbitron',sans-serif; }
+
+    .file-table { width:100%;border-collapse:collapse;margin:0.6rem 0;font-size:12px; }
+    .file-table th { background:var(--bg-secondary);color:var(--cyan);font-family:'Orbitron',sans-serif;font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;text-align:left;padding:7px 10px;border:1px solid var(--border); }
+    .file-table td { padding:6px 10px;border:1px solid var(--border);color:var(--text-dim);vertical-align:middle; }
+    .file-table tr:hover td { background:var(--bg-hover); }
+    .file-table td:first-child { font-family:'Share Tech Mono',monospace;color:var(--accent-light);font-weight:600;white-space:nowrap; }
+    .file-table .num { text-align:right;font-family:'Share Tech Mono',monospace; }
+    .file-table .total-row td { background:var(--bg-secondary);font-weight:700;color:var(--text);border-top:2px solid var(--cyan); }
+    .file-table code { font-size:11px;color:var(--accent-light);background:var(--bg-primary);padding:1px 4px;border-radius:2px; }
+
+    .stat-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:0.75rem;margin:1.2rem 0; }
+    .stat-card { border:1px solid var(--border);border-top:3px solid var(--cyan);background:var(--bg-card);padding:1rem 1.2rem;border-radius:2px;text-align:center; }
+    .stat-card .stat-val { font-family:'Orbitron',sans-serif;font-size:28px;font-weight:900;color:var(--cyan);line-height:1.1;text-shadow:0 0 20px var(--cyan-glow); }
+    .stat-card .stat-val.accent { color:var(--accent);text-shadow:0 0 20px var(--accent-glow); }
+    .stat-card .stat-val.green  { color:var(--green);text-shadow:0 0 20px rgba(57,255,20,.3); }
+    .stat-card .stat-label { font-family:'Orbitron',sans-serif;font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text-muted);margin-top:0.5rem; }
+    @keyframes glow-pulse { 0%,100%{text-shadow:0 0 20px var(--cyan-glow)}50%{text-shadow:0 0 40px var(--cyan-glow),0 0 80px var(--cyan-dim)} }
+    .stat-card .stat-val { animation:glow-pulse 3s ease-in-out infinite; }
+
+    .mapping-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(20rem,1fr));gap:0.65rem;margin:0.8rem 0; }
+    .mapping-card { border:1px solid var(--border);border-left:3px solid var(--magenta);background:var(--bg-card);padding:0.6rem 0.9rem;border-radius:2px; }
+    .mapping-card h4 { font-family:'Orbitron',sans-serif;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--magenta);margin:0 0 0.3rem; }
+    .mapping-card p { margin:0;font-size:11px;color:var(--text-dim);line-height:1.5; }
+    .mapping-card code { font-size:10.5px;color:var(--accent-light);background:var(--bg-primary);padding:1px 4px;border-radius:2px; }
+
+    .section-rule { border:none;border-top:1px dashed var(--border);margin:2rem 0; }
+
+    .feature-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(22rem,1fr));gap:0.65rem;margin:0.8rem 0; }
+    .feature-card { border:1px solid var(--border);border-left:3px solid var(--cyan);background:var(--bg-card);padding:0.7rem 1rem;border-radius:2px; }
+    .feature-card h4 { font-family:'Orbitron',sans-serif;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--cyan);margin:0 0 0.3rem; }
+    .feature-card p { margin:0;font-size:11px;color:var(--text-dim);line-height:1.55; }
+    .feature-card code { font-size:10.5px;color:var(--accent-light);background:var(--bg-primary);padding:1px 4px;border-radius:2px; }
+    .feature-card ul { margin:0.3rem 0 0;padding-left:1.2rem;font-size:11px;color:var(--text-dim);line-height:1.6; }
+    .feature-card li code { font-size:10px; }
+  </style>
+</head>
+<body>
+  <div class="app tutorial-app" id="reportApp">
+    <div class="crt-scanline" id="crtH" aria-hidden="true"></div>
+    <div class="crt-scanline-v" id="crtV" aria-hidden="true"></div>
+
+    <header class="tutorial-header">
+      <div class="tutorial-header-inner">
+        <div>
+          <h1 class="tutorial-brand">// FUSEVM &mdash; ENGINEERING REPORT</h1>
+          <nav class="tutorial-crumbs" aria-label="Breadcrumb">
+            <span class="current">Engineering Report</span>
+            <span class="sep">/</span>
+            <a href="index.html">Docs</a>
+            <span class="sep">/</span>
+            <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
+            <span class="sep">/</span>
+            <a href="https://crates.io/crates/fusevm" target="_blank" rel="noopener noreferrer">crates.io</a>
+            <span class="sep">/</span>
+            <a href="https://github.com/MenkeTechnologies/fusevm" target="_blank" rel="noopener noreferrer">GitHub</a>
+          </nav>
+          <p style="margin:0.35rem 0 0;font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--text-dim);letter-spacing:0.03em;opacity:0.75;">
+            Language-agnostic bytecode VM &middot; Fused superinstructions &middot; Cranelift 0.130 three-tier JIT (linear / block / tracing with side-exits + frame materialization &middot; auto-dispatched from <code>VM::run()</code>)
+          </p>
+        </div>
+        <div class="tutorial-toolbar">
+          <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
+          <button type="button" class="btn btn-secondary active" id="btnCrt" title="CRT scanline overlay">CRT</button>
+          <button type="button" class="btn btn-secondary active" id="btnNeon" title="Neon border pulse">Neon</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="tutorial-main">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 1: EXECUTIVE SUMMARY           -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>EXECUTIVE SUMMARY</h2>
+      <p class="tutorial-subtitle">fusevm is a language-agnostic bytecode virtual machine written in Rust. Any frontend compiles to the same 134-variant <code>Op</code> enum and gets fused hot-loop dispatch, extension opcode tables, stack+slot execution, and an optional three-tier Cranelift JIT &mdash; for free. Tier&nbsp;1 is a straight-line linear JIT (compile on first call). Tier&nbsp;2 is a block-level JIT over the chunk's CFG (warmup threshold 10). Tier&nbsp;3 is a tracing JIT (loop-header threshold 50) with full side-exit machinery: cross-call inlining (depth &le;&nbsp;4), caller- and callee-frame branches, frame materialization on deopt, abstract-stack reconstruction (Int + Float), per-trace side-exit counters with auto-blacklist, persistent <code>TraceMetadata</code> export/import, and side-trace stitching from hot deopt sites. Auto-dispatched from <code>VM::run()</code> when tracing is enabled &mdash; the interpreter and the JIT are one execution path, not two. <strong>9,026 production Rust lines + 1,554 <code>#[test]</code> functions + 1,449 integration tests + 105 inline tests + 8 fused superinstructions + 29 first-class shell ops + 140 shell builtin IDs</strong> &mdash; one shared engine, three live frontends.</p>
+
+      <div class="stat-grid">
+        <div class="stat-card"><div class="stat-val">9,026</div><div class="stat-label">Production Rust</div></div>
+        <div class="stat-card"><div class="stat-val">21,216</div><div class="stat-label">Test Lines</div></div>
+        <div class="stat-card"><div class="stat-val accent">134</div><div class="stat-label">Opcodes</div></div>
+        <div class="stat-card"><div class="stat-val green">1,554</div><div class="stat-label">#[test] Functions</div></div>
+        <div class="stat-card"><div class="stat-val">3</div><div class="stat-label">JIT Tiers</div></div>
+        <div class="stat-card"><div class="stat-val">8</div><div class="stat-label">Fused Superinstructions</div></div>
+        <div class="stat-card"><div class="stat-val">29</div><div class="stat-label">Shell Ops</div></div>
+        <div class="stat-card"><div class="stat-val">140</div><div class="stat-label">Shell Builtin IDs</div></div>
+        <div class="stat-card"><div class="stat-val">3</div><div class="stat-label">Live Frontends</div></div>
+        <div class="stat-card"><div class="stat-val">11</div><div class="stat-label">Direct Deps</div></div>
+      </div>
+
+      <div style="margin:1.2rem 0;">
+        <p style="font-size:11px;color:var(--text-muted);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:4px;font-family:'Orbitron',sans-serif;font-weight:700;">Source Distribution &mdash; 31,872 total lines</p>
+        <div class="bar-wrap" style="height:26px;">
+          <div class="bar-fill cyan" style="width:28.3%;"></div>
+          <span class="bar-pct" style="font-size:12px;">9,026 production / 21,216 tests / 1,630 benches &middot; 28.3% production</span>
+        </div>
+        <p style="font-size:10px;color:var(--text-muted);margin-top:4px;">Production: 8 files under <code>src/</code>. Tests: 44 integration modules under <code>tests/</code> (1,449 <code>#[test]</code> fns) plus 105 inline <code>#[cfg(test)]</code> fns in <code>src/</code>. Benches: 5 Criterion harnesses under <code>benches/</code>. Test-to-production ratio: <strong>2.35&times;</strong> &mdash; every production line is shadowed by &gt;2&times; its weight in test code.</p>
+      </div>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 1b: SCALE & POSITION            -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">~</span>SCALE &amp; POSITION</h2>
+      <p class="tutorial-subtitle">Reference comparison against other embeddable bytecode VMs and managed-language runtimes. fusevm is intentionally narrower than the others: it ships no parser, no GC, no stdlib &mdash; only the dispatch loop, the JIT bridge, and the extension hooks. The frontends layer everything else on top. The compactness is the point: a VM you can read end-to-end in an afternoon.</p>
+
+      <table class="file-table">
+        <thead>
+          <tr>
+            <th>VM</th>
+            <th>Language</th>
+            <th class="num">Core source</th>
+            <th>Native JIT</th>
+            <th>Embeddable</th>
+            <th>Multi-frontend</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="background:rgba(57,255,20,0.05);">
+            <td style="color:var(--green);"><strong>fusevm</strong></td>
+            <td>Rust</td>
+            <td class="num">9,026 (8 files)</td>
+            <td>Cranelift 0.130 (3-tier)</td>
+            <td>crate (<code>cargo add fusevm</code>)</td>
+            <td><strong>yes &mdash; 3 live</strong></td>
+          </tr>
+          <tr>
+            <td>Lua 5.4</td>
+            <td>C</td>
+            <td class="num">~13,000</td>
+            <td>no (LuaJIT separate)</td>
+            <td>yes (libluacore)</td>
+            <td>single-frontend</td>
+          </tr>
+          <tr>
+            <td>LuaJIT</td>
+            <td>C + asm</td>
+            <td class="num">~85,000</td>
+            <td>tracing</td>
+            <td>yes</td>
+            <td>single-frontend</td>
+          </tr>
+          <tr>
+            <td>QuickJS</td>
+            <td>C</td>
+            <td class="num">~70,000</td>
+            <td>no</td>
+            <td>yes</td>
+            <td>single-frontend (JS)</td>
+          </tr>
+          <tr>
+            <td>Wren</td>
+            <td>C</td>
+            <td class="num">~9,000</td>
+            <td>no</td>
+            <td>yes</td>
+            <td>single-frontend</td>
+          </tr>
+          <tr>
+            <td>Wasmtime (Cranelift)</td>
+            <td>Rust</td>
+            <td class="num">~300,000</td>
+            <td>Cranelift</td>
+            <td>yes</td>
+            <td>wasm only</td>
+          </tr>
+          <tr>
+            <td>CPython ceval</td>
+            <td>C</td>
+            <td class="num">~12,000 (ceval.c)</td>
+            <td>no (3.13 experimental)</td>
+            <td>libpython</td>
+            <td>single-frontend</td>
+          </tr>
+          <tr>
+            <td>Perl 5 pp_*</td>
+            <td>C</td>
+            <td class="num">~50,000 (pp*.c)</td>
+            <td>no</td>
+            <td>libperl</td>
+            <td>single-frontend</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="feature-grid" style="margin-top:1.2rem;">
+        <div class="feature-card">
+          <h4>Multi-Frontend by Design</h4>
+          <p>Every other entry in the table above grew its VM as the runtime for exactly one language. fusevm inverts the relationship: the <code>Op</code> enum is the spec, frontends register language-specific ops through <code>Extended(u16, u8)</code> + <code>ExtendedWide(u16, usize)</code> against a handler table. Three frontends ship today &mdash; <a href="https://github.com/MenkeTechnologies/strykelang" style="color:var(--cyan);">strykelang</a> (~450 ext ops), <a href="https://github.com/MenkeTechnologies/zshrs" style="color:var(--cyan);">zshrs</a> (~20 ext ops), <a href="https://github.com/MenkeTechnologies/awkrs" style="color:var(--cyan);">awkrs</a> (~95 ext ops) &mdash; and they don't conflict.</p>
+        </div>
+        <div class="feature-card">
+          <h4>By Per-File Density</h4>
+          <p>The whole VM is 8 files. <code>jit.rs</code> at 3,982 lines hosts all three JIT tiers + deopt machinery + side-trace stitching. <code>vm.rs</code> at 2,775 lines is the entire match-dispatch interpreter including frame management, builtin dispatch, and host routing. No file exceeds 4,000 lines; the dispatch core is one <code>match</code> over <code>Op</code>.</p>
+        </div>
+        <div class="feature-card">
+          <h4>By Test Surface</h4>
+          <p><code>1,449</code> integration tests in <code>tests/</code> + <code>105</code> inline tests in <code>src/</code> = <strong>1,554 <code>#[test]</code> functions</strong> against 9,026 production lines. <code>tests/jit_trace.rs</code> alone is 1,940 lines pinning the tracing-JIT recorder, deopt path, frame materialization, side-trace stitching, and the persistent-metadata round-trip. A separate differential-fuzz harness (<code>tests/jit_fuzz.rs</code>) generates random valid bytecode and asserts interpreter and tracing-JIT produce identical results on every chunk.</p>
+        </div>
+        <div class="feature-card">
+          <h4>Op Density</h4>
+          <p>134 universal opcodes &mdash; arithmetic, comparison, control flow, scope, I/O, collections, higher-order blocks, fused superinstructions, builtins, extension points, plus 29 first-class shell ops promoted out of the extension space because multiple frontends need them (pipelines, redirects, here-docs, glob, file tests, traps, parameter expansion, regex / glob match, scoped redirection blocks). Every variant is &le;&nbsp;24 bytes for cache-friendly dispatch.</p>
+        </div>
+      </div>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 2: SUBSYSTEM BREAKDOWN          -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">#</span>SUBSYSTEM BREAKDOWN</h2>
+      <p class="tutorial-subtitle">Production source partitioned by role. JIT dominates at 44.1% &mdash; the tracing tier alone carries cross-call inlining (depth &le;&nbsp;4), caller / callee-frame side-exits, frame + abstract-stack materialization, side-exit auto-blacklist, persistent metadata, and side-trace stitching. The interpreter sits at 30.7%. Everything else is bookkeeping: opcode definitions, the value enum, chunk encoding, the host trait, and the builtin-ID table.</p>
+
+      <table class="file-table">
+        <thead><tr><th>Subsystem</th><th>File</th><th class="num">Lines</th><th class="num">%</th><th style="min-width:120px;">Share</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td style="color:var(--accent);">JIT (Cranelift)</td><td><code>src/jit.rs</code></td><td class="num">3,982</td><td class="num">44.1%</td><td><div class="bar-wrap"><div class="bar-fill magenta" style="width:44.1%"></div></div></td><td>Three-tier compiler: <code>compile_linear</code> (straight-line, instant), <code>compile_block</code> (whole-chunk CFG, threshold 10), <code>compile_trace</code> (hot-loop body, threshold 50). Tracing covers Phases 1&ndash;9: loop bodies, cross-call inlining, caller- and callee-frame branches with side-exits, frame materialization (<code>DeoptFrame</code>), abstract-stack reconstruction (<code>STACK_KIND_INT</code> / <code>FLOAT</code>), per-trace side-exit counter with auto-blacklist (default cap 50), <code>TraceMetadata</code> export / import, bounded recursion (depth &le;&nbsp;4), side-trace stitching (cap 4). <code>TraceJitConfig</code> exposes every threshold to callers.</td></tr>
+          <tr><td style="color:var(--accent);">Interpreter VM</td><td><code>src/vm.rs</code></td><td class="num">2,775</td><td class="num">30.7%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:30.7%"></div></div></td><td>Match-dispatch loop over <code>Op</code>. Stack + frame slots, builtin handler table, extension handler table (narrow + wide), shell-host routing, <code>VMPool</code> for VM reuse (avoids per-script allocator churn). <code>enable_tracing_jit()</code> wires the tracing tier into <code>VM::run()</code>; auto-dispatch from the interpreter loop on hot backedges. <code>~195 <code>Op::*</code> arms in the dispatch match.</p></code></td></tr>
+          <tr><td style="color:var(--accent);">Shell Builtins (IDs)</td><td><code>src/shell_builtins.rs</code></td><td class="num">583</td><td class="num">6.5%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:6.5%"></div></div></td><td>140 stable <code>BUILTIN_*: u16</code> constants partitioned into ranges: 0&ndash;19 core (<code>cd</code>, <code>pwd</code>, <code>echo</code>, <code>print</code>, <code>printf</code>, <code>export</code>, <code>unset</code>, <code>source</code>, <code>exit</code>, <code>return</code>, <code>true</code>, <code>false</code>, <code>test</code>, <code>:</code>, <code>.</code>), 20&ndash;29 typeset (<code>local</code>, <code>declare</code>, <code>typeset</code>, <code>readonly</code>, <code>integer</code>, <code>float</code>), 30&ndash;39 I/O (<code>read</code>, <code>mapfile</code>), 40&ndash;49 loop control (<code>break</code>, <code>continue</code>), plus the rest. Frontend registers handlers against these stable IDs via <code>VM::register_builtin(id, handler)</code>.</td></tr>
+          <tr><td style="color:var(--accent);">Op Enum</td><td><code>src/op.rs</code></td><td class="num">577</td><td class="num">6.4%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:6.4%"></div></div></td><td>134 variants in 20 sections: Constants, Stack, Variables, Arrays, Hashes, Arithmetic, String, Comparison (numeric), Comparison (string), Logical / Bitwise, Control flow, Functions, Scope, I/O, Collections, Higher-order, <strong>Fused superinstructions</strong>, Builtins, Extension point, Shell ops. <code>file_test</code> / <code>redirect_op</code> / <code>param_mod</code> constant modules for sub-byte operand encoding. Manual <code>Hash</code> impl over discriminants + payload bytes.</td></tr>
+          <tr><td style="color:var(--accent);">Value System</td><td><code>src/value.rs</code></td><td class="num">469</td><td class="num">5.2%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:5.2%"></div></div></td><td>10-variant enum: <code>Undef</code>, <code>Bool</code>, <code>Int(i64)</code>, <code>Float(f64)</code>, <code>Str(Arc&lt;String&gt;)</code>, <code>Array</code>, <code>Hash</code>, <code>Status(i32)</code>, <code>Ref</code>, <code>NativeFn(u16)</code>. <code>Arc</code>'d strings for cheap closure clone. Coercion API (<code>to_int</code>, <code>to_float</code>, <code>to_str</code>, <code>as_str_cow</code>, <code>is_truthy</code>) keeps the dispatch loop allocation-light.</td></tr>
+          <tr><td style="color:var(--accent);">Shell Host Trait</td><td><code>src/host.rs</code></td><td class="num">307</td><td class="num">3.4%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:3.4%"></div></div></td><td><code>trait ShellHost: Send</code> with ~25 methods covering everything the VM can't do itself: glob, tilde / brace / word / parameter expansion, command + process substitution, redirects, here-docs, here-strings, pipelines, subshells, traps, scoped redirection blocks, function call dispatch, <code>exec</code> / <code>exec_bg</code>, regex / glob match. <code>DefaultHost</code> ships sensible no-op defaults so a frontend without shell ambitions doesn't have to implement them.</td></tr>
+          <tr><td style="color:var(--accent);">Chunk + Builder</td><td><code>src/chunk.rs</code></td><td class="num">265</td><td class="num">2.9%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:2.9%"></div></div></td><td>The compilation unit. <code>Chunk</code> holds the op array, constant pool, name pool, line-number table, slot count, block-range table, and sub-chunk table. <code>ChunkBuilder</code> emits ops one at a time, resolves forward jumps with <code>patch_jump</code>, and finalizes via <code>build()</code>. Serde-serializable for ahead-of-time bytecode caching.</td></tr>
+          <tr><td style="color:var(--accent);">Public API Roof</td><td><code>src/lib.rs</code></td><td class="num">68</td><td class="num">0.8%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:0.8%"></div></div></td><td>Module declarations + the public re-export set: <code>Chunk</code>, <code>ChunkBuilder</code>, <code>DefaultHost</code>, <code>ShellHost</code>, <code>Op</code>, <code>Value</code>, <code>VM</code>, <code>VMPool</code>, <code>VMResult</code>, <code>Frame</code>, plus the JIT surface (<code>JitCompiler</code>, <code>JitExtension</code>, <code>NativeCode</code>, <code>SlotKind</code>, <code>TraceJitConfig</code>, <code>TraceLookup</code>, <code>TraceMetadata</code>, <code>DeoptFrame</code>, <code>DeoptInfo</code>).</td></tr>
+          <tr><td style="color:var(--green);">Tests</td><td><code>tests/*.rs + src/*.rs</code></td><td class="num">21,216</td><td class="num">&mdash;</td><td><div class="bar-wrap"><div class="bar-fill green" style="width:70.1%"></div></div></td><td>44 integration modules (<code>1,449</code> <code>#[test]</code> fns) + inline <code>#[cfg(test)]</code> in <code>src/</code> (<code>105</code> fns) = <strong>1,554 total <code>#[test]</code> functions</strong>. Differential-fuzz harness (<code>tests/jit_fuzz.rs</code>) compares interpreter and tracing JIT op-by-op on randomized chunks. The 21,216-line test corpus is excluded from the 9,026 production total.</td></tr>
+          <tr><td style="color:var(--text-muted);">Benches</td><td><code>benches/*.rs</code></td><td class="num">1,630</td><td class="num">&mdash;</td><td><div class="bar-wrap"><div class="bar-fill yellow" style="width:5.4%"></div></div></td><td>5 Criterion harnesses: <code>vm_bench</code> (560), <code>classic</code> (471), <code>jit_vs_interp</code> (247, requires <code>jit</code>), <code>jit_trace</code> (216, requires <code>jit</code>), <code>jit_crossover</code> (136, requires <code>jit</code>). HTML reports via Criterion's built-in renderer.</td></tr>
+        </tbody>
+        <tfoot><tr class="total-row"><td colspan="2" style="font-family:'Orbitron',sans-serif;font-size:10px;letter-spacing:1px;">PRODUCTION TOTAL</td><td class="num">9,026</td><td class="num">100%</td><td></td><td>Tests and benches counted separately (21,216 + 1,630 lines, 31,872 total).</td></tr></tfoot>
+      </table>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 3: TOP TEST FILES                -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">$</span>TOP TEST MODULES</h2>
+      <p class="tutorial-subtitle">The integration-test corpus partitioned by file. JIT-tracing tests are the single biggest module (1,940 lines, 56 <code>#[test]</code> fns); the rest splits between VM behavior, host routing, shell-op dispatch, and op-by-op exhaustive coverage. Every fused superinstruction has dedicated coverage in <code>fused_ops.rs</code> / <code>slot_and_fused_ops.rs</code>.</p>
+
+      <table class="file-table">
+        <thead><tr><th>File</th><th class="num">Lines</th><th class="num">#[test]</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td>tests/jit_trace.rs</td><td class="num">1,940</td><td class="num">56</td><td>Tracing JIT: header detection, recorder, deopt, frame materialization, abstract-stack reconstruction, side-trace stitching, <code>TraceMetadata</code> round-trip</td></tr>
+          <tr><td>tests/vm_integration.rs</td><td class="num">1,050</td><td class="num">65</td><td>End-to-end programs: arithmetic, control flow, function calls, scope, higher-order blocks (<code>MapBlock</code> / <code>GrepBlock</code> / <code>SortBlock</code> / <code>ForEachBlock</code>)</td></tr>
+          <tr><td>tests/host_ext_and_more_ops.rs</td><td class="num">902</td><td class="num">&mdash;</td><td>Host trait method coverage, extension dispatch (narrow + wide), default-host fallthroughs</td></tr>
+          <tr><td>tests/edge_cases.rs</td><td class="num">863</td><td class="num">52</td><td>Edge cases: empty stack, type coercion at op boundaries, undef propagation, divide-by-zero, out-of-range index, jump-target validation</td></tr>
+          <tr><td>tests/shell_ops_with_host.rs</td><td class="num">797</td><td class="num">45</td><td>Shell-op dispatch with a real <code>ShellHost</code>: pipelines, redirects, here-docs, command substitution, process substitution, traps</td></tr>
+          <tr><td>tests/op_exhaustive_and_vm_lifecycle.rs</td><td class="num">772</td><td class="num">41</td><td>Per-op smoke tests + VM lifecycle: <code>new</code> / <code>reset</code> / <code>run</code> / <code>VMPool</code> acquire / release</td></tr>
+          <tr><td>tests/shell_op_routing.rs</td><td class="num">679</td><td class="num">&mdash;</td><td>Routing: which shell ops fall through to the host, which terminate in the VM, how <code>WithRedirectsBegin</code>/<code>End</code> scopes are restored on early return</td></tr>
+          <tr><td>tests/host_routing_and_reset.rs</td><td class="num">632</td><td class="num">53</td><td>VM&harr;host boundary: shell-host swap mid-run, reset preserves handlers, extension handler replacement</td></tr>
+          <tr><td>tests/slot_and_fused_ops.rs</td><td class="num">585</td><td class="num">43</td><td>Slot-indexed fast paths + every fused superinstruction (<code>AccumSumLoop</code>, <code>ConcatConstLoop</code>, <code>PushIntRangeLoop</code>, <code>SlotIncLtIntJumpBack</code>, &hellip;)</td></tr>
+          <tr><td>tests/stack_arith_misc_ops.rs</td><td class="num">570</td><td class="num">55</td><td>Stack manipulation (<code>Dup</code> / <code>Dup2</code> / <code>Swap</code> / <code>Rot</code>) + arithmetic + miscellaneous ops with full coercion matrix</td></tr>
+          <tr><td>tests/jumps_ext_builtins_files.rs</td><td class="num">567</td><td class="num">46</td><td>Jump targets, extension dispatch, builtin invocation, file-test ops (12 test types via <code>TestFile(u8)</code>)</td></tr>
+          <tr><td>tests/testfile_builtin_dispatch.rs</td><td class="num">546</td><td class="num">41</td><td><code>TestFile</code> dispatch matrix: <code>-f</code>, <code>-d</code>, <code>-r</code>, <code>-w</code>, <code>-x</code>, <code>-e</code>, <code>-s</code>, <code>-L</code>, <code>-S</code>, <code>-p</code>, <code>-b</code>, <code>-c</code></td></tr>
+          <tr><td>tests/functions_vars_stack.rs</td><td class="num">543</td><td class="num">43</td><td><code>Call</code> / <code>Return</code> / <code>ReturnValue</code> / <code>PushFrame</code> / <code>PopFrame</code> semantics + slot-vs-name lookup precedence</td></tr>
+          <tr><td>tests/collections_and_concat.rs</td><td class="num">543</td><td class="num">41</td><td>Array / hash construction (<code>MakeArray</code> / <code>MakeHash</code>), <code>Range</code> / <code>RangeStep</code>, <code>Concat</code> / <code>StringRepeat</code></td></tr>
+          <tr><td>tests/jit_fuzz.rs</td><td class="num">&mdash;</td><td class="num">diff</td><td>Differential fuzz: random valid chunks compared interpreter vs tracing JIT, asserts identical results. Gated behind <code>--features jit</code>. Catches latent recorder / deopt / IR bugs that curated tests miss.</td></tr>
+        </tbody>
+        <tfoot><tr class="total-row"><td>TOP 15 MODULES SUBTOTAL</td><td class="num">12,089</td><td class="num">&mdash;</td><td>57.0% of 21,216-line test corpus</td></tr></tfoot>
+      </table>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 4: EXECUTION PIPELINE          -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">@</span>EXECUTION PIPELINE</h2>
+      <p class="tutorial-subtitle">Frontend &rarr; <code>ChunkBuilder</code> &rarr; <code>Chunk</code> &rarr; <code>VM::run()</code>. The interpreter is the spine. When the <code>jit</code> feature is enabled and tracing is turned on, hot backedges auto-dispatch into Cranelift-compiled native code; type-guard misses deopt back to the same bytecode offset with frame + stack state reconstructed.</p>
+
+      <pre style="margin:0.5rem 0;padding:1rem;border:1px solid var(--border);background:var(--bg-primary);color:var(--text-dim);font-size:11px;line-height:1.7;overflow-x:auto;">
+  Frontend source (.stk / .zsh / .awk)
+       │
+       ▼
+  ┌─────────────────────────┐
+  │   Frontend compiler     │   stryke: ~450 ext ops
+  │   (lexer → parser →     │   zshrs:  ~20  ext ops
+  │   AST → bytecode)       │   awkrs:  ~95  ext ops
+  └────────┬────────────────┘
+           │  b.emit(Op, line)
+           ▼
+  ┌─────────────────────────┐
+  │   ChunkBuilder          │   add_constant / add_name
+  │   (src/chunk.rs)        │   add_block_range / add_sub_chunk
+  │                         │   patch_jump / build()
+  └────────┬────────────────┘
+           │
+           ▼
+  ┌─────────────────────────┐     ┌─────────────────────────┐
+  │   Chunk                 │────▶│   VMPool (optional)     │
+  │   • ops:    Vec&lt;Op&gt;    │     │   acquire / release     │
+  │   • consts: Vec&lt;Value&gt; │     └─────────────────────────┘
+  │   • names:  Vec&lt;String&gt; │
+  │   • lines:  Vec&lt;u32&gt;   │
+  │   • slots:  usize       │
+  │   • blocks: Vec&lt;Range&gt;  │
+  │   • subs:   Vec&lt;Chunk&gt;  │
+  └────────┬────────────────┘
+           │  VM::new(chunk)
+           ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │   VM::run()  (src/vm.rs)                                │
+  │   match-dispatch over Op                                │
+  │   stack + frame slots                                   │
+  │                                                         │
+  │   ┌───────────────────────────────────────────────┐     │
+  │   │  Extension hook                               │     │
+  │   │  Op::Extended(id, arg)      ──▶ ext_handler   │     │
+  │   │  Op::ExtendedWide(id, payload) ──▶ wide       │     │
+  │   │  Op::CallBuiltin(id, argc)  ──▶ builtin tbl   │     │
+  │   └───────────────────────────────────────────────┘     │
+  │                                                         │
+  │   ┌───────────────────────────────────────────────┐     │
+  │   │  Shell-host hook                              │     │
+  │   │  Op::Exec / Pipeline / Redirect / Glob /...   │     │
+  │   │  ──▶ ShellHost::glob / pipeline_begin / ...   │     │
+  │   └───────────────────────────────────────────────┘     │
+  │                                                         │
+  │   ┌───────────────────────────────────────────────┐     │
+  │   │  Tracing-JIT hot-backedge dispatch            │     │
+  │   │  (feature = "jit", VM::enable_tracing_jit())  │     │
+  │   │  ──▶ try_run_trace ──▶ native fn ptr          │     │
+  │   │       │ side-exit (type guard miss)           │     │
+  │   │       └──▶ DeoptInfo: resume_ip + frames +    │     │
+  │   │            stack-kind tags ──▶ back to match  │     │
+  │   └───────────────────────────────────────────────┘     │
+  └─────────────────────────────────────────────────────────┘
+           │
+           ▼
+       VMResult::Ok(Value) | Error(String) | Halted
+      </pre>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 5: OPCODE INVENTORY             -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">&amp;</span>OPCODE INVENTORY</h2>
+      <p class="tutorial-subtitle">134 variants of <code>Op</code> across 20 sections. Each op is a tagged enum case; payload operands are pool indices (<code>u16</code>, 64k names / constants), jump targets (<code>usize</code>), or sub-byte fields encoded via the <code>file_test</code> / <code>redirect_op</code> / <code>param_mod</code> constant modules. Every variant is &le;&nbsp;24 bytes for cache-friendly dispatch.</p>
+
+      <div class="stat-grid" style="grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));">
+        <div class="stat-card" style="border-top-color:var(--accent);"><div class="stat-val accent">134</div><div class="stat-label">Op Variants</div></div>
+        <div class="stat-card" style="border-top-color:var(--accent);"><div class="stat-val accent">20</div><div class="stat-label">Sections</div></div>
+        <div class="stat-card" style="border-top-color:var(--accent);"><div class="stat-val accent">8</div><div class="stat-label">Fused Superinstructions</div></div>
+        <div class="stat-card" style="border-top-color:var(--cyan);"><div class="stat-val">29</div><div class="stat-label">Shell Ops</div></div>
+        <div class="stat-card" style="border-top-color:var(--cyan);"><div class="stat-val">140</div><div class="stat-label">Builtin IDs</div></div>
+        <div class="stat-card" style="border-top-color:var(--cyan);"><div class="stat-val">~195</div><div class="stat-label">Dispatch Arms in vm.rs</div></div>
+        <div class="stat-card" style="border-top-color:var(--cyan);"><div class="stat-val">12</div><div class="stat-label">File-Test Predicates</div></div>
+        <div class="stat-card" style="border-top-color:var(--cyan);"><div class="stat-val">18</div><div class="stat-label">Param-Expansion Mods</div></div>
+      </div>
+
+      <h3 style="font-family:'Orbitron',sans-serif;font-size:11px;color:var(--cyan);letter-spacing:1.5px;margin:1.5rem 0 0.5rem;">// OPCODE CATEGORIES</h3>
+      <div class="mapping-grid">
+        <div class="mapping-card"><h4>Constants (6)</h4><p><code>Nop</code>, <code>LoadInt(i64)</code>, <code>LoadFloat(f64)</code>, <code>LoadConst(u16)</code>, <code>LoadTrue</code>, <code>LoadFalse</code>, <code>LoadUndef</code></p></div>
+        <div class="mapping-card"><h4>Stack (5)</h4><p><code>Pop</code>, <code>Dup</code>, <code>Dup2</code>, <code>Swap</code>, <code>Rot</code></p></div>
+        <div class="mapping-card"><h4>Variables (7)</h4><p><code>GetVar</code> / <code>SetVar</code> / <code>DeclareVar</code> (name-pool indexed), <code>GetSlot</code> / <code>SetSlot</code> (slot-indexed fast path), <code>SlotArrayGet</code> / <code>SlotArraySet</code> (slot-resident array indexing &mdash; no extra <code>GetSlot</code>)</p></div>
+        <div class="mapping-card"><h4>Arrays (10)</h4><p><code>GetArray</code>, <code>SetArray</code>, <code>DeclareArray</code>, <code>ArrayGet</code>, <code>ArraySet</code>, <code>ArrayPush</code>, <code>ArrayPop</code>, <code>ArrayShift</code>, <code>ArrayLen</code>, <code>MakeArray</code></p></div>
+        <div class="mapping-card"><h4>Hashes (10)</h4><p><code>GetHash</code>, <code>SetHash</code>, <code>DeclareHash</code>, <code>HashGet</code>, <code>HashSet</code>, <code>HashDelete</code>, <code>HashExists</code>, <code>HashKeys</code>, <code>HashValues</code>, <code>MakeHash</code></p></div>
+        <div class="mapping-card"><h4>Arithmetic (9)</h4><p><code>Add</code>, <code>Sub</code>, <code>Mul</code>, <code>Div</code>, <code>Mod</code>, <code>Pow</code>, <code>Negate</code>, <code>Inc</code>, <code>Dec</code> &mdash; int / float dispatch with wrapping fast path</p></div>
+        <div class="mapping-card"><h4>String (3)</h4><p><code>Concat</code>, <code>StringRepeat</code>, <code>StringLen</code></p></div>
+        <div class="mapping-card"><h4>Numeric Compare (7)</h4><p><code>NumEq</code>, <code>NumNe</code>, <code>NumLt</code>, <code>NumGt</code>, <code>NumLe</code>, <code>NumGe</code>, <code>Spaceship</code> (<code>&lt;=&gt;</code> &rarr; -1 / 0 / 1)</p></div>
+        <div class="mapping-card"><h4>String Compare (7)</h4><p><code>StrEq</code>, <code>StrNe</code>, <code>StrLt</code>, <code>StrGt</code>, <code>StrLe</code>, <code>StrGe</code>, <code>StrCmp</code></p></div>
+        <div class="mapping-card"><h4>Logical / Bitwise (9)</h4><p><code>LogNot</code>, <code>LogAnd</code>, <code>LogOr</code>, <code>BitAnd</code>, <code>BitOr</code>, <code>BitXor</code>, <code>BitNot</code>, <code>Shl</code>, <code>Shr</code>. <code>LogAnd</code> / <code>LogOr</code> evaluate both sides; short-circuit lives in the <code>JumpIfTrueKeep</code> / <code>FalseKeep</code> pair.</p></div>
+        <div class="mapping-card"><h4>Control Flow (5)</h4><p><code>Jump</code>, <code>JumpIfTrue</code>, <code>JumpIfFalse</code>, <code>JumpIfTrueKeep</code> (short-circuit <code>||</code>), <code>JumpIfFalseKeep</code> (short-circuit <code>&amp;&amp;</code>)</p></div>
+        <div class="mapping-card"><h4>Functions (3)</h4><p><code>Call(name_idx, argc)</code>, <code>Return</code>, <code>ReturnValue</code></p></div>
+        <div class="mapping-card"><h4>Scope (2)</h4><p><code>PushFrame</code>, <code>PopFrame</code></p></div>
+        <div class="mapping-card"><h4>I/O (3)</h4><p><code>Print(n)</code>, <code>PrintLn(n)</code>, <code>ReadLine</code></p></div>
+        <div class="mapping-card"><h4>Collections (2)</h4><p><code>Range</code> (<code>[from, to]</code> &rarr; array), <code>RangeStep</code> (<code>[from, to, step]</code> &rarr; array)</p></div>
+        <div class="mapping-card"><h4>Higher-Order (5)</h4><p><code>MapBlock(idx)</code>, <code>GrepBlock(idx)</code>, <code>SortBlock(idx)</code>, <code>SortDefault</code>, <code>ForEachBlock(idx)</code> &mdash; <code>idx</code> resolves to a block range inside the chunk</p></div>
+        <div class="mapping-card" style="border-left-color:var(--accent);"><h4>Fused Superinstructions (8)</h4><p><code>PreIncSlot</code>, <code>SlotLtIntJumpIfFalse</code>, <code>SlotIncLtIntJumpBack</code>, <code>AccumSumLoop</code>, <code>ConcatConstLoop</code>, <code>PushIntRangeLoop</code>, <code>AddAssignSlotVoid</code>, <code>PreIncSlotVoid</code> &mdash; see next section</p></div>
+        <div class="mapping-card"><h4>Builtins (1)</h4><p><code>CallBuiltin(id: u16, argc: u8)</code> &mdash; routes to the handler registered by <code>VM::register_builtin(id, handler)</code>. Builtin IDs come from <code>src/shell_builtins.rs</code> (140 stable constants).</p></div>
+        <div class="mapping-card"><h4>Extension Point (2)</h4><p><code>Extended(u16, u8)</code> for narrow ops (inline byte operand), <code>ExtendedWide(u16, usize)</code> for wide ops (jump targets, large indices). Frontend registers <code>fn(&amp;mut VM, u16, u8)</code> via <code>set_extension_handler</code> / <code>set_extension_wide_handler</code>.</p></div>
+        <div class="mapping-card" style="border-left-color:var(--green);"><h4>Shell Ops (29)</h4><p><code>Exec</code>, <code>ExecBg</code>, <code>PipelineBegin</code> / <code>Stage</code> / <code>End</code>, <code>Redirect(fd, op)</code>, <code>HereDoc</code>, <code>HereString</code>, <code>CmdSubst</code>, <code>SubshellBegin</code> / <code>End</code>, <code>ProcessSubIn</code> / <code>Out</code>, <code>Glob</code>, <code>GlobRecursive</code>, <code>TestFile(u8)</code>, <code>SetStatus</code> / <code>GetStatus</code>, <code>TrapSet</code> / <code>TrapCheck</code>, <code>ExpandParam(u8)</code>, <code>WordSplit</code>, <code>BraceExpand</code>, <code>TildeExpand</code>, <code>CallFunction(name, argc)</code>, <code>StrMatch</code>, <code>RegexMatch</code>, <code>WithRedirectsBegin</code> / <code>End</code></p></div>
+      </div>
+
+      <h3 style="font-family:'Orbitron',sans-serif;font-size:11px;color:var(--accent);letter-spacing:1.5px;margin:1.5rem 0 0.5rem;">// FUSED SUPERINSTRUCTIONS</h3>
+      <p class="tutorial-subtitle">The performance secret. The compiler detects hot loop patterns and emits a single op instead of a multi-op sequence. Each fused op eliminates N&minus;1 dispatch cycles, stack pushes, and branch mispredictions from the hot path.</p>
+      <table class="file-table">
+        <thead><tr><th>Fused Op</th><th>Replaces</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>AccumSumLoop(sum, i, limit)</code></td><td><code>GetSlot + GetSlot + Add + SetSlot + PreInc + NumLt + JumpIfFalse</code></td><td>Entire counted sum loop in one dispatch</td></tr>
+          <tr><td><code>SlotIncLtIntJumpBack(slot, limit, target)</code></td><td><code>PreIncSlot + SlotLtIntJumpIfFalse</code></td><td>Loop backedge in one dispatch</td></tr>
+          <tr><td><code>ConcatConstLoop(const, s, i, limit)</code></td><td><code>LoadConst + ConcatAppendSlot + SlotIncLtIntJumpBack</code></td><td>String-append loop in one dispatch</td></tr>
+          <tr><td><code>PushIntRangeLoop(arr, i, limit)</code></td><td><code>GetSlot + PushArray + ArrayLen + Pop + SlotIncLtIntJumpBack</code></td><td>Array push loop in one dispatch</td></tr>
+          <tr><td><code>AddAssignSlotVoid(a, b)</code></td><td><code>GetSlot + GetSlot + Add + SetSlot</code></td><td>Void-context add-assign, no stack traffic</td></tr>
+          <tr><td><code>PreIncSlotVoid(slot)</code></td><td><code>GetSlot + Inc + SetSlot</code></td><td>Void-context increment, no stack traffic</td></tr>
+          <tr><td><code>SlotLtIntJumpIfFalse(slot, int, target)</code></td><td><code>GetSlot + LoadInt + NumLt + JumpIfFalse</code></td><td>Fused compare + branch, no stack traffic</td></tr>
+          <tr><td><code>PreIncSlot(slot)</code></td><td><code>GetSlot + Inc + SetSlot + GetSlot</code></td><td>Slot pre-increment with push</td></tr>
+        </tbody>
+      </table>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 6: VALUE SYSTEM                 -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">!</span>VALUE SYSTEM</h2>
+      <p class="tutorial-subtitle">Every value in the VM is a <code>Value</code>. 10-variant enum, designed to stay cache-friendly (small discriminant + 1&ndash;2 word payload). Frontends convert their native types to / from <code>Value</code> at the boundary; the dispatch loop only sees this shape.</p>
+
+      <table class="file-table">
+        <thead><tr><th>Variant</th><th>Payload</th><th>Used For</th></tr></thead>
+        <tbody>
+          <tr><td><code>Undef</code></td><td>&mdash;</td><td>Uninitialized / no value &mdash; <code>Default</code> for <code>Value</code></td></tr>
+          <tr><td><code>Bool</code></td><td><code>bool</code></td><td>Conditionals, <code>[[ ]]</code> tests, <code>StrMatch</code> / <code>RegexMatch</code> results</td></tr>
+          <tr><td><code>Int</code></td><td><code>i64</code></td><td>Numeric scalars &mdash; fast path for all <code>Op::Add</code> / <code>Sub</code> / <code>Mul</code> / <code>Div</code></td></tr>
+          <tr><td><code>Float</code></td><td><code>f64</code></td><td>IEEE-754 scalars, mixed-type arith with promotion</td></tr>
+          <tr><td><code>Str</code></td><td><code>Arc&lt;String&gt;</code></td><td>Heap-allocated string &mdash; <code>Arc</code> for cheap clone in closures and across pipeline stages</td></tr>
+          <tr><td><code>Array</code></td><td><code>Vec&lt;Value&gt;</code></td><td>Ordered array &mdash; in-place mutation on slot-resident arrays via <code>SlotArraySet</code></td></tr>
+          <tr><td><code>Hash</code></td><td><code>HashMap&lt;String, Value&gt;</code></td><td>Key-value associative array</td></tr>
+          <tr><td><code>Status</code></td><td><code>i32</code></td><td>Exit status code (shell-specific but universal enough that every frontend can produce one)</td></tr>
+          <tr><td><code>Ref</code></td><td><code>Box&lt;Value&gt;</code></td><td>Pass-by-reference, nested structures, AST-style sharing</td></tr>
+          <tr><td><code>NativeFn</code></td><td><code>u16</code></td><td>Native function pointer (builtin dispatch ID) &mdash; allows first-class function values without trait objects</td></tr>
+        </tbody>
+      </table>
+
+      <p style="font-size:11px;color:var(--text-muted);margin-top:0.5rem;">Coercion API kept allocation-light: <code>to_int</code>, <code>to_float</code>, <code>to_str</code> (owned <code>String</code>), <code>as_str_cow</code> (borrowed <code>Cow&lt;str&gt;</code> for the hot path where the value is already a string), <code>is_truthy</code> (Perl-style: 0 / "" / "0" / Undef &rarr; false), <code>len</code>, <code>is_empty</code>. Constructor shortcuts: <code>Value::int(n)</code>, <code>Value::float(f)</code>, <code>Value::str(s)</code>, <code>Value::bool(b)</code>, <code>Value::array(v)</code>, <code>Value::hash(m)</code>, <code>Value::status(code)</code>.</p>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 7: JIT                          -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">~</span>CRANELIFT JIT &mdash; 3 TIERS</h2>
+      <p class="tutorial-subtitle">All three tiers share Cranelift 0.130 (same IR backend as Wasmtime) behind the <code>jit</code> feature flag. Same <code>Value</code> shape across interpreter and JIT, so deopt is a frame swap, not a re-marshal. <code>TraceJitConfig</code> exposes every threshold; <code>JitCompiler::set_config(&hellip;)</code> applies it to subsequent calls from the current thread.</p>
+
+      <div class="feature-grid">
+        <div class="feature-card"><h4>Tier 1 &mdash; Linear JIT (instant)</h4><p><code>compile_linear(chunk: &amp;Chunk) -&gt; Option&lt;CompiledLinear&gt;</code>. Compiles straight-line bytecode on first call &mdash; no warmup, no profile, no CFG. Use case: tiny chunks where any interpreter overhead is the bottleneck. Falls back to interpreter on any unsupported op.</p></div>
+        <div class="feature-card"><h4>Tier 2 &mdash; Block JIT (CFG, threshold 10)</h4><p><code>compile_block(chunk: &amp;Chunk) -&gt; Option&lt;CompiledBlock&gt;</code>. Whole-chunk control-flow graph compilation. Triggered after a chunk's <code>hot_count</code> crosses 10 invocations. Better steady-state than linear for non-trivial control flow.</p></div>
+        <div class="feature-card"><h4>Tier 3 &mdash; Tracing JIT (loop body, threshold 50)</h4><p>Hot-backedge detection: every backward branch is a candidate loop header. When a header's <code>hot_count</code> crosses <code>trace_threshold</code> (default 50), the recorder runs one iteration, captures the linear trace, and lowers it to Cranelift IR with type guards at every op boundary. Side-exits deopt back to the interpreter.</p></div>
+        <div class="feature-card"><h4>Cross-Call Inlining</h4><p>Phase 2: tracing inlines through <code>Call</code> for callees that are branchless within the inlined window. Phase 8 bumps it: bounded recursion to depth &le;&nbsp;4 (<code>max_inline_recursion</code>). Recursive calls past 4 abort the trace.</p></div>
+          <div class="feature-card"><h4>Caller- and Callee-Frame Branches</h4><p>Phase 3: caller-frame <code>if</code> / <code>else</code> with side-exits. Phase 4: callee-frame branches with frame materialization. The trace emits <code>DeoptFrame</code> records (caller&rarr;callee order) for every inlined frame; on side-exit the VM rebuilds <code>vm.frames</code> to match what the bytecode would naturally have at the deopt IP. Capacity: <code>MAX_DEOPT_FRAMES</code> = 4, <code>MAX_DEOPT_SLOTS_PER_FRAME</code> = 16.</p></div>
+        <div class="feature-card"><h4>Abstract-Stack Reconstruction</h4><p>Phases 5 + 5b: the trace tracks the abstract value stack and writes (kind, value) pairs into <code>DeoptInfo.stack_buf</code> on side-exit. Capacity: <code>MAX_DEOPT_STACK</code> = 32 entries. Tags: <code>STACK_KIND_INT</code> (0) for <code>Value::Int(i64)</code>, <code>STACK_KIND_FLOAT</code> (1) for <code>Value::Float(f64)</code>. The VM pushes them onto the live stack before resuming at <code>resume_ip</code>.</p></div>
+        <div class="feature-card"><h4>Side-Exit Counter + Auto-Blacklist</h4><p>Phase 6: every side-exit bumps <code>entry.side_exit_count</code>. When it crosses <code>max_side_exits</code> (default 50) the trace is auto-blacklisted &mdash; future invocations skip it and stay in the interpreter. Prevents pathological retry loops.</p></div>
+        <div class="feature-card"><h4>Persistent <code>TraceMetadata</code></h4><p>Phase 7: <code>JitCompiler::export_trace_metadata()</code> serializes all known traces; <code>import_trace_metadata(&hellip;)</code> warms a fresh compiler. Embedders that re-run the same script repeatedly skip the recorder warm-up after the first run.</p></div>
+        <div class="feature-card"><h4>Side-Trace Stitching</h4><p>Phase 9: when a side-exit fires often enough to qualify as its own hot site, the JIT records a side trace starting from that deopt IP and stitches it to the parent. <code>max_trace_chain</code> = 4 caps the chain depth.</p></div>
+        <div class="feature-card"><h4>Trace-Length Cap</h4><p><code>max_trace_len</code> = 256 (default). Recording aborts past 256 ops &mdash; long traces underperform shorter, retypeable ones. Tunable per workload.</p></div>
+      </div>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 8: EXTENSION MECHANISM          -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">%</span>EXTENSION MECHANISM</h2>
+      <p class="tutorial-subtitle">Universal ops live in the <code>Op</code> enum. Language-specific ops are dispatched through frontend-registered handler tables. Each frontend owns its own ID space &mdash; stryke's op 42 and zshrs's op 42 don't collide because the handlers run in different VM instances.</p>
+
+      <div class="feature-grid">
+        <div class="feature-card"><h4>Narrow: <code>Extended(u16, u8)</code></h4><p>16-bit op ID + 8-bit inline operand. Common case: a frontend op that fits in one byte of payload (flag bit, enum tag, small index). Registered via <code>VM::set_extension_handler(Box::new(|vm, id, arg| {&hellip;}))</code>.</p></div>
+        <div class="feature-card"><h4>Wide: <code>ExtendedWide(u16, usize)</code></h4><p>16-bit op ID + <code>usize</code> payload. For jump targets, large indices, or anything that won't fit in a byte. Registered via <code>VM::set_extension_wide_handler(&hellip;)</code>.</p></div>
+        <div class="feature-card"><h4>Builtin Dispatch: <code>CallBuiltin(u16, u8)</code></h4><p>Universal call into a registered builtin by stable <code>u16</code> ID. Frontend registers handlers via <code>VM::register_builtin(id, handler)</code>. IDs come from <code>shell_builtins</code> (140 reserved constants) or the frontend's own space &mdash; the table is per-VM, no global registry.</p></div>
+        <div class="feature-card"><h4>Shell Host Dispatch</h4><p>Shell ops in the <code>Op</code> enum route to a <code>Box&lt;dyn ShellHost&gt;</code> set via <code>VM::set_shell_host(&hellip;)</code>. <code>DefaultHost</code> ships sensible no-ops for frontends that need shell-op syntax (regex match, file tests) without needing real process control.</p></div>
+        <div class="feature-card"><h4>Builtin ID Ranges</h4><p>Conventional partitioning in <code>shell_builtins.rs</code>: 0&ndash;19 core (<code>cd</code>, <code>pwd</code>, <code>echo</code>, &hellip;), 20&ndash;29 typeset, 30&ndash;39 I/O, 40&ndash;49 loop control, 50+ frontend-specific. Frontends can claim unused slots without coordinating &mdash; the type system enforces nothing, but the comment-banded ranges keep the convention readable.</p></div>
+        <div class="feature-card"><h4>Hooks Without Wrappers</h4><p>Every extension hook is a <code>Box&lt;dyn Fn(&amp;mut VM, &hellip;)&gt;</code>. No newtype, no trait object hierarchy. The frontend writes one closure per op or one big <code>match</code> &mdash; both shapes are equally fast under the dispatch loop.</p></div>
+      </div>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 9: SHELL HOST TRAIT             -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">^</span>SHELL HOST TRAIT</h2>
+      <p class="tutorial-subtitle"><code>ShellHost: Send</code> &mdash; the boundary between the VM and the host's process-control surface. Every shell op routes through one of these methods; <code>DefaultHost</code> ships no-op defaults so a non-shell frontend can ignore them.</p>
+
+      <div class="mapping-grid">
+        <div class="mapping-card"><h4>Expansion</h4><p><code>glob(pattern, recursive)</code>, <code>tilde_expand(s)</code>, <code>brace_expand(s)</code>, <code>word_split(s)</code>, <code>expand_param(name, modifier, args)</code> (18 modifier types via <code>param_mod</code>), <code>array_index(name, idx)</code></p></div>
+        <div class="mapping-card"><h4>Substitution</h4><p><code>cmd_subst(sub: &amp;Chunk) -&gt; String</code>, <code>process_sub_in(sub) -&gt; String</code> (returns FIFO path), <code>process_sub_out(sub) -&gt; String</code></p></div>
+        <div class="mapping-card"><h4>Redirection</h4><p><code>redirect(fd, op, target)</code> (9 op types via <code>redirect_op</code>), <code>heredoc(content)</code>, <code>herestring(content)</code>, <code>with_redirects_begin(count)</code>, <code>with_redirects_end()</code> &mdash; scoped redirection blocks restore fd state on early return</p></div>
+        <div class="mapping-card"><h4>Pipelines + Subshells</h4><p><code>pipeline_begin(n)</code>, <code>pipeline_stage()</code>, <code>pipeline_end() -&gt; i32</code>, <code>subshell_begin()</code>, <code>subshell_end()</code></p></div>
+        <div class="mapping-card"><h4>Traps</h4><p><code>trap_set(sig, handler: &amp;Chunk)</code>, <code>trap_check()</code> &mdash; the compiler inserts <code>TrapCheck</code> between ops; the host decides which signals deliver and runs the registered <code>Chunk</code></p></div>
+        <div class="mapping-card"><h4>Execution</h4><p><code>call_function(name, args) -&gt; Option&lt;i32&gt;</code> (user-defined function lookup), <code>exec(args) -&gt; i32</code>, <code>exec_bg(args) -&gt; i32</code></p></div>
+        <div class="mapping-card"><h4>Matching</h4><p><code>str_match(s, pat) -&gt; bool</code> (glob-pattern match for <code>[[ x = pat ]]</code> and <code>case</code> arms), <code>regex_match(s, regex) -&gt; bool</code> (<code>=~</code>)</p></div>
+      </div>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 10: BENCHMARKS                  -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">*</span>BENCHMARKS</h2>
+      <p class="tutorial-subtitle">5 Criterion harnesses under <code>benches/</code>. Two are interpreter-only (run without features); three require <code>--features jit</code>. HTML reports via Criterion's built-in renderer (<code>target/criterion/report/index.html</code>).</p>
+
+      <table class="file-table">
+        <thead><tr><th>Bench</th><th class="num">LOC</th><th>Requires</th><th>Measures</th></tr></thead>
+        <tbody>
+          <tr><td>benches/vm_bench.rs</td><td class="num">560</td><td>&mdash;</td><td>Core interpreter throughput: arithmetic, control flow, function calls, scope, collections &mdash; the baseline every JIT tier is measured against</td></tr>
+          <tr><td>benches/classic.rs</td><td class="num">471</td><td>&mdash;</td><td>Classic interpreter workloads: fibonacci, sum-N, array push loops, string concat loops &mdash; the inputs every fused superinstruction was designed for</td></tr>
+          <tr><td>benches/jit_vs_interp.rs</td><td class="num">247</td><td><code>jit</code></td><td>Head-to-head: same chunk through pure interpreter vs JIT-enabled VM. Measures the speedup the JIT actually delivers, per workload</td></tr>
+          <tr><td>benches/jit_trace.rs</td><td class="num">216</td><td><code>jit</code></td><td>Tracing-specific: hot-loop trace latency, deopt cost, side-trace stitching overhead, <code>TraceMetadata</code> import speedup</td></tr>
+          <tr><td>benches/jit_crossover.rs</td><td class="num">136</td><td><code>jit</code></td><td>Crossover: the chunk size / hot-count where JIT compile + execution starts to beat pure interpretation. Calibrates the <code>trace_threshold</code> default.</td></tr>
+        </tbody>
+        <tfoot><tr class="total-row"><td>TOTAL</td><td class="num">1,630</td><td>&mdash;</td><td>Run with <code>cargo bench</code> (interpreter benches) or <code>cargo bench --features jit</code> (all)</td></tr></tfoot>
+      </table>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 11: DEPENDENCIES                -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">+</span>DEPENDENCIES</h2>
+      <p class="tutorial-subtitle">Intentionally minimal. 3 always-on runtime dependencies + 5 optional Cranelift crates (gated behind <code>jit</code>) + 3 dev dependencies. Every crate is foundational &mdash; <code>serde</code>, <code>tracing</code>, <code>glob</code>, the Cranelift family, <code>criterion</code> &mdash; chosen to survive a 2030+ rebuild without churn.</p>
+
+      <table class="file-table">
+        <thead><tr><th>Crate</th><th>Version</th><th>Role</th><th>Gating</th></tr></thead>
+        <tbody>
+          <tr><td><code>serde</code></td><td>1</td><td>Derive macros (<code>derive</code>, <code>rc</code>) for <code>Op</code>, <code>Value</code>, <code>Chunk</code> &mdash; enables bytecode caching and <code>TraceMetadata</code> export/import</td><td>always</td></tr>
+          <tr><td><code>tracing</code></td><td>0.1</td><td>Structured logging for diagnostic events &mdash; <code>tracing::debug!</code> at every JIT compile, deopt, and side-exit</td><td>always</td></tr>
+          <tr><td><code>glob</code></td><td>0.3</td><td>Shell-glob pattern matching for <code>DefaultHost::glob</code> and <code>StrMatch</code></td><td>always</td></tr>
+          <tr><td><code>cranelift-jit</code></td><td>0.130</td><td>Cranelift JIT memory allocator + symbol resolver</td><td><code>jit</code></td></tr>
+          <tr><td><code>cranelift-codegen</code></td><td>0.130</td><td>IR &rarr; machine code (x86-64 + aarch64)</td><td><code>jit</code></td></tr>
+          <tr><td><code>cranelift-frontend</code></td><td>0.130</td><td><code>FunctionBuilder</code> &mdash; builds IR from bytecode</td><td><code>jit</code></td></tr>
+          <tr><td><code>cranelift-native</code></td><td>0.130</td><td>ISA target detection at runtime</td><td><code>jit</code></td></tr>
+          <tr><td><code>cranelift-module</code></td><td>0.130</td><td>Module + linker abstraction for JIT-emitted code</td><td><code>jit</code></td></tr>
+          <tr><td><code>serde_json</code></td><td>1</td><td>Round-trip tests for <code>Chunk</code> / <code>Op</code> / <code>Value</code> serialization</td><td>dev</td></tr>
+          <tr><td><code>bincode</code></td><td>1</td><td>Compact binary serialization round-trip tests</td><td>dev</td></tr>
+          <tr><td><code>criterion</code></td><td>0.5</td><td>Statistical benchmarking + HTML reports</td><td>dev</td></tr>
+        </tbody>
+      </table>
+
+      <p style="font-size:11px;color:var(--text-muted);margin-top:0.5rem;">No <code>rand</code>, no <code>tokio</code>, no <code>parking_lot</code>, no <code>regex</code> (frontends bring their own), no <code>libc</code> &mdash; the VM core stays pure Rust. JIT is a single feature flag; interpreter-only builds skip the entire Cranelift toolchain (~1M LOC of transitive C / Rust deps).</p>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 12: PUBLIC API SURFACE          -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">;</span>PUBLIC API SURFACE</h2>
+      <p class="tutorial-subtitle">fusevm ships as an embeddable Rust crate (<code>cargo add fusevm</code>, optionally <code>--features jit</code>). The re-export set in <code>src/lib.rs</code> is the entire public surface; everything else is implementation detail.</p>
+
+      <table class="file-table">
+        <thead><tr><th>Surface</th><th class="num">Count</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Public modules</td><td class="num">7</td><td><code>chunk</code>, <code>host</code>, <code>jit</code>, <code>op</code>, <code>shell_builtins</code>, <code>value</code>, <code>vm</code></td></tr>
+          <tr><td>Re-exported types</td><td class="num">19</td><td><code>Chunk</code>, <code>ChunkBuilder</code>, <code>DefaultHost</code>, <code>ShellHost</code>, <code>Op</code>, <code>Value</code>, <code>VM</code>, <code>VMPool</code>, <code>VMResult</code>, <code>Frame</code>, <code>JitCompiler</code>, <code>JitExtension</code>, <code>NativeCode</code>, <code>SlotKind</code>, <code>TraceJitConfig</code>, <code>TraceLookup</code>, <code>TraceMetadata</code>, <code>DeoptFrame</code>, <code>DeoptInfo</code></td></tr>
+          <tr><td>Public functions (across modules)</td><td class="num">124</td><td>Includes constructors, builders, JIT entry points, host trait methods. <code>jit.rs</code> alone exposes 66 <code>pub fn</code>.</td></tr>
+          <tr><td>Builtin ID constants</td><td class="num">140</td><td>Stable <code>BUILTIN_*: u16</code> values in <code>shell_builtins.rs</code> &mdash; frontends register handlers against these</td></tr>
+          <tr><td>Op variants</td><td class="num">134</td><td>The contract every frontend compiles against</td></tr>
+          <tr><td>Feature flags</td><td class="num">1</td><td><code>jit</code> &mdash; enables the entire Cranelift family + the three JIT tiers</td></tr>
+        </tbody>
+      </table>
+
+      <hr class="section-rule">
+
+      <!-- ═══════════════════════════════════════ -->
+      <!-- SECTION 13: KEY DESIGN DECISIONS        -->
+      <!-- ═══════════════════════════════════════ -->
+      <h2 class="tutorial-title"><span class="step-hash">?</span>KEY DESIGN DECISIONS</h2>
+      <p class="tutorial-subtitle">Why fusevm looks the way it does. Each call-out is a decision the implementation could have gone either way on, with the rationale for the path taken.</p>
+
+      <div class="feature-grid">
+        <div class="feature-card"><h4>Language-Agnostic by Construction</h4><p>Every other embeddable VM in the reference table grew its bytecode as the runtime for one language. fusevm starts from the opposite end: the <code>Op</code> enum is the spec; the frontends register against it. The result is three live frontends (stryke / zshrs / awkrs) sharing one JIT, one fused-loop table, one deopt path. Every perf improvement compounds across all of them.</p></div>
+        <div class="feature-card"><h4>Bytecode, Not Tree-Walker</h4><p>An AST interpreter is simpler but pays virtual-call cost per node. Bytecode collapses dispatch into a tight match loop the branch predictor can warm up to. Same call-out as strykelang &mdash; same execution model.</p></div>
+        <div class="feature-card"><h4>Cranelift, Not LLVM</h4><p>LLVM gives slightly better steady-state code but compiles 10&times; slower and pulls in a giant C++ dependency. Cranelift is pure Rust, fast to compile, and production-tested in Wasmtime. Same backend as Wasmtime is itself a durability argument: bug-fixed against a huge surface area.</p></div>
+        <div class="feature-card"><h4>Three Tiers, Auto-Dispatched</h4><p>Linear catches the "first call, want native immediately" case. Block catches the "warm chunk, want CFG-aware code" case. Tracing catches the "tight inner loop, want type-specialized native" case. Auto-dispatched from <code>VM::run()</code>: callers don't choose a tier; the VM picks based on observed hot-counts and falls through tiers as warm-up data accumulates.</p></div>
+        <div class="feature-card"><h4>Fused Superinstructions Over Generic Inliner</h4><p>The fused-op table (<code>AccumSumLoop</code>, <code>ConcatConstLoop</code>, <code>PushIntRangeLoop</code>, &hellip;) is hand-curated against measured hot patterns. A general inliner would catch more but cost more compile time and code-cache pressure. Eight fused ops absorb the dominant hot loops every frontend produces; the rest stays in the dispatch loop.</p></div>
+        <div class="feature-card"><h4>Side-Exits Over Recompile-On-Type-Drift</h4><p>The tracing JIT chooses to deopt on type-guard miss rather than recompile with a new shape. Recompile pays per-shape compile time forever; deopt pays once per anomalous iteration and goes back to the interpreter. With <code>max_side_exits</code> as a backstop, the trace either stabilizes or auto-blacklists.</p></div>
+        <div class="feature-card"><h4>Persistent <code>TraceMetadata</code></h4><p>For embedders that run the same script repeatedly (CI scripts, REPL re-evals), recorder warmup is wasted on every run. <code>export_trace_metadata</code> / <code>import_trace_metadata</code> serializes the recorded set so cold start picks up where warm shutdown left off. Single-binary frontends can ship the warm metadata in <code>~/.cache/&lt;tool&gt;/&hellip;</code>.</p></div>
+        <div class="feature-card"><h4>Pool, Not Allocator Trick</h4><p><code>VMPool</code> reuses <code>VM</code> instances across script runs so the allocator isn't asked to rebuild the same frame buffers, slot vectors, and handler tables on every invocation. No <code>jemalloc</code>, no <code>mimalloc</code>, no unsafe &mdash; a plain pool that frontends acquire / release per script.</p></div>
+        <div class="feature-card"><h4>Shell Ops as First-Class Variants</h4><p>Pipelines, redirects, here-docs, glob, file tests are common enough across stryke / zshrs / awkrs to live in the universal <code>Op</code> enum rather than as ext ops. The cost: extra variants in the match loop. The win: every frontend gets them with zero registration, and the JIT can specialize them.</p></div>
+        <div class="feature-card"><h4>Zero Runtime Deps Beyond Cranelift</h4><p>Three always-on crates: <code>serde</code>, <code>tracing</code>, <code>glob</code>. Cranelift is opt-in via the <code>jit</code> feature. No <code>regex</code>, no <code>tokio</code>, no <code>parking_lot</code>. Frontends bring their own. Result: interpreter-only fusevm builds in seconds with a 4-crate dep graph.</p></div>
+      </div>
+
+    </main>
+
+    <footer style="text-align:center;padding:2rem;font-size:10px;color:var(--text-muted);font-family:'Orbitron',sans-serif;letter-spacing:2px;">
+      FUSEVM ENGINEERING REPORT &middot; 9,026 PRODUCTION RUST &middot; 21,216 TEST LINES &middot; 1,554 #[TEST] FUNCTIONS &middot; 134 OPCODES &middot; 8 FUSED SUPERINSTRUCTIONS &middot; 29 SHELL OPS &middot; 3 JIT TIERS &middot; CRANELIFT 0.130 &middot; STRYKELANG / ZSHRS / AWKRS &middot; MENKETECHNOLOGIES
+    </footer>
+  </div>
+
+  <script>
+    const html = document.documentElement;
+    const btnTheme = document.getElementById('btnTheme');
+    const btnCrt = document.getElementById('btnCrt');
+    const btnNeon = document.getElementById('btnNeon');
+    const crtH = document.getElementById('crtH');
+    const crtV = document.getElementById('crtV');
+    btnTheme?.addEventListener('click', () => {
+      html.setAttribute('data-theme', html.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
+    });
+    btnCrt?.addEventListener('click', () => {
+      btnCrt.classList.toggle('active');
+      const on = btnCrt.classList.contains('active');
+      if (crtH) crtH.style.display = on ? '' : 'none';
+      if (crtV) crtV.style.display = on ? '' : 'none';
+    });
+    btnNeon?.addEventListener('click', () => {
+      btnNeon.classList.toggle('active');
+      document.querySelector('.app')?.classList.toggle('neon-off');
+    });
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.bar-fill').forEach(bar => {
+        const w = bar.style.width;
+        bar.style.width = '0';
+        requestAnimationFrame(() => { requestAnimationFrame(() => { bar.style.width = w; }); });
+      });
+    });
+  </script>
+</body>
+</html>
