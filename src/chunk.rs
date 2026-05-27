@@ -262,4 +262,192 @@ mod tests {
         b.set_source("second.fuse");
         assert_eq!(b.build().source, "second.fuse");
     }
+
+    // ─── emit ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn emit_returns_sequential_indices() {
+        let mut b = ChunkBuilder::new();
+        assert_eq!(b.emit(Op::LoadInt(1), 1), 0);
+        assert_eq!(b.emit(Op::LoadInt(2), 1), 1);
+        assert_eq!(b.emit(Op::Add, 1), 2);
+    }
+
+    #[test]
+    fn emit_records_lines_parallel_to_ops() {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 10);
+        b.emit(Op::LoadInt(2), 20);
+        b.emit(Op::Add, 30);
+        let c = b.build();
+        assert_eq!(c.ops.len(), c.lines.len());
+        assert_eq!(c.lines, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn current_pos_matches_op_count() {
+        let mut b = ChunkBuilder::new();
+        assert_eq!(b.current_pos(), 0);
+        b.emit(Op::Nop, 1);
+        assert_eq!(b.current_pos(), 1);
+        b.emit(Op::Nop, 1);
+        assert_eq!(b.current_pos(), 2);
+    }
+
+    // ─── add_name interning / dedup ───────────────────────────────────
+
+    #[test]
+    fn add_name_dedupes_same_name_to_same_index() {
+        let mut b = ChunkBuilder::new();
+        let a = b.add_name("foo");
+        let bb = b.add_name("bar");
+        let a2 = b.add_name("foo");
+        assert_eq!(a, a2, "same name → same index");
+        assert_ne!(a, bb);
+        // Only 2 unique names in the pool.
+        assert_eq!(b.build().names.len(), 2);
+    }
+
+    #[test]
+    fn add_name_distinct_names_get_distinct_indices() {
+        let mut b = ChunkBuilder::new();
+        let mut seen = std::collections::HashSet::new();
+        for s in ["a", "b", "c", "d", "e"] {
+            assert!(seen.insert(b.add_name(s)));
+        }
+    }
+
+    // ─── patch_jump ────────────────────────────────────────────────────
+
+    #[test]
+    fn patch_jump_updates_unconditional_jump() {
+        let mut b = ChunkBuilder::new();
+        let idx = b.emit(Op::Jump(0), 1); // placeholder target
+        b.patch_jump(idx, 42);
+        let c = b.build();
+        assert_eq!(c.ops[idx], Op::Jump(42));
+    }
+
+    #[test]
+    fn patch_jump_updates_all_conditional_variants() {
+        for op in [
+            Op::JumpIfTrue(0),
+            Op::JumpIfFalse(0),
+            Op::JumpIfTrueKeep(0),
+            Op::JumpIfFalseKeep(0),
+        ] {
+            let mut b = ChunkBuilder::new();
+            let idx = b.emit(op.clone(), 1);
+            b.patch_jump(idx, 100);
+            let c = b.build();
+            match c.ops[idx] {
+                Op::JumpIfTrue(100)
+                | Op::JumpIfFalse(100)
+                | Op::JumpIfTrueKeep(100)
+                | Op::JumpIfFalseKeep(100) => {}
+                ref other => panic!("patch failed for {op:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "patch_jump on non-jump op")]
+    fn patch_jump_panics_on_non_jump_op() {
+        let mut b = ChunkBuilder::new();
+        let idx = b.emit(Op::Nop, 1);
+        b.patch_jump(idx, 0);
+    }
+
+    // ─── add_block_range ──────────────────────────────────────────────
+
+    #[test]
+    fn add_block_range_returns_sequential_indices_and_stores_pairs() {
+        let mut b = ChunkBuilder::new();
+        let i0 = b.add_block_range(0, 5);
+        let i1 = b.add_block_range(10, 20);
+        assert_eq!((i0, i1), (0, 1));
+        let c = b.build();
+        assert_eq!(c.block_ranges, vec![(0, 5), (10, 20)]);
+    }
+
+    // ─── find_sub ─────────────────────────────────────────────────────
+
+    #[test]
+    fn find_sub_returns_none_for_unknown_name_index() {
+        // Empty sub_entries → always None regardless of index.
+        let chunk = ChunkBuilder::new().build();
+        assert!(chunk.find_sub(0).is_none());
+        assert!(chunk.find_sub(99).is_none());
+    }
+
+    // ─── op_hash determinism + cross-content variance ─────────────────
+
+    #[test]
+    fn op_hash_is_deterministic_for_same_input() {
+        let make = || {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(1), 1);
+            b.emit(Op::LoadInt(2), 1);
+            b.emit(Op::Add, 1);
+            b.build()
+        };
+        assert_eq!(make().op_hash, make().op_hash);
+    }
+
+    #[test]
+    fn op_hash_differs_when_constants_differ() {
+        // Same ops, different constant pool → different hash.
+        let a = {
+            let mut b = ChunkBuilder::new();
+            b.add_constant(Value::Int(1));
+            b.emit(Op::Nop, 1);
+            b.build()
+        };
+        let b = {
+            let mut b = ChunkBuilder::new();
+            b.add_constant(Value::Int(2));
+            b.emit(Op::Nop, 1);
+            b.build()
+        };
+        assert_ne!(
+            a.op_hash, b.op_hash,
+            "constants pool must contribute to hash"
+        );
+    }
+
+    #[test]
+    fn op_hash_differs_when_ops_differ() {
+        let a = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::Add, 1);
+            b.build()
+        };
+        let b = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::Sub, 1);
+            b.build()
+        };
+        assert_ne!(a.op_hash, b.op_hash);
+    }
+
+    // ─── round-trip Chunk via serde JSON ──────────────────────────────
+
+    #[test]
+    fn chunk_serde_json_roundtrip() {
+        // Chunk has Serialize/Deserialize; verify the full container survives.
+        let mut b = ChunkBuilder::new();
+        b.add_name("x");
+        b.add_constant(Value::Int(42));
+        b.emit(Op::LoadInt(42), 1);
+        b.set_source("test.fuse");
+        let chunk = b.build();
+        let s = serde_json::to_string(&chunk).expect("serialize");
+        let back: Chunk = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back.ops, chunk.ops);
+        assert_eq!(back.names, chunk.names);
+        assert_eq!(back.lines, chunk.lines);
+        assert_eq!(back.source, chunk.source);
+        // op_hash has #[serde(skip)] → does NOT survive round-trip.
+        assert_eq!(back.op_hash, 0, "op_hash skipped by serde");
+    }
 }
