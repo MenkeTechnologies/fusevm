@@ -105,8 +105,9 @@ impl ShellHost for Recorder {
     fn subshell_begin(&mut self) {
         self.rec("subshell_begin", "");
     }
-    fn subshell_end(&mut self) {
+    fn subshell_end(&mut self) -> Option<i32> {
         self.rec("subshell_end", "");
+        None
     }
     fn with_redirects_begin(&mut self, count: u8) {
         self.rec("with_redirects_begin", count);

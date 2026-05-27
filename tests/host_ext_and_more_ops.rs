@@ -167,8 +167,9 @@ impl ShellHost for CapturingHost {
     fn subshell_begin(&mut self) {
         self.log.push("subshell_begin".to_string());
     }
-    fn subshell_end(&mut self) {
+    fn subshell_end(&mut self) -> Option<i32> {
         self.log.push("subshell_end".to_string());
+        None
     }
     fn trap_set(&mut self, sig: &str, _handler: &Chunk) {
         self.log.push(format!("trap_set({sig})"));
@@ -236,8 +237,9 @@ fn shared_log_host(log: Arc<Mutex<Vec<String>>>) -> Box<dyn ShellHost> {
         fn subshell_begin(&mut self) {
             self.0.lock().unwrap().push("subshell_begin".to_string());
         }
-        fn subshell_end(&mut self) {
+        fn subshell_end(&mut self) -> Option<i32> {
             self.0.lock().unwrap().push("subshell_end".to_string());
+            None
         }
         fn trap_set(&mut self, sig: &str, _: &Chunk) {
             self.0.lock().unwrap().push(format!("trap_set({sig})"));

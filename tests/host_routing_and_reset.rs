@@ -249,8 +249,9 @@ impl ShellHost for Recorder {
     fn subshell_begin(&mut self) {
         self.push(Call::SubshellBegin);
     }
-    fn subshell_end(&mut self) {
+    fn subshell_end(&mut self) -> Option<i32> {
         self.push(Call::SubshellEnd);
+        None
     }
     fn redirect(&mut self, fd: u8, op: u8, target: &str) {
         self.push(Call::Redirect(fd, op, target.to_string()));
