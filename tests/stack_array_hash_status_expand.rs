@@ -1,7 +1,7 @@
 //! Coverage for stack rotation ops, array/hash constructors and globals,
 //! mixed-type arithmetic, status ops, and host-less shell-string expansions.
 
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 
 fn run(b: ChunkBuilder) -> Value {
     match VM::new(b.build()).run() {

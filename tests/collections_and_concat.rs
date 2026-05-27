@@ -1,7 +1,7 @@
 //! Coverage for collection ops: variables, slots, arrays (incl. slot-array),
 //! hashes, MakeArray, Range/RangeStep, Concat, StringRepeat/StringLen.
 
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 
 fn run(b: ChunkBuilder) -> Value {
     match VM::new(b.build()).run() {

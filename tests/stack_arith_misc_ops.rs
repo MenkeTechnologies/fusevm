@@ -351,7 +351,10 @@ fn str_lt_gt_le_ge_are_consistent() {
 
 #[test]
 fn log_not_inverts_truthiness() {
-    assert_eq!(run_emit(vec![Op::LoadInt(0), Op::LogNot]), Value::Bool(true));
+    assert_eq!(
+        run_emit(vec![Op::LoadInt(0), Op::LogNot]),
+        Value::Bool(true)
+    );
     assert_eq!(
         run_emit(vec![Op::LoadInt(7), Op::LogNot]),
         Value::Bool(false)
@@ -439,7 +442,12 @@ fn range_step_positive() {
     ]);
     assert_eq!(
         v,
-        Value::Array(vec![Value::Int(0), Value::Int(3), Value::Int(6), Value::Int(9)])
+        Value::Array(vec![
+            Value::Int(0),
+            Value::Int(3),
+            Value::Int(6),
+            Value::Int(9)
+        ])
     );
 }
 

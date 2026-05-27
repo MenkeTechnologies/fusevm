@@ -171,7 +171,7 @@ fn hash_exists_true_then_false_after_delete() {
     b.emit(Op::LoadConst(kc), 1);
     b.emit(Op::HashDelete(h), 1);
     b.emit(Op::Pop, 1); // discard returned deleted value
-    // exists → false
+                        // exists → false
     b.emit(Op::LoadConst(kc), 1);
     b.emit(Op::HashExists(h), 1);
     // The stack now has [Bool(true), Bool(false)]; MakeArray to inspect both.

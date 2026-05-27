@@ -134,10 +134,10 @@ fn float_div_by_zero_is_infinity() {
     b.emit(Op::LoadFloat(1.0), 1);
     b.emit(Op::LoadFloat(0.0), 1);
     b.emit(Op::Div, 1);
-    match run(b) {
-        Value::Float(f) => assert!(f.is_infinite()),
-        _ => {} // acceptable to error instead
+    if let Value::Float(f) = run(b) {
+        assert!(f.is_infinite());
     }
+    // Other variants are acceptable too (engine may choose to error instead).
 }
 
 #[test]

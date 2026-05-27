@@ -1,4 +1,4 @@
-use fusevm::{Chunk, ChunkBuilder, Op, ShellHost, VM, VMResult, Value};
+use fusevm::{Chunk, ChunkBuilder, Op, ShellHost, VMResult, Value, VM};
 use std::sync::{Arc, Mutex};
 
 /// Recording ShellHost: tracks every method call as ("method", "arg-summary").
@@ -674,7 +674,7 @@ fn array_get_set_round_trip() {
     b.emit(Op::LoadInt(10), 1);
     b.emit(Op::ArrayPush(0), 1);
     b.emit(Op::LoadInt(99), 1); // value
-    b.emit(Op::LoadInt(0), 1);  // index
+    b.emit(Op::LoadInt(0), 1); // index
     b.emit(Op::ArraySet(0), 1);
     b.emit(Op::LoadInt(0), 1);
     b.emit(Op::ArrayGet(0), 1);

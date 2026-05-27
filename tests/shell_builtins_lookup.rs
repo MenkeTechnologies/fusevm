@@ -75,8 +75,8 @@ fn similar_but_distinct_commands_not_recognised() {
 #[test]
 fn is_builtin_matches_builtin_id_some() {
     let names = [
-        "cd", "echo", "true", "false", ":", "source", ".", "test", "[",
-        "declare", "typeset", "let", "shift", "trap", "alias", "set",
+        "cd", "echo", "true", "false", ":", "source", ".", "test", "[", "declare", "typeset",
+        "let", "shift", "trap", "alias", "set",
     ];
     for n in names {
         assert!(is_builtin(n), "{:?} should be a builtin", n);
@@ -129,10 +129,27 @@ fn coreutils_recognised() {
 #[test]
 fn zsh_flavour_builtins_recognised() {
     let zsh = [
-        "setopt", "unsetopt", "shopt", "emulate", "autoload", "functions",
-        "unfunction", "zmodload", "zstyle", "zle", "vared", "zcompile",
-        "zformat", "zparseopts", "zregexparse", "zsleep", "zsystem",
-        "zprof", "zgdbmpath", "ztie", "zuntie",
+        "setopt",
+        "unsetopt",
+        "shopt",
+        "emulate",
+        "autoload",
+        "functions",
+        "unfunction",
+        "zmodload",
+        "zstyle",
+        "zle",
+        "vared",
+        "zcompile",
+        "zformat",
+        "zparseopts",
+        "zregexparse",
+        "zsleep",
+        "zsystem",
+        "zprof",
+        "zgdbmpath",
+        "ztie",
+        "zuntie",
     ];
     for n in zsh {
         assert!(is_builtin(n), "{:?} should be a zsh builtin", n);
@@ -171,7 +188,12 @@ fn all_ids_under_builtin_max() {
         BUILTIN_MKTEMP,
     ];
     for id in ids {
-        assert!(id < BUILTIN_MAX, "{} should be < BUILTIN_MAX ({})", id, BUILTIN_MAX);
+        assert!(
+            id < BUILTIN_MAX,
+            "{} should be < BUILTIN_MAX ({})",
+            id,
+            BUILTIN_MAX
+        );
     }
 }
 
@@ -212,12 +234,7 @@ fn canonical_names_have_unique_ids() {
     ];
     let mut seen = std::collections::HashSet::new();
     for (name, id) in canonical {
-        assert!(
-            seen.insert(id),
-            "duplicate id {} for {:?}",
-            id,
-            name
-        );
+        assert!(seen.insert(id), "duplicate id {} for {:?}", id, name);
         assert_eq!(builtin_id(name), Some(id));
     }
 }

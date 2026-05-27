@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 //! Hash and clone semantics for `Value`, plus additional `Op` PartialEq /
 //! Clone smoke tests. The `Value::Hash` impl uses bit-pattern hashing for
 //! floats and ignores HashMap key ordering (since HashMap hash order is

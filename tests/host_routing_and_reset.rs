@@ -4,7 +4,7 @@
 
 use fusevm::host::ShellHost;
 use fusevm::shell_builtins::*;
-use fusevm::{Chunk, ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{Chunk, ChunkBuilder, Op, VMResult, Value, VM};
 use std::sync::{Arc, Mutex};
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -109,7 +109,10 @@ fn builtin_id_for_async_extensions() {
 #[test]
 fn builtin_id_for_intercept_extensions() {
     assert_eq!(builtin_id("intercept"), Some(BUILTIN_INTERCEPT));
-    assert_eq!(builtin_id("intercept_proceed"), Some(BUILTIN_INTERCEPT_PROCEED));
+    assert_eq!(
+        builtin_id("intercept_proceed"),
+        Some(BUILTIN_INTERCEPT_PROCEED)
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -358,7 +361,11 @@ fn redirect_pops_target_and_invokes_host_with_fd_and_op() {
     });
     assert_eq!(
         log.lock().unwrap()[0],
-        Call::Redirect(1, fusevm::op::redirect_op::WRITE, "/tmp/out.txt".to_string())
+        Call::Redirect(
+            1,
+            fusevm::op::redirect_op::WRITE,
+            "/tmp/out.txt".to_string()
+        )
     );
 }
 
@@ -368,7 +375,10 @@ fn heredoc_reads_content_from_constant_pool_and_passes_to_host() {
         let k = b.add_constant(Value::str("here-content"));
         b.emit(Op::HereDoc(k), 1);
     });
-    assert_eq!(log.lock().unwrap()[0], Call::Heredoc("here-content".to_string()));
+    assert_eq!(
+        log.lock().unwrap()[0],
+        Call::Heredoc("here-content".to_string())
+    );
 }
 
 #[test]
@@ -525,7 +535,14 @@ fn default_host_brace_expand_wraps_in_single_vec() {
 fn default_host_word_split_uses_whitespace() {
     let mut h = Bare;
     let v = h.word_split("  hello   there\tworld\n");
-    assert_eq!(v, vec!["hello".to_string(), "there".to_string(), "world".to_string()]);
+    assert_eq!(
+        v,
+        vec![
+            "hello".to_string(),
+            "there".to_string(),
+            "world".to_string()
+        ]
+    );
 }
 
 #[test]

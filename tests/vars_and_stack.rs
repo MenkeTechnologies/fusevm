@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 //! Coverage for variable/slot opcodes and Dup/Swap/Rot stack manipulation.
 
 use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};

@@ -2469,7 +2469,10 @@ mod tests {
         b.emit(Op::LoadConst(s1), 1);
         b.emit(Op::LoadConst(s2), 1);
         b.emit(Op::StrEq, 1);
-        assert!(matches!(VM::new(b.build()).run(), VMResult::Ok(Value::Bool(true))));
+        assert!(matches!(
+            VM::new(b.build()).run(),
+            VMResult::Ok(Value::Bool(true))
+        ));
     }
 
     // ── Stack manipulation ──
@@ -2497,7 +2500,10 @@ mod tests {
     #[test]
     fn dup2_duplicates_top_two_values() {
         // Dup2 on [3,4] yields [3,4,3,4]. Two Adds collapse to 11 on top.
-        expect_int(vec![Op::LoadInt(3), Op::LoadInt(4), Op::Dup2, Op::Add, Op::Add], 11);
+        expect_int(
+            vec![Op::LoadInt(3), Op::LoadInt(4), Op::Dup2, Op::Add, Op::Add],
+            11,
+        );
     }
 
     // ── Logical / Bitwise ──
@@ -2512,9 +2518,18 @@ mod tests {
 
     #[test]
     fn bitwise_ops() {
-        expect_int(vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitAnd], 0b1000);
-        expect_int(vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitOr], 0b1110);
-        expect_int(vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitXor], 0b0110);
+        expect_int(
+            vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitAnd],
+            0b1000,
+        );
+        expect_int(
+            vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitOr],
+            0b1110,
+        );
+        expect_int(
+            vec![Op::LoadInt(0b1100), Op::LoadInt(0b1010), Op::BitXor],
+            0b0110,
+        );
         expect_int(vec![Op::LoadInt(1), Op::LoadInt(4), Op::Shl], 16);
         expect_int(vec![Op::LoadInt(64), Op::LoadInt(2), Op::Shr], 16);
     }
@@ -2569,9 +2584,18 @@ mod tests {
 
     #[test]
     fn load_true_false_undef() {
-        assert!(matches!(run_one(vec![Op::LoadTrue]), VMResult::Ok(Value::Bool(true))));
-        assert!(matches!(run_one(vec![Op::LoadFalse]), VMResult::Ok(Value::Bool(false))));
-        assert!(matches!(run_one(vec![Op::LoadUndef]), VMResult::Ok(Value::Undef)));
+        assert!(matches!(
+            run_one(vec![Op::LoadTrue]),
+            VMResult::Ok(Value::Bool(true))
+        ));
+        assert!(matches!(
+            run_one(vec![Op::LoadFalse]),
+            VMResult::Ok(Value::Bool(false))
+        ));
+        assert!(matches!(
+            run_one(vec![Op::LoadUndef]),
+            VMResult::Ok(Value::Undef)
+        ));
     }
 
     #[test]
@@ -2596,7 +2620,10 @@ mod tests {
         b.emit(Op::LoadInt(0), 1);
         b.patch_jump(j, b.current_pos());
         b.emit(Op::LoadInt(1), 1);
-        assert!(matches!(VM::new(b.build()).run(), VMResult::Ok(Value::Int(1))));
+        assert!(matches!(
+            VM::new(b.build()).run(),
+            VMResult::Ok(Value::Int(1))
+        ));
     }
 
     #[test]

@@ -500,16 +500,21 @@ mod tests {
             BUILTIN_PROMPT,
             BUILTIN_BARRIER,
         ] {
-            assert!(id < BUILTIN_MAX, "id {} not below BUILTIN_MAX {}", id, BUILTIN_MAX);
+            assert!(
+                id < BUILTIN_MAX,
+                "id {} not below BUILTIN_MAX {}",
+                id,
+                BUILTIN_MAX
+            );
         }
     }
 
     #[test]
     fn coreutils_builtins_are_registered() {
         for name in [
-            "cat", "head", "tail", "wc", "basename", "dirname", "touch", "realpath",
-            "sort", "find", "uniq", "cut", "tr", "seq", "rev", "tee", "sleep",
-            "whoami", "id", "hostname", "uname", "date", "mktemp",
+            "cat", "head", "tail", "wc", "basename", "dirname", "touch", "realpath", "sort",
+            "find", "uniq", "cut", "tr", "seq", "rev", "tee", "sleep", "whoami", "id", "hostname",
+            "uname", "date", "mktemp",
         ] {
             assert!(is_builtin(name), "{} should be a builtin", name);
         }
@@ -518,8 +523,8 @@ mod tests {
     #[test]
     fn control_flow_and_job_builtins_registered() {
         for name in [
-            "break", "continue", "shift", "eval", "exec", "let",
-            "jobs", "fg", "bg", "kill", "wait", "disown",
+            "break", "continue", "shift", "eval", "exec", "let", "jobs", "fg", "bg", "kill",
+            "wait", "disown",
         ] {
             assert!(is_builtin(name), "{} should be a builtin", name);
         }
@@ -528,8 +533,15 @@ mod tests {
     #[test]
     fn zsh_specific_builtins_registered() {
         for name in [
-            "zstyle", "zmodload", "zle", "zcompile", "zformat", "zparseopts",
-            "compdef", "compinit", "autoload",
+            "zstyle",
+            "zmodload",
+            "zle",
+            "zcompile",
+            "zformat",
+            "zparseopts",
+            "compdef",
+            "compinit",
+            "autoload",
         ] {
             assert!(is_builtin(name), "{} should be a builtin", name);
         }
@@ -540,43 +552,155 @@ mod tests {
         // Walk every name we expect to map to a Some(id); collect ids and
         // assert each id maps back to at most one canonical name (ignoring
         // documented aliases).
-        let mut seen: std::collections::HashMap<u16, &'static str> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<u16, &'static str> =
+            std::collections::HashMap::new();
         // Canonical (non-alias) names from the lookup table.
         let canonicals: &[&str] = &[
-            "cd", "pwd", "echo", "print", "printf", "export", "unset", "source",
-            "exit", "return", "true", "false", "test", ":",
-            "local", "declare", "readonly", "integer", "float",
-            "read", "mapfile",
-            "break", "continue", "shift", "eval", "exec", "command", "builtin", "let",
-            "jobs", "fg", "bg", "kill", "disown", "wait", "suspend",
-            "history", "fc", "r",
-            "alias", "unalias",
-            "set", "setopt", "unsetopt", "shopt", "emulate", "getopts",
-            "autoload", "functions", "unfunction",
+            "cd",
+            "pwd",
+            "echo",
+            "print",
+            "printf",
+            "export",
+            "unset",
+            "source",
+            "exit",
+            "return",
+            "true",
+            "false",
+            "test",
+            ":",
+            "local",
+            "declare",
+            "readonly",
+            "integer",
+            "float",
+            "read",
+            "mapfile",
+            "break",
+            "continue",
+            "shift",
+            "eval",
+            "exec",
+            "command",
+            "builtin",
+            "let",
+            "jobs",
+            "fg",
+            "bg",
+            "kill",
+            "disown",
+            "wait",
+            "suspend",
+            "history",
+            "fc",
+            "r",
+            "alias",
+            "unalias",
+            "set",
+            "setopt",
+            "unsetopt",
+            "shopt",
+            "emulate",
+            "getopts",
+            "autoload",
+            "functions",
+            "unfunction",
             "trap",
-            "pushd", "popd", "dirs",
-            "type", "whence", "where", "which", "hash", "rehash", "unhash",
-            "compgen", "complete", "compopt", "compadd", "compset", "compdef",
-            "compinit", "cdreplay",
-            "zstyle", "zmodload", "bindkey", "zle", "vared", "zcompile", "zformat",
-            "zparseopts", "zregexparse",
-            "ulimit", "limit", "unlimit", "umask",
-            "times", "caller", "help", "enable", "disable", "noglob", "ttyctl",
-            "sync", "mkdir", "strftime", "zsleep", "zsystem",
-            "pcre_compile", "pcre_match", "pcre_study",
-            "ztie", "zuntie", "zgdbmpath",
-            "promptinit", "prompt",
-            "async", "await", "pmap", "pgrep", "peach", "barrier",
-            "intercept", "intercept_proceed",
-            "doctor", "dbview", "profile", "zprof",
-            "cat", "head", "tail", "wc", "basename", "dirname", "touch", "realpath",
-            "sort", "find", "uniq", "cut", "tr", "seq", "rev", "tee", "sleep",
-            "whoami", "id", "hostname", "uname", "date", "mktemp",
+            "pushd",
+            "popd",
+            "dirs",
+            "type",
+            "whence",
+            "where",
+            "which",
+            "hash",
+            "rehash",
+            "unhash",
+            "compgen",
+            "complete",
+            "compopt",
+            "compadd",
+            "compset",
+            "compdef",
+            "compinit",
+            "cdreplay",
+            "zstyle",
+            "zmodload",
+            "bindkey",
+            "zle",
+            "vared",
+            "zcompile",
+            "zformat",
+            "zparseopts",
+            "zregexparse",
+            "ulimit",
+            "limit",
+            "unlimit",
+            "umask",
+            "times",
+            "caller",
+            "help",
+            "enable",
+            "disable",
+            "noglob",
+            "ttyctl",
+            "sync",
+            "mkdir",
+            "strftime",
+            "zsleep",
+            "zsystem",
+            "pcre_compile",
+            "pcre_match",
+            "pcre_study",
+            "ztie",
+            "zuntie",
+            "zgdbmpath",
+            "promptinit",
+            "prompt",
+            "async",
+            "await",
+            "pmap",
+            "pgrep",
+            "peach",
+            "barrier",
+            "intercept",
+            "intercept_proceed",
+            "doctor",
+            "dbview",
+            "profile",
+            "zprof",
+            "cat",
+            "head",
+            "tail",
+            "wc",
+            "basename",
+            "dirname",
+            "touch",
+            "realpath",
+            "sort",
+            "find",
+            "uniq",
+            "cut",
+            "tr",
+            "seq",
+            "rev",
+            "tee",
+            "sleep",
+            "whoami",
+            "id",
+            "hostname",
+            "uname",
+            "date",
+            "mktemp",
         ];
         for name in canonicals {
             let id = builtin_id(name).unwrap_or_else(|| panic!("missing builtin {}", name));
             if let Some(prev) = seen.insert(id, name) {
-                panic!("duplicate builtin id {} shared by {} and {}", id, prev, name);
+                panic!(
+                    "duplicate builtin id {} shared by {} and {}",
+                    id, prev, name
+                );
             }
         }
     }

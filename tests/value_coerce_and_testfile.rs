@@ -1,9 +1,10 @@
+#![allow(clippy::approx_constant)]
 //! Exhaustive coercion / truthiness / hash coverage for every `Value`
 //! variant, plus `Op::TestFile` for every `file_test::*` constant against
 //! known-existing and known-missing paths.
 
 use fusevm::op::file_test;
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 use std::collections::HashMap;
 
 fn run(b: ChunkBuilder) -> Value {
@@ -432,10 +433,7 @@ fn test_file_executable_for_chmod_555_temp_file() {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
-    let tmp = std::env::temp_dir().join(format!(
-        "fusevm_exec_test_{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("fusevm_exec_test_{}", std::process::id()));
     {
         let mut f = File::create(&tmp).expect("create temp");
         f.write_all(b"#!/bin/sh\n").unwrap();
@@ -451,10 +449,7 @@ fn test_file_executable_for_chmod_555_temp_file() {
 #[test]
 fn test_file_symlink_detected() {
     use std::os::unix::fs as unix_fs;
-    let dir = std::env::temp_dir().join(format!(
-        "fusevm_symlink_test_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("fusevm_symlink_test_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let link = dir.join("link");
     let _ = std::fs::remove_file(&link);

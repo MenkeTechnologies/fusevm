@@ -205,9 +205,9 @@ fn slot_lt_int_jump_if_false_falls_through_when_lt_limit() {
     b.emit(Op::LoadInt(2), 1);
     b.emit(Op::SetSlot(0), 1);
     b.emit(Op::SlotLtIntJumpIfFalse(0, 5, 6), 1); // ip 3
-    b.emit(Op::LoadInt(111), 1);                   // ip 4 — executed
-    b.emit(Op::LoadInt(222), 1);                   // ip 5 — also executed
-    // ip 6: end
+    b.emit(Op::LoadInt(111), 1); // ip 4 — executed
+    b.emit(Op::LoadInt(222), 1); // ip 5 — also executed
+                                 // ip 6: end
     match VM::new(b.build()).run() {
         VMResult::Ok(Value::Int(222)) => {}
         other => panic!("got {:?}", other),

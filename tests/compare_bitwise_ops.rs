@@ -24,66 +24,135 @@ fn binop(op: Op, lhs: Value, rhs: Value) -> Value {
 
 #[test]
 fn num_eq_int_int() {
-    assert_eq!(binop(Op::NumEq, Value::Int(3), Value::Int(3)), Value::Bool(true));
-    assert_eq!(binop(Op::NumEq, Value::Int(3), Value::Int(4)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::NumEq, Value::Int(3), Value::Int(3)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumEq, Value::Int(3), Value::Int(4)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn num_eq_int_float_same_value() {
-    assert_eq!(binop(Op::NumEq, Value::Int(5), Value::Float(5.0)), Value::Bool(true));
+    assert_eq!(
+        binop(Op::NumEq, Value::Int(5), Value::Float(5.0)),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn num_ne_basic() {
-    assert_eq!(binop(Op::NumNe, Value::Int(1), Value::Int(2)), Value::Bool(true));
-    assert_eq!(binop(Op::NumNe, Value::Int(7), Value::Int(7)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::NumNe, Value::Int(1), Value::Int(2)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumNe, Value::Int(7), Value::Int(7)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn num_lt_int_int() {
-    assert_eq!(binop(Op::NumLt, Value::Int(1), Value::Int(2)), Value::Bool(true));
-    assert_eq!(binop(Op::NumLt, Value::Int(2), Value::Int(2)), Value::Bool(false));
-    assert_eq!(binop(Op::NumLt, Value::Int(3), Value::Int(2)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::NumLt, Value::Int(1), Value::Int(2)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumLt, Value::Int(2), Value::Int(2)),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        binop(Op::NumLt, Value::Int(3), Value::Int(2)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn num_gt_int_int() {
-    assert_eq!(binop(Op::NumGt, Value::Int(3), Value::Int(2)), Value::Bool(true));
-    assert_eq!(binop(Op::NumGt, Value::Int(2), Value::Int(2)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::NumGt, Value::Int(3), Value::Int(2)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumGt, Value::Int(2), Value::Int(2)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn num_le_int_int() {
-    assert_eq!(binop(Op::NumLe, Value::Int(2), Value::Int(2)), Value::Bool(true));
-    assert_eq!(binop(Op::NumLe, Value::Int(1), Value::Int(2)), Value::Bool(true));
-    assert_eq!(binop(Op::NumLe, Value::Int(3), Value::Int(2)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::NumLe, Value::Int(2), Value::Int(2)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumLe, Value::Int(1), Value::Int(2)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumLe, Value::Int(3), Value::Int(2)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn num_ge_int_int() {
-    assert_eq!(binop(Op::NumGe, Value::Int(2), Value::Int(2)), Value::Bool(true));
-    assert_eq!(binop(Op::NumGe, Value::Int(3), Value::Int(2)), Value::Bool(true));
-    assert_eq!(binop(Op::NumGe, Value::Int(1), Value::Int(2)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::NumGe, Value::Int(2), Value::Int(2)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumGe, Value::Int(3), Value::Int(2)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumGe, Value::Int(1), Value::Int(2)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn num_compare_with_string_coercion() {
     // Strings get numeric coercion: "42" parses to 42.
-    assert_eq!(binop(Op::NumEq, Value::str("42"), Value::Int(42)), Value::Bool(true));
-    assert_eq!(binop(Op::NumLt, Value::str("1"), Value::str("2")), Value::Bool(true));
+    assert_eq!(
+        binop(Op::NumEq, Value::str("42"), Value::Int(42)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumLt, Value::str("1"), Value::str("2")),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn num_compare_negative_values() {
-    assert_eq!(binop(Op::NumLt, Value::Int(-5), Value::Int(0)), Value::Bool(true));
-    assert_eq!(binop(Op::NumLt, Value::Int(-10), Value::Int(-5)), Value::Bool(true));
-    assert_eq!(binop(Op::NumGt, Value::Int(-5), Value::Int(-10)), Value::Bool(true));
+    assert_eq!(
+        binop(Op::NumLt, Value::Int(-5), Value::Int(0)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumLt, Value::Int(-10), Value::Int(-5)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumGt, Value::Int(-5), Value::Int(-10)),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn num_compare_float_precision() {
-    assert_eq!(binop(Op::NumLt, Value::Float(1.0), Value::Float(1.0000001)), Value::Bool(true));
-    assert_eq!(binop(Op::NumEq, Value::Float(0.1 + 0.2), Value::Float(0.3)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::NumLt, Value::Float(1.0), Value::Float(1.0000001)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::NumEq, Value::Float(0.1 + 0.2), Value::Float(0.3)),
+        Value::Bool(false)
+    );
 }
 
 // ── Spaceship ──────────────────────────────────────────────────────────────
@@ -116,41 +185,83 @@ fn spaceship_greater_than() {
 
 #[test]
 fn str_eq_basic() {
-    assert_eq!(binop(Op::StrEq, Value::str("a"), Value::str("a")), Value::Bool(true));
-    assert_eq!(binop(Op::StrEq, Value::str("a"), Value::str("b")), Value::Bool(false));
+    assert_eq!(
+        binop(Op::StrEq, Value::str("a"), Value::str("a")),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::StrEq, Value::str("a"), Value::str("b")),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn str_ne_basic() {
-    assert_eq!(binop(Op::StrNe, Value::str("a"), Value::str("b")), Value::Bool(true));
-    assert_eq!(binop(Op::StrNe, Value::str("x"), Value::str("x")), Value::Bool(false));
+    assert_eq!(
+        binop(Op::StrNe, Value::str("a"), Value::str("b")),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::StrNe, Value::str("x"), Value::str("x")),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn str_lt_lexicographic() {
-    assert_eq!(binop(Op::StrLt, Value::str("apple"), Value::str("banana")), Value::Bool(true));
-    assert_eq!(binop(Op::StrLt, Value::str("b"), Value::str("a")), Value::Bool(false));
-    assert_eq!(binop(Op::StrLt, Value::str("a"), Value::str("a")), Value::Bool(false));
+    assert_eq!(
+        binop(Op::StrLt, Value::str("apple"), Value::str("banana")),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::StrLt, Value::str("b"), Value::str("a")),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        binop(Op::StrLt, Value::str("a"), Value::str("a")),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn str_gt_lexicographic() {
-    assert_eq!(binop(Op::StrGt, Value::str("z"), Value::str("a")), Value::Bool(true));
-    assert_eq!(binop(Op::StrGt, Value::str("a"), Value::str("z")), Value::Bool(false));
+    assert_eq!(
+        binop(Op::StrGt, Value::str("z"), Value::str("a")),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::StrGt, Value::str("a"), Value::str("z")),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn str_le_and_ge() {
-    assert_eq!(binop(Op::StrLe, Value::str("abc"), Value::str("abc")), Value::Bool(true));
-    assert_eq!(binop(Op::StrGe, Value::str("abc"), Value::str("abc")), Value::Bool(true));
-    assert_eq!(binop(Op::StrLe, Value::str("a"), Value::str("b")), Value::Bool(true));
-    assert_eq!(binop(Op::StrGe, Value::str("b"), Value::str("a")), Value::Bool(true));
+    assert_eq!(
+        binop(Op::StrLe, Value::str("abc"), Value::str("abc")),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::StrGe, Value::str("abc"), Value::str("abc")),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::StrLe, Value::str("a"), Value::str("b")),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::StrGe, Value::str("b"), Value::str("a")),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn str_eq_coerces_int_to_string() {
     // String comparison coerces operands to strings: 42 → "42".
-    assert_eq!(binop(Op::StrEq, Value::Int(42), Value::str("42")), Value::Bool(true));
+    assert_eq!(
+        binop(Op::StrEq, Value::Int(42), Value::str("42")),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -171,44 +282,80 @@ fn strcmp_returns_signed_ordering() {
 
 #[test]
 fn str_compare_empty_strings() {
-    assert_eq!(binop(Op::StrEq, Value::str(""), Value::str("")), Value::Bool(true));
-    assert_eq!(binop(Op::StrLt, Value::str(""), Value::str("a")), Value::Bool(true));
+    assert_eq!(
+        binop(Op::StrEq, Value::str(""), Value::str("")),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::StrLt, Value::str(""), Value::str("a")),
+        Value::Bool(true)
+    );
 }
 
 // ── Logical ──────────────────────────────────────────────────────────────
 
 #[test]
 fn logand_both_truthy() {
-    assert_eq!(binop(Op::LogAnd, Value::Int(1), Value::Int(1)), Value::Bool(true));
+    assert_eq!(
+        binop(Op::LogAnd, Value::Int(1), Value::Int(1)),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn logand_one_falsy() {
-    assert_eq!(binop(Op::LogAnd, Value::Int(0), Value::Int(1)), Value::Bool(false));
-    assert_eq!(binop(Op::LogAnd, Value::Int(1), Value::Int(0)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::LogAnd, Value::Int(0), Value::Int(1)),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        binop(Op::LogAnd, Value::Int(1), Value::Int(0)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn logand_both_falsy() {
-    assert_eq!(binop(Op::LogAnd, Value::Int(0), Value::Int(0)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::LogAnd, Value::Int(0), Value::Int(0)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn logor_one_truthy() {
-    assert_eq!(binop(Op::LogOr, Value::Int(1), Value::Int(0)), Value::Bool(true));
-    assert_eq!(binop(Op::LogOr, Value::Int(0), Value::Int(1)), Value::Bool(true));
-    assert_eq!(binop(Op::LogOr, Value::Int(1), Value::Int(1)), Value::Bool(true));
+    assert_eq!(
+        binop(Op::LogOr, Value::Int(1), Value::Int(0)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::LogOr, Value::Int(0), Value::Int(1)),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        binop(Op::LogOr, Value::Int(1), Value::Int(1)),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn logor_both_falsy() {
-    assert_eq!(binop(Op::LogOr, Value::Int(0), Value::Int(0)), Value::Bool(false));
+    assert_eq!(
+        binop(Op::LogOr, Value::Int(0), Value::Int(0)),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn logand_uses_truthiness_of_string() {
-    assert_eq!(binop(Op::LogAnd, Value::str(""), Value::Int(1)), Value::Bool(false));
-    assert_eq!(binop(Op::LogAnd, Value::str("x"), Value::Int(1)), Value::Bool(true));
+    assert_eq!(
+        binop(Op::LogAnd, Value::str(""), Value::Int(1)),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        binop(Op::LogAnd, Value::str("x"), Value::Int(1)),
+        Value::Bool(true)
+    );
 }
 
 // ── Bitwise ────────────────────────────────────────────────────────────────

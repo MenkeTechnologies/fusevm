@@ -1,3 +1,6 @@
+#![allow(clippy::approx_constant)]
+#![allow(non_snake_case)] // many *Ex778 test names mirror exit codes; renaming would lose link
+
 //! Tests pinning the v0.12.2 API additions:
 //!   - `ShellHost::subshell_end -> Option<i32>` (Some(N) updates vm.last_status)
 //!   - `VM::request_halt()` (host-callable mid-execution halt)
@@ -382,7 +385,10 @@ fn subshell_end_exit_code_255_propagates() {
     vm.set_shell_host(Box::new(StatusReturningHost(255)));
     match vm.run() {
         VMResult::Ok(Value::Status(255)) => {}
-        other => panic!("shell exit 255 MUST propagate as Status(255), got {:?}", other),
+        other => panic!(
+            "shell exit 255 MUST propagate as Status(255), got {:?}",
+            other
+        ),
     }
 }
 
@@ -1610,7 +1616,10 @@ fn subshell_end_exit_code_128_propagates() {
     vm.set_shell_host(Box::new(StatusReturningHost(128)));
     match vm.run() {
         VMResult::Ok(Value::Status(128)) => {}
-        other => panic!("exit code 128 MUST propagate as Status(128), got {:?}", other),
+        other => panic!(
+            "exit code 128 MUST propagate as Status(128), got {:?}",
+            other
+        ),
     }
 }
 
@@ -1824,7 +1833,6 @@ fn request_halt_both_extension_handlers_only_first_runs() {
     );
 }
 
-
 static PIPELINE_STAGE_CALLS: AtomicU32 = AtomicU32::new(0);
 
 struct CountingPipelineStageHost;
@@ -1867,7 +1875,6 @@ fn subshell_end_exit_code_1_propagates() {
     }
 }
 
-
 #[test]
 fn subshell_end_getstatus_leaves_prior_status_on_stack_below() {
     let mut b = ChunkBuilder::new();
@@ -1908,7 +1915,6 @@ fn request_halt_stops_before_return_value_top_level() {
     }
     assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
 }
-
 
 #[test]
 fn request_halt_wide_extension_halts_before_narrow() {
@@ -1953,7 +1959,6 @@ fn subshell_end_some_overwrites_setstatus_zero() {
     }
 }
 
-
 #[test]
 fn request_halt_prevents_subshell_end_host_invocation() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -1991,7 +1996,6 @@ fn subshell_triple_begin_end_updates_to_last_some() {
     }
 }
 
-
 #[test]
 fn request_halt_stops_before_jump_if_true_keep() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2025,7 +2029,6 @@ fn subshell_end_last_status_set_even_when_run_returns_halted() {
     assert!(matches!(vm.run(), VMResult::Halted));
     assert_eq!(vm.last_status, 21);
 }
-
 
 #[test]
 fn request_halt_stops_second_extension_in_chain() {
@@ -2066,7 +2069,6 @@ fn subshell_begin_does_not_change_status_before_end() {
         ),
     }
 }
-
 
 #[test]
 fn request_halt_reset_clears_setstatus_from_halted_run() {
@@ -2114,7 +2116,6 @@ fn subshell_end_between_pipeline_ops_does_not_call_pipeline_end() {
     );
 }
 
-
 #[test]
 fn request_halt_nested_call_with_args_still_halts() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2135,7 +2136,10 @@ fn request_halt_nested_call_with_args_still_halts() {
     vm.register_builtin(100, builtin_request_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("nested halt with args MUST return builtin result, got {:?}", other),
+        other => panic!(
+            "nested halt with args MUST return builtin result, got {:?}",
+            other
+        ),
     }
 }
 
@@ -2154,7 +2158,6 @@ fn subshell_end_without_host_orphan_leaves_last_status() {
         ),
     }
 }
-
 
 #[test]
 fn request_halt_three_consecutive_runs_never_resume() {
@@ -2193,7 +2196,6 @@ fn subshell_end_getstatus_then_loadint_returns_loadint() {
         ),
     }
 }
-
 
 #[test]
 fn request_halt_reset_subshell_getstatus_lifecycle() {
@@ -2257,7 +2259,6 @@ fn subshell_halt_reset_subshell_preserves_host_and_status() {
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 2);
 }
 
-
 #[test]
 fn request_halt_stops_before_jump_if_false_keep() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2293,7 +2294,6 @@ fn subshell_end_exit_code_2_propagates() {
         other => panic!("exit code 2 MUST propagate as Status(2), got {:?}", other),
     }
 }
-
 
 #[test]
 fn request_halt_after_pushframe_popframe_not_reached() {
@@ -2333,7 +2333,6 @@ fn subshell_end_with_loadint_only_on_stack_returns_int() {
     assert_eq!(vm.last_status, 15);
 }
 
-
 #[test]
 fn request_halt_stops_before_loadint() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2370,7 +2369,6 @@ fn subshell_end_getstatus_twice_reflects_updated_status() {
     }
 }
 
-
 #[test]
 fn subshell_four_end_ops_incrementing_status() {
     let mut b = ChunkBuilder::new();
@@ -2382,10 +2380,7 @@ fn subshell_four_end_ops_incrementing_status() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 20 }));
     match vm.run() {
         VMResult::Ok(Value::Status(23)) => {}
-        other => panic!(
-            "fourth subshell_end(Some(23)) MUST win, got {:?}",
-            other
-        ),
+        other => panic!("fourth subshell_end(Some(23)) MUST win, got {:?}", other),
     }
 }
 
@@ -2407,7 +2402,6 @@ fn request_halt_after_pipeline_begin_before_end() {
         "PipelineEnd MUST NOT run after halt even when PipelineBegin already ran"
     );
 }
-
 
 #[test]
 fn subshell_setstatus_then_end_getstatus_chain() {
@@ -2446,7 +2440,6 @@ fn request_halt_stops_subshell_begin_after_loadint() {
         "SubshellBegin after halt MUST NOT run even when prior LoadInt completed"
     );
 }
-
 
 #[test]
 fn request_halt_only_wide_handler_no_narrow() {
@@ -2494,7 +2487,6 @@ fn subshell_end_some_zero_after_some_negative() {
     }
 }
 
-
 #[test]
 fn request_halt_double_pre_run_reset_then_executes() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2537,7 +2529,6 @@ fn subshell_some_max_then_none_preserves_max() {
     }
 }
 
-
 #[test]
 fn request_halt_callee_return_not_reached() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2578,7 +2569,6 @@ fn subshell_one_begin_two_end_second_status_wins() {
     }
 }
 
-
 #[test]
 fn request_halt_reset_extension_handler_runs_on_new_chunk() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2617,7 +2607,6 @@ fn subshell_after_pipelineend_getstatus_reads_subshell_status() {
         ),
     }
 }
-
 
 #[test]
 fn subshell_halt_reset_getstatus_full_chain() {
@@ -2668,7 +2657,6 @@ fn subshell_two_begin_end_pairs_last_status_wins() {
     }
 }
 
-
 #[test]
 fn request_halt_stops_before_setstatus_op() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2699,7 +2687,6 @@ fn subshell_end_exit_code_127_propagates() {
         other => panic!("exit code 127 MUST propagate, got {:?}", other),
     }
 }
-
 
 #[test]
 fn request_halt_after_getstatus_before_second_getstatus() {
@@ -2738,7 +2725,6 @@ fn subshell_end_two_loadints_top_value_returned() {
     }
 }
 
-
 #[test]
 fn request_halt_between_pipeline_begin_and_stage() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2776,7 +2762,6 @@ fn subshell_end_invokes_host_every_time_regardless_of_value() {
     assert_eq!(vm.last_status, 5);
 }
 
-
 #[test]
 fn request_halt_extension_handler_reads_subshell_last_status() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2811,7 +2796,6 @@ fn subshell_end_exit_code_126_propagates() {
         other => panic!("exit code 126 MUST propagate, got {:?}", other),
     }
 }
-
 
 #[test]
 fn subshell_setstatus_after_end_overwrites_subshell_status() {
@@ -2856,7 +2840,6 @@ fn request_halt_stops_before_call_op() {
     );
 }
 
-
 #[test]
 fn request_halt_double_reset_then_run() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -2894,7 +2877,6 @@ fn subshell_end_after_begin_only_pair_updates_status() {
         ),
     }
 }
-
 
 #[test]
 fn subshell_getstatus_subshell_getstatus_two_updates() {
@@ -2943,10 +2925,12 @@ fn request_halt_nested_two_level_call_stops_at_halt() {
     vm.register_builtin(200, builtin_count_after_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("two-level nested halt MUST return builtin result, got {:?}", other),
+        other => panic!(
+            "two-level nested halt MUST return builtin result, got {:?}",
+            other
+        ),
     }
 }
-
 
 #[test]
 fn subshell_five_end_incrementing_status() {
@@ -2983,7 +2967,6 @@ fn request_halt_pre_run_many_ops_none_execute() {
     assert_eq!(vm.last_status, 0);
 }
 
-
 #[test]
 fn request_halt_after_getstatus_on_stack_returns_builtin_not_status() {
     let mut b = ChunkBuilder::new();
@@ -3019,7 +3002,6 @@ fn subshell_begin_end_halt_begin_count_is_one() {
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 1);
     assert_eq!(vm.last_status, 70);
 }
-
 
 #[test]
 fn subshell_halt_reset_subshell_halt_reset_getstatus() {
@@ -3072,7 +3054,6 @@ fn subshell_none_none_some_via_third_host() {
     }
 }
 
-
 #[test]
 fn request_halt_after_subshell_begin_before_end() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -3109,7 +3090,6 @@ fn subshell_end_exit_code_124_propagates() {
     }
 }
 
-
 #[test]
 fn subshell_six_end_incrementing_status() {
     let mut b = ChunkBuilder::new();
@@ -3144,7 +3124,6 @@ fn request_halt_stops_before_backward_jump_target() {
         "backward Jump target MUST NOT run after request_halt"
     );
 }
-
 
 #[test]
 fn request_halt_wide_handler_reads_setstatus_last_status() {
@@ -3193,7 +3172,6 @@ fn subshell_replaced_host_none_on_second_reset_chunk() {
     }
 }
 
-
 #[test]
 fn request_halt_stops_before_top_level_return_value() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -3225,7 +3203,6 @@ fn subshell_end_status_minus_two_propagates() {
         other => panic!("status -2 MUST propagate, got {:?}", other),
     }
 }
-
 
 #[test]
 fn request_halt_triple_reset_then_run() {
@@ -3269,7 +3246,6 @@ fn subshell_three_begins_one_end_still_applies_status() {
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 3);
 }
 
-
 #[test]
 fn subshell_getstatus_loadint_getstatus_final_is_loadint() {
     let mut b = ChunkBuilder::new();
@@ -3308,7 +3284,6 @@ fn request_halt_between_two_subshell_begins() {
     );
     assert_eq!(vm.last_status, 0);
 }
-
 
 struct MaxThenMinHost {
     calls: u32,
@@ -3361,7 +3336,6 @@ fn request_halt_halt_flag_persists_after_ok_return() {
     );
 }
 
-
 #[test]
 fn subshell_incrementing_from_100_to_104() {
     let mut b = ChunkBuilder::new();
@@ -3390,7 +3364,6 @@ fn request_halt_stops_pipeline_end_without_begin() {
     let _ = vm.run();
     assert_eq!(PIPELINE_END_CALLS.load(Ordering::SeqCst), 0);
 }
-
 
 #[test]
 fn subshell_halt_subshell_getstatus_same_vm_no_reset() {
@@ -3427,7 +3400,6 @@ fn request_halt_extension_handler_receives_id_and_arg() {
     assert_eq!(SEEN_ID.load(Ordering::SeqCst), 42);
     assert_eq!(SEEN_ARG.load(Ordering::SeqCst), 7);
 }
-
 
 #[test]
 fn full_lifecycle_setstatus_subshell_halt_reset_getstatus() {
@@ -3470,7 +3442,6 @@ fn subshell_ten_end_incrementing_from_zero() {
     }
 }
 
-
 #[test]
 fn subshell_end_exit_code_125_propagates() {
     let mut b = ChunkBuilder::new();
@@ -3503,7 +3474,6 @@ fn request_halt_between_two_subshell_ends() {
     );
     assert_eq!(vm.last_status, 3);
 }
-
 
 #[test]
 fn request_halt_three_builtins_before_halt_all_run() {
@@ -3549,7 +3519,6 @@ fn subshell_seven_end_incrementing_status() {
         other => panic!("seventh subshell_end(Some(6)) MUST win, got {:?}", other),
     }
 }
-
 
 #[test]
 fn request_halt_wide_extension_receives_id_and_payload() {
@@ -3599,7 +3568,6 @@ fn subshell_pipeline_stage_does_not_change_last_status() {
     assert_eq!(PIPELINE_STAGE_CALLS.load(Ordering::SeqCst), 1);
 }
 
-
 #[test]
 fn request_halt_stops_before_second_push_frame() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -3629,7 +3597,6 @@ fn subshell_end_exit_code_130_propagates() {
         other => panic!("exit code 130 MUST propagate, got {:?}", other),
     }
 }
-
 
 #[test]
 fn request_halt_reset_mid_subshell_chunk_allows_end() {
@@ -3677,7 +3644,6 @@ fn subshell_getstatus_twice_without_intervening_end() {
     }
 }
 
-
 #[test]
 fn request_halt_after_subshell_begin_end_not_reached() {
     let _guard = PIN_TEST_LOCK.lock().unwrap();
@@ -3716,7 +3682,6 @@ fn subshell_end_loadint_getstatus_stack_order() {
         ),
     }
 }
-
 
 struct MinThenMaxHost {
     calls: u32,
@@ -3766,7 +3731,6 @@ fn request_halt_four_consecutive_runs_never_resume() {
     assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
 }
 
-
 #[test]
 fn subshell_twelve_end_incrementing_from_one() {
     let mut b = ChunkBuilder::new();
@@ -3798,7 +3762,6 @@ fn request_halt_extended_without_handler_continues() {
         "CallBuiltin MUST run when Extended has no handler registered"
     );
 }
-
 
 #[test]
 fn subshell_after_pipeline_begin_stage_without_end() {
@@ -3844,7 +3807,6 @@ fn request_halt_with_host_set_builtin_still_halts() {
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 0);
 }
 
-
 #[test]
 fn full_lifecycle_halt_reset_subshell_getstatus_twice() {
     let halt_chunk = {
@@ -3872,7 +3834,10 @@ fn full_lifecycle_halt_reset_subshell_getstatus_twice() {
     vm.reset(sub_chunk.clone());
     match vm.run() {
         VMResult::Ok(Value::Status(95)) => {}
-        other => panic!("subshell after reset MUST use preserved host, got {:?}", other),
+        other => panic!(
+            "subshell after reset MUST use preserved host, got {:?}",
+            other
+        ),
     }
 
     vm.reset(status_chunk);
@@ -4028,7 +3993,10 @@ fn request_halt_pre_run_subshell_chunk_skips_host_until_reset() {
     vm.request_halt();
     match vm.run() {
         VMResult::Halted => {}
-        other => panic!("pre-run halt on subshell chunk MUST return Halted, got {:?}", other),
+        other => panic!(
+            "pre-run halt on subshell chunk MUST return Halted, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 0);
     vm.reset(chunk);
@@ -4302,7 +4270,10 @@ fn request_halt_reset_after_halted_subshell_chunk_allows_fresh_getstatus_zero() 
     vm.reset(status_chunk);
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("reset MUST clear last_status from halted subshell run, got {:?}", other),
+        other => panic!(
+            "reset MUST clear last_status from halted subshell run, got {:?}",
+            other
+        ),
     }
 }
 
@@ -4797,7 +4768,10 @@ fn request_halt_subshell_begin_end_halt_reset_subshell_getstatus() {
     vm.reset(status_chunk);
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("reset after subshell+halt MUST zero last_status, got {:?}", other),
+        other => panic!(
+            "reset after subshell+halt MUST zero last_status, got {:?}",
+            other
+        ),
     }
 }
 
@@ -4812,7 +4786,10 @@ fn subshell_thirteen_end_incrementing_from_seven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
     match vm.run() {
         VMResult::Ok(Value::Status(19)) => {}
-        other => panic!("thirteenth subshell_end(Some(19)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirteenth subshell_end(Some(19)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -4940,10 +4917,7 @@ fn request_halt_between_two_getstatus_ops_second_not_reached() {
     vm.register_builtin(100, builtin_request_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!(
-            "second GetStatus MUST NOT run after halt, got {:?}",
-            other
-        ),
+        other => panic!("second GetStatus MUST NOT run after halt, got {:?}", other),
     }
 }
 
@@ -5122,7 +5096,10 @@ fn subshell_host_swap_none_then_status_on_second_reset_chunk() {
     vm.reset(chunk2);
     match vm.run() {
         VMResult::Ok(Value::Status(67)) => {}
-        other => panic!("StatusReturningHost after swap MUST apply Some(67), got {:?}", other),
+        other => panic!(
+            "StatusReturningHost after swap MUST apply Some(67), got {:?}",
+            other
+        ),
     }
 }
 
@@ -5173,7 +5150,10 @@ fn request_halt_reset_clears_halt_allows_subshell_on_same_vm_instance() {
     vm.reset(sub_chunk);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("second run after reset MUST reach halt builtin again, got {:?}", other),
+        other => panic!(
+            "second run after reset MUST reach halt builtin again, got {:?}",
+            other
+        ),
     }
     assert_eq!(vm.last_status, 84);
 }
@@ -5314,7 +5294,10 @@ fn subshell_fourteen_end_incrementing_from_eighteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 18 }));
     match vm.run() {
         VMResult::Ok(Value::Status(31)) => {}
-        other => panic!("fourteenth subshell_end(Some(31)) MUST win, got {:?}", other),
+        other => panic!(
+            "fourteenth subshell_end(Some(31)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -5668,7 +5651,10 @@ fn subshell_orphan_end_counting_host_invoked_without_begin() {
     vm.set_shell_host(Box::new(CountingSubshellEndHost(16)));
     match vm.run() {
         VMResult::Ok(Value::Status(16)) => {}
-        other => panic!("orphan SubshellEnd MUST invoke host and apply Some(16), got {:?}", other),
+        other => panic!(
+            "orphan SubshellEnd MUST invoke host and apply Some(16), got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 2);
 }
@@ -6115,7 +6101,10 @@ fn subshell_seventeen_end_incrementing_from_nine() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
     match vm.run() {
         VMResult::Ok(Value::Status(25)) => {}
-        other => panic!("seventeenth subshell_end(Some(25)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(25)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6151,7 +6140,10 @@ fn subshell_eighteen_end_incrementing_from_eleven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 11 }));
     match vm.run() {
         VMResult::Ok(Value::Status(28)) => {}
-        other => panic!("eighteenth subshell_end(Some(28)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighteenth subshell_end(Some(28)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6197,7 +6189,10 @@ fn subshell_nineteen_end_incrementing_from_four() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
     match vm.run() {
         VMResult::Ok(Value::Status(22)) => {}
-        other => panic!("nineteenth subshell_end(Some(22)) MUST win, got {:?}", other),
+        other => panic!(
+            "nineteenth subshell_end(Some(22)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6297,7 +6292,10 @@ fn subshell_begin_end_begin_end_alternating_status_second_wins() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("second Some(9) MUST win over first Some(3), got {:?}", other),
+        other => panic!(
+            "second Some(9) MUST win over first Some(3), got {:?}",
+            other
+        ),
     }
 }
 
@@ -6372,7 +6370,10 @@ fn subshell_end_after_loadtrue_stack_top_is_true() {
     vm.set_shell_host(Box::new(StatusReturningHost(36)));
     match vm.run() {
         VMResult::Ok(Value::Bool(true)) => {}
-        other => panic!("LoadTrue MUST be stack top after subshell_end, got {:?}", other),
+        other => panic!(
+            "LoadTrue MUST be stack top after subshell_end, got {:?}",
+            other
+        ),
     }
     assert_eq!(vm.last_status, 36);
 }
@@ -6401,7 +6402,10 @@ fn subshell_end_after_loadfalse_stack_top_is_false() {
     vm.set_shell_host(Box::new(StatusReturningHost(37)));
     match vm.run() {
         VMResult::Ok(Value::Bool(false)) => {}
-        other => panic!("LoadFalse MUST be stack top after subshell_end, got {:?}", other),
+        other => panic!(
+            "LoadFalse MUST be stack top after subshell_end, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6657,7 +6661,10 @@ fn subshell_twenty_one_end_incrementing_from_zero() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(20)) => {}
-        other => panic!("twenty-first subshell_end(Some(20)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-first subshell_end(Some(20)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6700,7 +6707,10 @@ fn subshell_twenty_two_end_incrementing_from_six() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
     match vm.run() {
         VMResult::Ok(Value::Status(27)) => {}
-        other => panic!("twenty-second subshell_end(Some(27)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-second subshell_end(Some(27)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6742,7 +6752,10 @@ fn subshell_twenty_three_end_incrementing_from_eight() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 8 }));
     match vm.run() {
         VMResult::Ok(Value::Status(30)) => {}
-        other => panic!("twenty-third subshell_end(Some(30)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-third subshell_end(Some(30)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6773,7 +6786,10 @@ fn subshell_twenty_four_end_incrementing_from_one() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 1 }));
     match vm.run() {
         VMResult::Ok(Value::Status(24)) => {}
-        other => panic!("twenty-fourth subshell_end(Some(24)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-fourth subshell_end(Some(24)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6804,7 +6820,10 @@ fn subshell_twenty_five_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(26)) => {}
-        other => panic!("twenty-fifth subshell_end(Some(26)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-fifth subshell_end(Some(26)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -6819,7 +6838,10 @@ fn request_halt_after_getstatus_leaves_status_on_stack_when_halt_follows() {
     vm.register_builtin(100, builtin_request_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("halt MUST return builtin Int(0), not Status(51), got {:?}", other),
+        other => panic!(
+            "halt MUST return builtin Int(0), not Status(51), got {:?}",
+            other
+        ),
     }
 }
 
@@ -7028,7 +7050,10 @@ fn subshell_end_after_manual_last_status_ninety_one() {
     vm.set_shell_host(Box::new(StatusReturningHost(52)));
     match vm.run() {
         VMResult::Ok(Value::Status(52)) => {}
-        other => panic!("Some(52) MUST overwrite manual last_status(91), got {:?}", other),
+        other => panic!(
+            "Some(52) MUST overwrite manual last_status(91), got {:?}",
+            other
+        ),
     }
 }
 
@@ -7071,7 +7096,10 @@ fn subshell_none_host_first_chunk_status_host_second_after_reset() {
     vm.reset(c2);
     match vm.run() {
         VMResult::Ok(Value::Status(53)) => {}
-        other => panic!("StatusReturningHost MUST apply Some(53) on reset chunk, got {:?}", other),
+        other => panic!(
+            "StatusReturningHost MUST apply Some(53) on reset chunk, got {:?}",
+            other
+        ),
     }
 }
 
@@ -7108,7 +7136,10 @@ fn subshell_halt_reset_subshell_end_twice_same_host() {
     vm.reset(chunk.clone());
     match vm.run() {
         VMResult::Ok(Value::Status(56)) => {}
-        other => panic!("second run after reset MUST get Status(56), got {:?}", other),
+        other => panic!(
+            "second run after reset MUST get Status(56), got {:?}",
+            other
+        ),
     }
 }
 
@@ -7210,7 +7241,10 @@ fn subshell_max_alone_on_single_end_getstatus() {
     vm.set_shell_host(Box::new(StatusReturningHost(i32::MAX)));
     match vm.run() {
         VMResult::Ok(Value::Status(i32::MAX)) => {}
-        other => panic!("i32::MAX MUST propagate on orphan SubshellEnd, got {:?}", other),
+        other => panic!(
+            "i32::MAX MUST propagate on orphan SubshellEnd, got {:?}",
+            other
+        ),
     }
 }
 
@@ -7239,7 +7273,10 @@ fn subshell_min_alone_on_single_end_getstatus() {
     vm.set_shell_host(Box::new(StatusReturningHost(i32::MIN)));
     match vm.run() {
         VMResult::Ok(Value::Status(i32::MIN)) => {}
-        other => panic!("i32::MIN MUST propagate on orphan SubshellEnd, got {:?}", other),
+        other => panic!(
+            "i32::MIN MUST propagate on orphan SubshellEnd, got {:?}",
+            other
+        ),
     }
 }
 
@@ -7264,7 +7301,10 @@ fn request_halt_subshell_then_halt_then_reset_getstatus_zero() {
     vm.reset(status);
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("reset MUST zero last_status before GetStatus, got {:?}", other),
+        other => panic!(
+            "reset MUST zero last_status before GetStatus, got {:?}",
+            other
+        ),
     }
 }
 
@@ -8124,7 +8164,10 @@ fn subshell_twenty_six_end_incrementing_from_ten() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(35)) => {}
-        other => panic!("twenty-sixth subshell_end(Some(35)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-sixth subshell_end(Some(35)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -8161,7 +8204,10 @@ fn subshell_twenty_seven_end_incrementing_from_thirteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 13 }));
     match vm.run() {
         VMResult::Ok(Value::Status(39)) => {}
-        other => panic!("twenty-seventh subshell_end(Some(39)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-seventh subshell_end(Some(39)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -8336,7 +8382,10 @@ fn subshell_twenty_eight_end_incrementing_from_five() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 5 }));
     match vm.run() {
         VMResult::Ok(Value::Status(32)) => {}
-        other => panic!("twenty-eighth subshell_end(Some(32)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-eighth subshell_end(Some(32)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -8377,7 +8426,10 @@ fn subshell_twenty_nine_end_incrementing_from_seventeen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 17 }));
     match vm.run() {
         VMResult::Ok(Value::Status(45)) => {}
-        other => panic!("twenty-ninth subshell_end(Some(45)) MUST win, got {:?}", other),
+        other => panic!(
+            "twenty-ninth subshell_end(Some(45)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -8462,7 +8514,10 @@ fn request_halt_halt_only_after_loadint_returns_undef_not_int() {
     vm.register_builtin(61, builtin_halt_only);
     match vm.run() {
         VMResult::Ok(Value::Undef) => {}
-        other => panic!("halt_only MUST return Undef over LoadInt(99), got {:?}", other),
+        other => panic!(
+            "halt_only MUST return Undef over LoadInt(99), got {:?}",
+            other
+        ),
     }
 }
 
@@ -8519,7 +8574,10 @@ fn request_halt_stops_before_second_call_in_caller_after_callee_returns() {
     vm.register_builtin(100, builtin_request_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("halt MUST be stack top after callee+outer builtin, got {:?}", other),
+        other => panic!(
+            "halt MUST be stack top after callee+outer builtin, got {:?}",
+            other
+        ),
     }
     assert_eq!(OUTER_CALLS.load(Ordering::SeqCst), 1);
 }
@@ -8534,7 +8592,10 @@ fn subshell_pipeline_end_then_subshell_end_getstatus_reads_subshell() {
     vm.set_shell_host(Box::new(PipelineThenSubshellHost));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("GetStatus MUST read subshell(9) not pipeline(3), got {:?}", other),
+        other => panic!(
+            "GetStatus MUST read subshell(9) not pipeline(3), got {:?}",
+            other
+        ),
     }
 }
 
@@ -8743,7 +8804,10 @@ fn request_halt_empty_chunk_after_reset_on_pre_run_halt() {
     vm.request_halt();
     match vm.run() {
         VMResult::Halted => {}
-        other => panic!("pre-run halt on empty chunk MUST return Halted, got {:?}", other),
+        other => panic!(
+            "pre-run halt on empty chunk MUST return Halted, got {:?}",
+            other
+        ),
     }
     vm.reset(run);
     let _ = vm.run();
@@ -8809,7 +8873,10 @@ fn subshell_end_between_two_setstatus_second_end_wins() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 30 }));
     match vm.run() {
         VMResult::Ok(Value::Status(31)) => {}
-        other => panic!("second end Some(31) MUST beat SetStatus(20), got {:?}", other),
+        other => panic!(
+            "second end Some(31) MUST beat SetStatus(20), got {:?}",
+            other
+        ),
     }
 }
 
@@ -8838,7 +8905,10 @@ fn subshell_triple_getstatus_after_single_end_all_read_same() {
     vm.set_shell_host(Box::new(StatusReturningHost(79)));
     match vm.run() {
         VMResult::Ok(Value::Status(79)) => {}
-        other => panic!("top GetStatus(79) MUST win over deeper copies, got {:?}", other),
+        other => panic!(
+            "top GetStatus(79) MUST win over deeper copies, got {:?}",
+            other
+        ),
     }
 }
 
@@ -8951,7 +9021,10 @@ fn request_halt_full_lifecycle_host_swap_reset_getstatus() {
     vm.reset(c2);
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("DefaultHost after reset MUST leave last_status(0), got {:?}", other),
+        other => panic!(
+            "DefaultHost after reset MUST leave last_status(0), got {:?}",
+            other
+        ),
     }
 }
 
@@ -8977,7 +9050,10 @@ fn subshell_end_after_halt_reset_on_same_vm_reads_new_host_status() {
     vm.reset(sub);
     match vm.run() {
         VMResult::Ok(Value::Status(83)) => {}
-        other => panic!("swapped host MUST apply Some(83) after reset, got {:?}", other),
+        other => panic!(
+            "swapped host MUST apply Some(83) after reset, got {:?}",
+            other
+        ),
     }
 }
 
@@ -9108,7 +9184,10 @@ fn subshell_first_some_then_none_on_second_end_preserves_first() {
     }));
     match vm.run() {
         VMResult::Ok(Value::Status(87)) => {}
-        other => panic!("FirstSomeThenNoneHost MUST preserve Some(87), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost MUST preserve Some(87), got {:?}",
+            other
+        ),
     }
 }
 
@@ -9123,7 +9202,10 @@ fn request_halt_after_getstatus_does_not_pop_status_before_halt_builtin() {
     vm.register_builtin(100, builtin_request_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("run MUST return halt builtin, not Status(88), got {:?}", other),
+        other => panic!(
+            "run MUST return halt builtin, not Status(88), got {:?}",
+            other
+        ),
     }
 }
 
@@ -9467,7 +9549,10 @@ fn request_halt_callee_returnvalue_before_halt_in_caller_stack_top_is_halt() {
     vm.register_builtin(100, builtin_request_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("halt MUST be stack top over ReturnValue(3), got {:?}", other),
+        other => panic!(
+            "halt MUST be stack top over ReturnValue(3), got {:?}",
+            other
+        ),
     }
 }
 
@@ -9674,7 +9759,10 @@ fn subshell_thirty_one_end_incrementing_from_twenty_one() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 21 }));
     match vm.run() {
         VMResult::Ok(Value::Status(51)) => {}
-        other => panic!("thirty-first subshell_end(Some(51)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-first subshell_end(Some(51)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -9708,7 +9796,10 @@ fn subshell_thirty_two_end_incrementing_from_fourteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 14 }));
     match vm.run() {
         VMResult::Ok(Value::Status(45)) => {}
-        other => panic!("thirty-second subshell_end(Some(45)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-second subshell_end(Some(45)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -10170,7 +10261,10 @@ fn subshell_thirty_three_end_incrementing_from_sixteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 16 }));
     match vm.run() {
         VMResult::Ok(Value::Status(48)) => {}
-        other => panic!("thirty-third subshell_end(Some(48)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-third subshell_end(Some(48)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -10204,7 +10298,10 @@ fn subshell_thirty_four_end_incrementing_from_nineteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 19 }));
     match vm.run() {
         VMResult::Ok(Value::Status(52)) => {}
-        other => panic!("thirty-fourth subshell_end(Some(52)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-fourth subshell_end(Some(52)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -10225,7 +10322,10 @@ fn request_halt_nested_callee_halt_caller_never_reaches_loadint() {
     vm.register_builtin(100, builtin_request_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("caller LoadInt MUST NOT run after callee halt, got {:?}", other),
+        other => panic!(
+            "caller LoadInt MUST NOT run after callee halt, got {:?}",
+            other
+        ),
     }
 }
 
@@ -10240,7 +10340,10 @@ fn subshell_thirty_five_end_incrementing_from_twenty_three() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 23 }));
     match vm.run() {
         VMResult::Ok(Value::Status(57)) => {}
-        other => panic!("thirty-fifth subshell_end(Some(57)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-fifth subshell_end(Some(57)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -10481,7 +10584,10 @@ fn subshell_setstatus_after_end_before_getstatus_reads_setstatus() {
     vm.set_shell_host(Box::new(StatusReturningHost(50)));
     match vm.run() {
         VMResult::Ok(Value::Status(109)) => {}
-        other => panic!("SetStatus(109) MUST beat subshell Some(50), got {:?}", other),
+        other => panic!(
+            "SetStatus(109) MUST beat subshell Some(50), got {:?}",
+            other
+        ),
     }
 }
 
@@ -10618,7 +10724,10 @@ fn subshell_alternating_host_fifth_end_none_keeps_nine() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost fifth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost fifth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -11185,7 +11294,10 @@ fn subshell_thirty_six_end_incrementing_from_four() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
     match vm.run() {
         VMResult::Ok(Value::Status(39)) => {}
-        other => panic!("thirty-sixth subshell_end(Some(39)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-sixth subshell_end(Some(39)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -11214,7 +11326,10 @@ fn subshell_thirty_seven_end_incrementing_from_nine() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
     match vm.run() {
         VMResult::Ok(Value::Status(45)) => {}
-        other => panic!("thirty-seventh subshell_end(Some(45)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-seventh subshell_end(Some(45)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -11242,7 +11357,10 @@ fn subshell_thirty_eight_end_incrementing_from_twelve() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 12 }));
     match vm.run() {
         VMResult::Ok(Value::Status(49)) => {}
-        other => panic!("thirty-eighth subshell_end(Some(49)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-eighth subshell_end(Some(49)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -11271,7 +11389,10 @@ fn subshell_thirty_nine_end_incrementing_from_fifteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 15 }));
     match vm.run() {
         VMResult::Ok(Value::Status(53)) => {}
-        other => panic!("thirty-ninth subshell_end(Some(53)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirty-ninth subshell_end(Some(53)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -11475,7 +11596,10 @@ fn subshell_eleventh_some_host_applies_on_eleventh_end() {
     vm.set_shell_host(Box::new(EleventhSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(121)) => {}
-        other => panic!("eleventh subshell_end(Some(121)) MUST apply, got {:?}", other),
+        other => panic!(
+            "eleventh subshell_end(Some(121)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -11759,7 +11883,10 @@ fn subshell_setstatus_before_end_some_host_overwrites_setstatus() {
     vm.set_shell_host(Box::new(StatusReturningHost(203)));
     match vm.run() {
         VMResult::Ok(Value::Status(203)) => {}
-        other => panic!("subshell Some(203) MUST beat SetStatus(203), got {:?}", other),
+        other => panic!(
+            "subshell Some(203) MUST beat SetStatus(203), got {:?}",
+            other
+        ),
     }
 }
 
@@ -11868,7 +11995,10 @@ fn subshell_alternating_status_sixth_none_keeps_fifth_nine() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost sixth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost sixth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -11928,7 +12058,10 @@ fn subshell_counting_end_host_two_ends_same_status() {
     vm.set_shell_host(Box::new(CountingSubshellEndHost(208)));
     match vm.run() {
         VMResult::Ok(Value::Status(208)) => {}
-        other => panic!("second subshell_end MUST still apply Some(208), got {:?}", other),
+        other => panic!(
+            "second subshell_end MUST still apply Some(208), got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 2);
 }
@@ -11987,7 +12120,10 @@ fn subshell_setstatus_zero_before_end_some_overwrites_zero() {
     vm.set_shell_host(Box::new(StatusReturningHost(210)));
     match vm.run() {
         VMResult::Ok(Value::Status(210)) => {}
-        other => panic!("subshell Some(210) MUST overwrite SetStatus(0), got {:?}", other),
+        other => panic!(
+            "subshell Some(210) MUST overwrite SetStatus(0), got {:?}",
+            other
+        ),
     }
 }
 
@@ -12026,7 +12162,10 @@ fn request_halt_callee_two_args_return_before_caller_halt() {
     vm.register_builtin(200, builtin_count_after_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("halt MUST be stack top after callee return, got {:?}", other),
+        other => panic!(
+            "halt MUST be stack top after callee return, got {:?}",
+            other
+        ),
     }
     assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
 }
@@ -12187,7 +12326,10 @@ fn subshell_double_getstatus_after_end_same_value() {
     vm.set_shell_host(Box::new(StatusReturningHost(216)));
     match vm.run() {
         VMResult::Ok(Value::Status(216)) => {}
-        other => panic!("second GetStatus MUST still read Status(216), got {:?}", other),
+        other => panic!(
+            "second GetStatus MUST still read Status(216), got {:?}",
+            other
+        ),
     }
 }
 
@@ -12247,7 +12389,10 @@ fn subshell_end_orphan_after_none_host_leaves_prior_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(218)) => {}
-        other => panic!("NoneHost orphan end MUST preserve last_status 218, got {:?}", other),
+        other => panic!(
+            "NoneHost orphan end MUST preserve last_status 218, got {:?}",
+            other
+        ),
     }
 }
 
@@ -12317,7 +12462,10 @@ fn subshell_begin_counting_host_without_matching_end_leaves_status() {
     vm.set_shell_host(Box::new(BeginEndCountingHost(220)));
     match vm.run() {
         VMResult::Ok(Value::Status(220)) => {}
-        other => panic!("SubshellBegin alone MUST NOT change last_status, got {:?}", other),
+        other => panic!(
+            "SubshellBegin alone MUST NOT change last_status, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 2);
 }
@@ -12437,7 +12585,10 @@ fn subshell_forty_one_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(42)) => {}
-        other => panic!("forty-first subshell_end(Some(42)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-first subshell_end(Some(42)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -12517,7 +12668,10 @@ fn subshell_twelfth_some_host_applies_on_twelfth_end() {
     vm.set_shell_host(Box::new(TwelfthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(224)) => {}
-        other => panic!("twelfth subshell_end(Some(224)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twelfth subshell_end(Some(224)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -12782,7 +12936,10 @@ fn subshell_forty_two_end_incrementing_from_three() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(44)) => {}
-        other => panic!("forty-second subshell_end(Some(44)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-second subshell_end(Some(44)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -12866,7 +13023,10 @@ fn subshell_forty_three_end_incrementing_from_five() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 5 }));
     match vm.run() {
         VMResult::Ok(Value::Status(47)) => {}
-        other => panic!("forty-third subshell_end(Some(47)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-third subshell_end(Some(47)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -12935,7 +13095,10 @@ fn subshell_thirteenth_some_host_applies_on_thirteenth_end() {
     vm.set_shell_host(Box::new(ThirteenthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(237)) => {}
-        other => panic!("thirteenth subshell_end(Some(237)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirteenth subshell_end(Some(237)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -13049,7 +13212,10 @@ fn subshell_forty_four_end_incrementing_from_eight() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 8 }));
     match vm.run() {
         VMResult::Ok(Value::Status(51)) => {}
-        other => panic!("forty-fourth subshell_end(Some(51)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-fourth subshell_end(Some(51)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -13149,7 +13315,10 @@ fn subshell_forty_five_end_incrementing_from_eleven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 11 }));
     match vm.run() {
         VMResult::Ok(Value::Status(55)) => {}
-        other => panic!("forty-fifth subshell_end(Some(55)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(55)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -13256,7 +13425,10 @@ fn subshell_four_end_alternating_host_last_some_wins() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("fourth AlternatingStatusHost end MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "fourth AlternatingStatusHost end MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -13466,7 +13638,10 @@ fn subshell_forty_six_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(47)) => {}
-        other => panic!("forty-sixth subshell_end(Some(47)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(47)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -13521,7 +13696,10 @@ fn subshell_forty_seven_end_incrementing_from_six() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
     match vm.run() {
         VMResult::Ok(Value::Status(52)) => {}
-        other => panic!("forty-seventh subshell_end(Some(52)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(52)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -13590,7 +13768,10 @@ fn subshell_fourteenth_some_host_applies_on_fourteenth_end() {
     vm.set_shell_host(Box::new(FourteenthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(259)) => {}
-        other => panic!("fourteenth subshell_end(Some(259)) MUST apply, got {:?}", other),
+        other => panic!(
+            "fourteenth subshell_end(Some(259)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -13645,7 +13826,10 @@ fn subshell_forty_eight_end_incrementing_from_ten() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(57)) => {}
-        other => panic!("forty-eighth subshell_end(Some(57)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(57)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -13708,7 +13892,10 @@ fn request_halt_callee_zero_args_return_before_caller_halt() {
     vm.register_builtin(200, builtin_count_after_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("halt MUST be stack top after zero-arg callee, got {:?}", other),
+        other => panic!(
+            "halt MUST be stack top after zero-arg callee, got {:?}",
+            other
+        ),
     }
     assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
 }
@@ -14010,7 +14197,10 @@ fn subshell_max_then_zero_second_end_overwrites() {
     vm.set_shell_host(Box::new(MaxThenZeroHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST overwrite MAX, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST overwrite MAX, got {:?}",
+            other
+        ),
     }
 }
 
@@ -14113,7 +14303,10 @@ fn subshell_fifteenth_some_host_applies_on_fifteenth_end() {
     vm.set_shell_host(Box::new(FifteenthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(275)) => {}
-        other => panic!("fifteenth subshell_end(Some(275)) MUST apply, got {:?}", other),
+        other => panic!(
+            "fifteenth subshell_end(Some(275)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -14160,7 +14353,10 @@ fn subshell_forty_nine_end_incrementing_from_thirteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 13 }));
     match vm.run() {
         VMResult::Ok(Value::Status(61)) => {}
-        other => panic!("forty-ninth subshell_end(Some(61)) MUST win, got {:?}", other),
+        other => panic!(
+            "forty-ninth subshell_end(Some(61)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -14462,7 +14658,10 @@ fn subshell_fifty_one_end_incrementing_from_seven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
     match vm.run() {
         VMResult::Ok(Value::Status(57)) => {}
-        other => panic!("fifty-first subshell_end(Some(57)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-first subshell_end(Some(57)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -14585,7 +14784,10 @@ fn subshell_sixteenth_some_host_applies_on_sixteenth_end() {
     vm.set_shell_host(Box::new(SixteenthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(290)) => {}
-        other => panic!("sixteenth subshell_end(Some(290)) MUST apply, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(290)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -14836,7 +15038,10 @@ fn subshell_alternating_status_eighth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost eighth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost eighth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -15166,7 +15371,10 @@ fn subshell_fifty_two_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(53)) => {}
-        other => panic!("fifty-second subshell_end(Some(53)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-second subshell_end(Some(53)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -15221,7 +15429,10 @@ fn subshell_fifty_three_end_incrementing_from_nine() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
     match vm.run() {
         VMResult::Ok(Value::Status(61)) => {}
-        other => panic!("fifty-third subshell_end(Some(61)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-third subshell_end(Some(61)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -15370,7 +15581,10 @@ fn subshell_seventeenth_some_host_applies_on_seventeenth_end() {
     vm.set_shell_host(Box::new(SeventeenthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(315)) => {}
-        other => panic!("seventeenth subshell_end(Some(315)) MUST apply, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(315)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -15412,7 +15626,10 @@ fn subshell_eighteenth_some_host_applies_on_eighteenth_end() {
     vm.set_shell_host(Box::new(EighteenthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(316)) => {}
-        other => panic!("eighteenth subshell_end(Some(316)) MUST apply, got {:?}", other),
+        other => panic!(
+            "eighteenth subshell_end(Some(316)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -15558,7 +15775,10 @@ fn request_halt_callee_one_arg_before_caller_halt() {
     vm.register_builtin(200, builtin_count_after_halt);
     match vm.run() {
         VMResult::Ok(Value::Int(0)) => {}
-        other => panic!("halt MUST be stack top after one-arg callee, got {:?}", other),
+        other => panic!(
+            "halt MUST be stack top after one-arg callee, got {:?}",
+            other
+        ),
     }
     assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
 }
@@ -15602,7 +15822,10 @@ fn subshell_none_none_some_none_some_host_pattern() {
     vm.set_shell_host(Box::new(NoneNoneSomeNoneSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(322)) => {}
-        other => panic!("fifth end Some(322) MUST beat third Some(321), got {:?}", other),
+        other => panic!(
+            "fifth end Some(322) MUST beat third Some(321), got {:?}",
+            other
+        ),
     }
 }
 
@@ -15665,7 +15888,10 @@ fn subshell_subshell_end_then_pipeline_end_getstatus_reads_pipeline() {
     vm.set_shell_host(Box::new(PipelineThenSubshellHost));
     match vm.run() {
         VMResult::Ok(Value::Status(3)) => {}
-        other => panic!("GetStatus MUST read pipeline_end(3) after subshell Some(9), got {:?}", other),
+        other => panic!(
+            "GetStatus MUST read pipeline_end(3) after subshell Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -15735,7 +15961,10 @@ fn subshell_min_then_zero_second_end_overwrites() {
     vm.set_shell_host(Box::new(MinThenZeroHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST overwrite MIN, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST overwrite MIN, got {:?}",
+            other
+        ),
     }
 }
 
@@ -15829,7 +16058,10 @@ fn subshell_fifty_four_end_incrementing_from_five() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 5 }));
     match vm.run() {
         VMResult::Ok(Value::Status(58)) => {}
-        other => panic!("fifty-fourth subshell_end(Some(58)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-fourth subshell_end(Some(58)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -15906,7 +16138,10 @@ fn subshell_nineteenth_some_host_applies_on_nineteenth_end() {
     vm.set_shell_host(Box::new(NineteenthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(330)) => {}
-        other => panic!("nineteenth subshell_end(Some(330)) MUST apply, got {:?}", other),
+        other => panic!(
+            "nineteenth subshell_end(Some(330)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -16204,7 +16439,10 @@ fn subshell_fifty_five_end_incrementing_from_six() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
     match vm.run() {
         VMResult::Ok(Value::Status(60)) => {}
-        other => panic!("fifty-fifth subshell_end(Some(60)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-fifth subshell_end(Some(60)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -16259,7 +16497,10 @@ fn subshell_fifty_six_end_incrementing_from_eleven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 11 }));
     match vm.run() {
         VMResult::Ok(Value::Status(66)) => {}
-        other => panic!("fifty-sixth subshell_end(Some(66)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-sixth subshell_end(Some(66)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -16408,7 +16649,10 @@ fn subshell_twentieth_some_host_applies_on_twentieth_end() {
     vm.set_shell_host(Box::new(TwentiethSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(347)) => {}
-        other => panic!("twentieth subshell_end(Some(347)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twentieth subshell_end(Some(347)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -16730,7 +16974,10 @@ fn subshell_alternating_status_tenth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost tenth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost tenth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -16792,7 +17039,10 @@ fn subshell_fifty_seven_end_incrementing_from_three() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(59)) => {}
-        other => panic!("fifty-seventh subshell_end(Some(59)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-seventh subshell_end(Some(59)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -16924,7 +17174,10 @@ fn subshell_fifty_eight_end_incrementing_from_eight() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 8 }));
     match vm.run() {
         VMResult::Ok(Value::Status(65)) => {}
-        other => panic!("fifty-eighth subshell_end(Some(65)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-eighth subshell_end(Some(65)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -17046,7 +17299,10 @@ fn subshell_twenty_first_some_host_applies_on_twenty_first_end() {
     vm.set_shell_host(Box::new(TwentyFirstSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(367)) => {}
-        other => panic!("twenty-first subshell_end(Some(367)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-first subshell_end(Some(367)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -17089,7 +17345,10 @@ fn subshell_twenty_second_some_host_applies_on_twenty_second_end() {
     vm.set_shell_host(Box::new(TwentySecondSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(368)) => {}
-        other => panic!("twenty-second subshell_end(Some(368)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-second subshell_end(Some(368)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -17274,7 +17533,10 @@ fn subshell_zero_then_negative_second_end_overwrites() {
     vm.set_shell_host(Box::new(ZeroThenNegativeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(-51)) => {}
-        other => panic!("second subshell_end(Some(-51)) MUST overwrite zero, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(-51)) MUST overwrite zero, got {:?}",
+            other
+        ),
     }
 }
 
@@ -17332,7 +17594,10 @@ fn subshell_fifty_nine_end_incrementing_from_twelve() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 12 }));
     match vm.run() {
         VMResult::Ok(Value::Status(70)) => {}
-        other => panic!("fifty-ninth subshell_end(Some(70)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifty-ninth subshell_end(Some(70)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -17683,7 +17948,10 @@ fn subshell_twenty_third_some_host_applies_on_twenty_third_end() {
     vm.set_shell_host(Box::new(TwentyThirdSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(385)) => {}
-        other => panic!("twenty-third subshell_end(Some(385)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-third subshell_end(Some(385)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -17979,7 +18247,10 @@ fn subshell_sixty_one_end_incrementing_from_five() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 5 }));
     match vm.run() {
         VMResult::Ok(Value::Status(65)) => {}
-        other => panic!("sixty-first subshell_end(Some(65)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-first subshell_end(Some(65)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -18034,7 +18305,10 @@ fn subshell_sixty_two_end_incrementing_from_ten() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(71)) => {}
-        other => panic!("sixty-second subshell_end(Some(71)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-second subshell_end(Some(71)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -18183,7 +18457,10 @@ fn subshell_twenty_fourth_some_host_applies_on_twenty_fourth_end() {
     vm.set_shell_host(Box::new(TwentyFourthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(402)) => {}
-        other => panic!("twenty-fourth subshell_end(Some(402)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-fourth subshell_end(Some(402)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -18448,7 +18725,10 @@ fn subshell_alternating_status_twelfth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twelfth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twelfth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -18510,7 +18790,10 @@ fn subshell_sixty_three_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(64)) => {}
-        other => panic!("sixty-third subshell_end(Some(64)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-third subshell_end(Some(64)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -18767,7 +19050,10 @@ fn subshell_sixty_four_end_incrementing_from_seven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
     match vm.run() {
         VMResult::Ok(Value::Status(70)) => {}
-        other => panic!("sixty-fourth subshell_end(Some(70)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-fourth subshell_end(Some(70)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -18889,7 +19175,10 @@ fn subshell_twenty_fifth_some_host_applies_on_twenty_fifth_end() {
     vm.set_shell_host(Box::new(TwentyFifthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(424)) => {}
-        other => panic!("twenty-fifth subshell_end(Some(424)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-fifth subshell_end(Some(424)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -18932,7 +19221,10 @@ fn subshell_twenty_sixth_some_host_applies_on_twenty_sixth_end() {
     vm.set_shell_host(Box::new(TwentySixthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(425)) => {}
-        other => panic!("twenty-sixth subshell_end(Some(425)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-sixth subshell_end(Some(425)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -19052,7 +19344,10 @@ fn subshell_negative_then_zero_second_end_overwrites() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST overwrite -61, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST overwrite -61, got {:?}",
+            other
+        ),
     }
 }
 
@@ -19110,7 +19405,10 @@ fn subshell_sixty_five_end_incrementing_from_fourteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 14 }));
     match vm.run() {
         VMResult::Ok(Value::Status(78)) => {}
-        other => panic!("sixty-fifth subshell_end(Some(78)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-fifth subshell_end(Some(78)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -19340,7 +19638,10 @@ fn subshell_sixty_six_end_incrementing_from_three() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(68)) => {}
-        other => panic!("sixty-sixth subshell_end(Some(68)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-sixth subshell_end(Some(68)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -19415,7 +19716,10 @@ fn subshell_twenty_seventh_some_host_applies_on_twenty_seventh_end() {
     vm.set_shell_host(Box::new(TwentySeventhSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(439)) => {}
-        other => panic!("twenty-seventh subshell_end(Some(439)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-seventh subshell_end(Some(439)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -19764,7 +20068,10 @@ fn subshell_sixty_seven_end_incrementing_from_six() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
     match vm.run() {
         VMResult::Ok(Value::Status(72)) => {}
-        other => panic!("sixty-seventh subshell_end(Some(72)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-seventh subshell_end(Some(72)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -19819,7 +20126,10 @@ fn subshell_sixty_eight_end_incrementing_from_eleven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 11 }));
     match vm.run() {
         VMResult::Ok(Value::Status(78)) => {}
-        other => panic!("sixty-eighth subshell_end(Some(78)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-eighth subshell_end(Some(78)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -19968,7 +20278,10 @@ fn subshell_twenty_eighth_some_host_applies_on_twenty_eighth_end() {
     vm.set_shell_host(Box::new(TwentyEighthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(457)) => {}
-        other => panic!("twenty-eighth subshell_end(Some(457)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-eighth subshell_end(Some(457)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -20187,7 +20500,10 @@ fn subshell_alternating_status_fourteenth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost fourteenth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost fourteenth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -20249,7 +20565,10 @@ fn subshell_sixty_nine_end_incrementing_from_four() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
     match vm.run() {
         VMResult::Ok(Value::Status(72)) => {}
-        other => panic!("sixty-ninth subshell_end(Some(72)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixty-ninth subshell_end(Some(72)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -20537,7 +20856,10 @@ fn subshell_seventy_end_incrementing_from_one() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 1 }));
     match vm.run() {
         VMResult::Ok(Value::Status(70)) => {}
-        other => panic!("seventieth subshell_end(Some(70)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventieth subshell_end(Some(70)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -20699,7 +21021,10 @@ fn subshell_twenty_ninth_some_host_applies_on_twenty_ninth_end() {
     vm.set_shell_host(Box::new(TwentyNinthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(480)) => {}
-        other => panic!("twenty-ninth subshell_end(Some(480)) MUST apply, got {:?}", other),
+        other => panic!(
+            "twenty-ninth subshell_end(Some(480)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -20914,10 +21239,16 @@ fn subshell_first_some_then_none_host_fifteenth_none_keeps_first() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 486 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 486,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(486)) => {}
-        other => panic!("FirstSomeThenNoneHost fifteenth None MUST keep first Some(486), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost fifteenth None MUST keep first Some(486), got {:?}",
+            other
+        ),
     }
 }
 
@@ -20978,7 +21309,10 @@ fn subshell_seventy_one_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(72)) => {}
-        other => panic!("seventy-first subshell_end(Some(72)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-first subshell_end(Some(72)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -21150,7 +21484,10 @@ fn subshell_thirtieth_some_host_applies_on_thirtieth_end() {
     vm.set_shell_host(Box::new(ThirtiethSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(493)) => {}
-        other => panic!("thirtieth subshell_end(Some(493)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirtieth subshell_end(Some(493)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -21188,7 +21525,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_494() {
     vm.set_shell_host(Box::new(PipelineSubshellHost494));
     match vm.run() {
         VMResult::Ok(Value::Status(494)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 494, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 494, got {:?}",
+            other
+        ),
     }
 }
 
@@ -21217,7 +21557,10 @@ fn subshell_none_host_fifteen_ends_leaves_initial_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(495)) => {}
-        other => panic!("NoneHost fifteen ends MUST leave last_status 495, got {:?}", other),
+        other => panic!(
+            "NoneHost fifteen ends MUST leave last_status 495, got {:?}",
+            other
+        ),
     }
 }
 
@@ -21245,7 +21588,10 @@ fn request_halt_pre_run_empty_stack_then_subshell_end_status496() {
     vm.set_shell_host(Box::new(StatusReturningHost(496)));
     match vm.run() {
         VMResult::Halted => {}
-        other => panic!("pre-run halt empty stack MUST Halted before subshell_end, got {:?}", other),
+        other => panic!(
+            "pre-run halt empty stack MUST Halted before subshell_end, got {:?}",
+            other
+        ),
     }
 }
 
@@ -21285,7 +21631,10 @@ fn subshell_negative_then_zero_host_last_zero_wins() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost496 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -73, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -73, got {:?}",
+            other
+        ),
     }
 }
 
@@ -21447,7 +21796,10 @@ fn subshell_seventy_two_end_incrementing_from_three() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(74)) => {}
-        other => panic!("seventy-second subshell_end(Some(74)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-second subshell_end(Some(74)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -21542,7 +21894,10 @@ fn subshell_thirty_first_some_host_applies_on_thirty_first_end() {
     vm.set_shell_host(Box::new(ThirtyFirstSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(506)) => {}
-        other => panic!("thirty-first subshell_end(Some(506)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-first subshell_end(Some(506)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -21761,7 +22116,10 @@ fn subshell_alternating_status_fifteenth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost fifteenth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost fifteenth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -21823,7 +22181,10 @@ fn subshell_seventy_three_end_incrementing_from_five() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 5 }));
     match vm.run() {
         VMResult::Ok(Value::Status(77)) => {}
-        other => panic!("seventy-third subshell_end(Some(77)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-third subshell_end(Some(77)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -22086,7 +22447,10 @@ fn subshell_seventy_four_end_incrementing_from_eight() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 8 }));
     match vm.run() {
         VMResult::Ok(Value::Status(81)) => {}
-        other => panic!("seventy-fourth subshell_end(Some(81)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-fourth subshell_end(Some(81)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -22250,7 +22614,10 @@ fn subshell_seventy_five_end_incrementing_from_nine() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
     match vm.run() {
         VMResult::Ok(Value::Status(83)) => {}
-        other => panic!("seventy-fifth subshell_end(Some(83)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-fifth subshell_end(Some(83)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -22372,7 +22739,10 @@ fn subshell_thirty_second_some_host_applies_on_thirty_second_end() {
     vm.set_shell_host(Box::new(ThirtySecondSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(532)) => {}
-        other => panic!("thirty-second subshell_end(Some(532)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-second subshell_end(Some(532)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -22625,7 +22995,10 @@ fn subshell_seventy_six_end_incrementing_from_twelve() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 12 }));
     match vm.run() {
         VMResult::Ok(Value::Status(87)) => {}
-        other => panic!("seventy-sixth subshell_end(Some(87)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-sixth subshell_end(Some(87)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -22762,7 +23135,10 @@ fn subshell_thirty_third_some_host_applies_on_thirty_third_end() {
     vm.set_shell_host(Box::new(ThirtyThirdSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(543)) => {}
-        other => panic!("thirty-third subshell_end(Some(543)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-third subshell_end(Some(543)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -22787,10 +23163,16 @@ fn subshell_first_some_then_none_host_sixteenth_none_keeps_first() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 544 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 544,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(544)) => {}
-        other => panic!("FirstSomeThenNoneHost sixteenth None MUST keep first Some(544), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost sixteenth None MUST keep first Some(544), got {:?}",
+            other
+        ),
     }
 }
 
@@ -22853,7 +23235,10 @@ fn subshell_none_host_sixteen_ends_leaves_initial_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(546)) => {}
-        other => panic!("NoneHost sixteen ends MUST leave last_status 546, got {:?}", other),
+        other => panic!(
+            "NoneHost sixteen ends MUST leave last_status 546, got {:?}",
+            other
+        ),
     }
 }
 
@@ -22894,7 +23279,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status547() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost547 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -79, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -79, got {:?}",
+            other
+        ),
     }
 }
 
@@ -22982,7 +23370,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_549() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost549));
     match vm.run() {
         VMResult::Ok(Value::Status(549)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 549, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 549, got {:?}",
+            other
+        ),
     }
 }
 
@@ -23010,7 +23401,10 @@ fn subshell_seventy_seven_end_incrementing_from_one() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 1 }));
     match vm.run() {
         VMResult::Ok(Value::Status(77)) => {}
-        other => panic!("seventy-seventh subshell_end(Some(77)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-seventh subshell_end(Some(77)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -23102,7 +23496,10 @@ fn subshell_alternating_status_sixteenth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost sixteenth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost sixteenth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -23234,7 +23631,10 @@ fn subshell_seventy_eight_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(79)) => {}
-        other => panic!("seventy-eighth subshell_end(Some(79)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-eighth subshell_end(Some(79)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -23329,7 +23729,10 @@ fn subshell_thirty_fourth_some_host_applies_on_thirty_fourth_end() {
     vm.set_shell_host(Box::new(ThirtyFourthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(561)) => {}
-        other => panic!("thirty-fourth subshell_end(Some(561)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-fourth subshell_end(Some(561)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -23581,7 +23984,10 @@ fn subshell_seventy_nine_end_incrementing_from_six() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
     match vm.run() {
         VMResult::Ok(Value::Status(84)) => {}
-        other => panic!("seventy-ninth subshell_end(Some(84)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventy-ninth subshell_end(Some(84)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -23857,7 +24263,10 @@ fn subshell_none_host_seventeen_ends_leaves_initial_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(577)) => {}
-        other => panic!("NoneHost seventeen ends MUST leave last_status 577, got {:?}", other),
+        other => panic!(
+            "NoneHost seventeen ends MUST leave last_status 577, got {:?}",
+            other
+        ),
     }
 }
 
@@ -23883,10 +24292,16 @@ fn subshell_first_some_then_none_host_seventeenth_none_keeps_first() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 578 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 578,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(578)) => {}
-        other => panic!("FirstSomeThenNoneHost seventeenth None MUST keep first Some(578), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost seventeenth None MUST keep first Some(578), got {:?}",
+            other
+        ),
     }
 }
 
@@ -24018,7 +24433,10 @@ fn subshell_eighty_one_end_incrementing_from_fifteen() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 15 }));
     match vm.run() {
         VMResult::Ok(Value::Status(95)) => {}
-        other => panic!("eighty-first subshell_end(Some(95)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-first subshell_end(Some(95)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -24113,7 +24531,10 @@ fn subshell_thirty_fifth_some_host_applies_on_thirty_fifth_end() {
     vm.set_shell_host(Box::new(ThirtyFifthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(586)) => {}
-        other => panic!("thirty-fifth subshell_end(Some(586)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-fifth subshell_end(Some(586)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -24374,7 +24795,10 @@ fn subshell_eighty_two_end_incrementing_from_four() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
     match vm.run() {
         VMResult::Ok(Value::Status(85)) => {}
-        other => panic!("eighty-second subshell_end(Some(85)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-second subshell_end(Some(85)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -24453,7 +24877,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status595() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost595 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -85, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -85, got {:?}",
+            other
+        ),
     }
 }
 
@@ -24525,7 +24952,10 @@ fn subshell_thirty_sixth_some_host_applies_on_thirty_sixth_end() {
     vm.set_shell_host(Box::new(ThirtySixthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(597)) => {}
-        other => panic!("thirty-sixth subshell_end(Some(597)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-sixth subshell_end(Some(597)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -24553,7 +24983,10 @@ fn subshell_alternating_status_seventeenth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost seventeenth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost seventeenth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -24629,7 +25062,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_600() {
     vm.set_shell_host(Box::new(PipelineSubshellHost600));
     match vm.run() {
         VMResult::Ok(Value::Status(600)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 600, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 600, got {:?}",
+            other
+        ),
     }
 }
 
@@ -24696,7 +25132,10 @@ fn subshell_eighty_three_end_incrementing_from_seven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
     match vm.run() {
         VMResult::Ok(Value::Status(89)) => {}
-        other => panic!("eighty-third subshell_end(Some(89)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-third subshell_end(Some(89)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -24867,7 +25306,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_607() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost607));
     match vm.run() {
         VMResult::Ok(Value::Status(607)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 607, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 607, got {:?}",
+            other
+        ),
     }
 }
 
@@ -24895,7 +25337,10 @@ fn subshell_eighty_four_end_incrementing_from_ten() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(93)) => {}
-        other => panic!("eighty-fourth subshell_end(Some(93)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-fourth subshell_end(Some(93)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -25057,7 +25502,10 @@ fn subshell_eighty_five_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(86)) => {}
-        other => panic!("eighty-fifth subshell_end(Some(86)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-fifth subshell_end(Some(86)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -25152,7 +25600,10 @@ fn subshell_thirty_seventh_some_host_applies_on_thirty_seventh_end() {
     vm.set_shell_host(Box::new(ThirtySeventhSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(617)) => {}
-        other => panic!("thirty-seventh subshell_end(Some(617)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-seventh subshell_end(Some(617)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -25412,7 +25863,10 @@ fn subshell_eighty_six_end_incrementing_from_nine() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
     match vm.run() {
         VMResult::Ok(Value::Status(94)) => {}
-        other => panic!("eighty-sixth subshell_end(Some(94)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-sixth subshell_end(Some(94)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -25572,7 +26026,10 @@ fn subshell_alternating_status_eighteenth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost eighteenth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost eighteenth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -25602,7 +26059,10 @@ fn subshell_none_host_eighteen_ends_leaves_initial_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(630)) => {}
-        other => panic!("NoneHost eighteen ends MUST leave last_status 630, got {:?}", other),
+        other => panic!(
+            "NoneHost eighteen ends MUST leave last_status 630, got {:?}",
+            other
+        ),
     }
 }
 
@@ -25627,10 +26087,16 @@ fn subshell_first_some_then_none_host_eighteenth_none_keeps_first() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 631 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 631,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(631)) => {}
-        other => panic!("FirstSomeThenNoneHost eighteenth None MUST keep first Some(631), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost eighteenth None MUST keep first Some(631), got {:?}",
+            other
+        ),
     }
 }
 
@@ -25718,7 +26184,10 @@ fn subshell_eighty_seven_end_incrementing_from_four() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
     match vm.run() {
         VMResult::Ok(Value::Status(90)) => {}
-        other => panic!("eighty-seventh subshell_end(Some(90)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-seventh subshell_end(Some(90)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -25850,7 +26319,10 @@ fn subshell_eighty_eight_end_incrementing_from_eleven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 11 }));
     match vm.run() {
         VMResult::Ok(Value::Status(98)) => {}
-        other => panic!("eighty-eighth subshell_end(Some(98)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-eighth subshell_end(Some(98)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -25945,7 +26417,10 @@ fn subshell_thirty_eighth_some_host_applies_on_thirty_eighth_end() {
     vm.set_shell_host(Box::new(ThirtyEighthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(642)) => {}
-        other => panic!("thirty-eighth subshell_end(Some(642)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-eighth subshell_end(Some(642)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26066,7 +26541,10 @@ fn subshell_fifteen_begins_thirteen_ends_last_end_status_wins() {
     vm.set_shell_host(Box::new(CountingBeginEndHost645));
     match vm.run() {
         VMResult::Ok(Value::Status(645)) => {}
-        other => panic!("thirteenth subshell_end(Some(645)) MUST win, got {:?}", other),
+        other => panic!(
+            "thirteenth subshell_end(Some(645)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 15);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 13);
@@ -26193,7 +26671,10 @@ fn subshell_eighty_nine_end_incrementing_from_three() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(91)) => {}
-        other => panic!("eighty-ninth subshell_end(Some(91)) MUST win, got {:?}", other),
+        other => panic!(
+            "eighty-ninth subshell_end(Some(91)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26266,7 +26747,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status651() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost651 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -92, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -92, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26338,7 +26822,10 @@ fn subshell_thirty_ninth_some_host_applies_on_thirty_ninth_end() {
     vm.set_shell_host(Box::new(ThirtyNinthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(653)) => {}
-        other => panic!("thirty-ninth subshell_end(Some(653)) MUST apply, got {:?}", other),
+        other => panic!(
+            "thirty-ninth subshell_end(Some(653)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26366,7 +26853,10 @@ fn subshell_alternating_status_nineteenth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost nineteenth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost nineteenth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -26563,7 +27053,10 @@ fn subshell_fortieth_some_host_applies_on_fortieth_end() {
     vm.set_shell_host(Box::new(FortiethSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(660)) => {}
-        other => panic!("fortieth subshell_end(Some(660)) MUST apply, got {:?}", other),
+        other => panic!(
+            "fortieth subshell_end(Some(660)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26601,7 +27094,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_661() {
     vm.set_shell_host(Box::new(PipelineSubshellHost661));
     match vm.run() {
         VMResult::Ok(Value::Status(661)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 661, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 661, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26638,7 +27134,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_662() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost662));
     match vm.run() {
         VMResult::Ok(Value::Status(662)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 662, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 662, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26693,7 +27192,10 @@ fn subshell_ninety_one_end_incrementing_from_six() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
     match vm.run() {
         VMResult::Ok(Value::Status(96)) => {}
-        other => panic!("ninety-first subshell_end(Some(96)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-first subshell_end(Some(96)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26855,7 +27357,10 @@ fn subshell_ninety_two_end_incrementing_from_seven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
     match vm.run() {
         VMResult::Ok(Value::Status(98)) => {}
-        other => panic!("ninety-second subshell_end(Some(98)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-second subshell_end(Some(98)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -26950,7 +27455,10 @@ fn subshell_forty_first_some_host_applies_on_forty_first_end() {
     vm.set_shell_host(Box::new(FortyFirstSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(673)) => {}
-        other => panic!("forty-first subshell_end(Some(673)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-first subshell_end(Some(673)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -27071,7 +27579,10 @@ fn subshell_sixteen_begins_fourteen_ends_last_end_status_wins() {
     vm.set_shell_host(Box::new(CountingBeginEndHost676));
     match vm.run() {
         VMResult::Ok(Value::Status(676)) => {}
-        other => panic!("fourteenth subshell_end(Some(676)) MUST win, got {:?}", other),
+        other => panic!(
+            "fourteenth subshell_end(Some(676)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 16);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 14);
@@ -27204,7 +27715,10 @@ fn subshell_ninety_three_end_incrementing_from_eight() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 8 }));
     match vm.run() {
         VMResult::Ok(Value::Status(100)) => {}
-        other => panic!("ninety-third subshell_end(Some(100)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-third subshell_end(Some(100)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -27324,7 +27838,10 @@ fn subshell_alternating_status_twentieth_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twentieth None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twentieth None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -27353,7 +27870,10 @@ fn subshell_none_host_nineteen_ends_leaves_initial_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(685)) => {}
-        other => panic!("NoneHost nineteen ends MUST leave last_status 685, got {:?}", other),
+        other => panic!(
+            "NoneHost nineteen ends MUST leave last_status 685, got {:?}",
+            other
+        ),
     }
 }
 
@@ -27379,10 +27899,16 @@ fn subshell_first_some_then_none_host_nineteenth_none_keeps_first() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 686 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 686,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(686)) => {}
-        other => panic!("FirstSomeThenNoneHost nineteenth None MUST keep first Some(686), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost nineteenth None MUST keep first Some(686), got {:?}",
+            other
+        ),
     }
 }
 
@@ -27437,7 +27963,10 @@ fn subshell_ninety_four_end_incrementing_from_one() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 1 }));
     match vm.run() {
         VMResult::Ok(Value::Status(94)) => {}
-        other => panic!("ninety-fourth subshell_end(Some(94)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-fourth subshell_end(Some(94)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -27513,7 +28042,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status690() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost690 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -97, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -97, got {:?}",
+            other
+        ),
     }
 }
 
@@ -27645,7 +28177,10 @@ fn subshell_ninety_five_end_incrementing_from_twelve() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 12 }));
     match vm.run() {
         VMResult::Ok(Value::Status(106)) => {}
-        other => panic!("ninety-fifth subshell_end(Some(106)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-fifth subshell_end(Some(106)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -27740,7 +28275,10 @@ fn subshell_forty_second_some_host_applies_on_forty_second_end() {
     vm.set_shell_host(Box::new(FortySecondSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(698)) => {}
-        other => panic!("forty-second subshell_end(Some(698)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-second subshell_end(Some(698)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -27865,7 +28403,10 @@ fn subshell_seventeen_begins_fifteen_ends_last_end_status_wins() {
     vm.set_shell_host(Box::new(CountingBeginEndHost701));
     match vm.run() {
         VMResult::Ok(Value::Status(701)) => {}
-        other => panic!("fifteenth subshell_end(Some(701)) MUST win, got {:?}", other),
+        other => panic!(
+            "fifteenth subshell_end(Some(701)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 17);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 15);
@@ -27997,7 +28538,10 @@ fn subshell_ninety_six_end_incrementing_from_nine() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
     match vm.run() {
         VMResult::Ok(Value::Status(104)) => {}
-        other => panic!("ninety-sixth subshell_end(Some(104)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-sixth subshell_end(Some(104)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28102,7 +28646,10 @@ fn subshell_forty_third_some_host_applies_on_forty_third_end() {
     vm.set_shell_host(Box::new(FortyThirdSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(708)) => {}
-        other => panic!("forty-third subshell_end(Some(708)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-third subshell_end(Some(708)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28131,7 +28678,10 @@ fn subshell_alternating_status_twenty_first_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-first None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-first None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -28193,7 +28743,10 @@ fn subshell_ninety_seven_end_incrementing_from_four() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
     match vm.run() {
         VMResult::Ok(Value::Status(100)) => {}
-        other => panic!("ninety-seventh subshell_end(Some(100)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-seventh subshell_end(Some(100)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28256,7 +28809,10 @@ fn subshell_none_host_twenty_ends_leaves_initial_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(713)) => {}
-        other => panic!("NoneHost twenty ends MUST leave last_status 713, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty ends MUST leave last_status 713, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28281,10 +28837,16 @@ fn subshell_first_some_then_none_host_twentieth_none_keeps_first() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 714 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 714,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(714)) => {}
-        other => panic!("FirstSomeThenNoneHost twentieth None MUST keep first Some(714), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twentieth None MUST keep first Some(714), got {:?}",
+            other
+        ),
     }
 }
 
@@ -28356,7 +28918,10 @@ fn subshell_forty_fourth_some_host_applies_on_forty_fourth_end() {
     vm.set_shell_host(Box::new(FortyFourthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(716)) => {}
-        other => panic!("forty-fourth subshell_end(Some(716)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fourth subshell_end(Some(716)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28394,7 +28959,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_717() {
     vm.set_shell_host(Box::new(PipelineSubshellHost717));
     match vm.run() {
         VMResult::Ok(Value::Status(717)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 717, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 717, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28431,7 +28999,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_718() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost718));
     match vm.run() {
         VMResult::Ok(Value::Status(718)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 718, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 718, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28486,7 +29057,10 @@ fn subshell_ninety_eight_end_incrementing_from_two() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
     match vm.run() {
         VMResult::Ok(Value::Status(99)) => {}
-        other => panic!("ninety-eighth subshell_end(Some(99)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-eighth subshell_end(Some(99)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28648,7 +29222,10 @@ fn subshell_ninety_nine_end_incrementing_from_ten() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28743,7 +29320,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_end() {
     vm.set_shell_host(Box::new(FortyFifthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(729)) => {}
-        other => panic!("forty-fifth subshell_end(Some(729)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(729)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -28865,7 +29445,10 @@ fn subshell_eighteen_begins_sixteen_ends_last_end_status_wins() {
     vm.set_shell_host(Box::new(CountingBeginEndHost732));
     match vm.run() {
         VMResult::Ok(Value::Status(732)) => {}
-        other => panic!("sixteenth subshell_end(Some(732)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(732)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 18);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 16);
@@ -29004,7 +29587,10 @@ fn subshell_one_hundred_end_incrementing_from_three() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -29125,7 +29711,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -29154,7 +29743,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(741)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 741, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 741, got {:?}",
+            other
+        ),
     }
 }
 
@@ -29180,10 +29772,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_first() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 742 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 742,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(742)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(742), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(742), got {:?}",
+            other
+        ),
     }
 }
 
@@ -29238,7 +29836,10 @@ fn subshell_one_hundred_one_end_incrementing_from_five() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 5 }));
     match vm.run() {
         VMResult::Ok(Value::Status(105)) => {}
-        other => panic!("one-hundred-first subshell_end(Some(105)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-first subshell_end(Some(105)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -29278,7 +29879,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status745() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost745 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -29444,7 +30048,10 @@ fn subshell_one_hundred_two_end_incrementing_from_six() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
     match vm.run() {
         VMResult::Ok(Value::Status(107)) => {}
-        other => panic!("one-hundred-second subshell_end(Some(107)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-second subshell_end(Some(107)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -29539,7 +30146,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_end() {
     vm.set_shell_host(Box::new(FortySixthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(754)) => {}
-        other => panic!("forty-sixth subshell_end(Some(754)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(754)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -29661,7 +30271,10 @@ fn subshell_nineteen_begins_seventeen_ends_last_end_status_wins() {
     vm.set_shell_host(Box::new(CountingBeginEndHost757));
     match vm.run() {
         VMResult::Ok(Value::Status(757)) => {}
-        other => panic!("seventeenth subshell_end(Some(757)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(757)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 19);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 17);
@@ -29790,7 +30403,10 @@ fn subshell_one_hundred_three_end_incrementing_from_seven() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
     match vm.run() {
         VMResult::Ok(Value::Status(109)) => {}
-        other => panic!("one-hundred-third subshell_end(Some(109)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-third subshell_end(Some(109)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -29900,7 +30516,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_end() {
     vm.set_shell_host(Box::new(FortySeventhSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(764)) => {}
-        other => panic!("forty-seventh subshell_end(Some(764)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(764)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -29929,7 +30548,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninth() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -29989,7 +30611,10 @@ fn subshell_one_hundred_four_end_incrementing_from_one() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 1 }));
     match vm.run() {
         VMResult::Ok(Value::Status(104)) => {}
-        other => panic!("one-hundred-fourth subshell_end(Some(104)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-fourth subshell_end(Some(104)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30018,7 +30643,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_status() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(768)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 768, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 768, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30044,10 +30672,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_first() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 769 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 769,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(769)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(769), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(769), got {:?}",
+            other
+        ),
     }
 }
 
@@ -30119,7 +30753,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_end() {
     vm.set_shell_host(Box::new(FortyEighthSomeHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(771)) => {}
-        other => panic!("forty-eighth subshell_end(Some(771)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(771)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30156,7 +30793,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_772() {
     vm.set_shell_host(Box::new(PipelineSubshellHost772));
     match vm.run() {
         VMResult::Ok(Value::Status(772)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30194,7 +30834,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_773() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost773));
     match vm.run() {
         VMResult::Ok(Value::Status(773)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30249,7 +30892,10 @@ fn subshell_one_hundred_five_end_incrementing_from_eight() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 8 }));
     match vm.run() {
         VMResult::Ok(Value::Status(112)) => {}
-        other => panic!("one-hundred-fifth subshell_end(Some(112)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-fifth subshell_end(Some(112)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30319,7 +30965,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status777() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost777 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30451,7 +31100,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx778() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30546,7 +31198,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx778() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx778 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(785)) => {}
-        other => panic!("forty-fifth subshell_end(Some(785)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(785)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30668,7 +31323,10 @@ fn subshell_twenty_begins_eighteen_ends_last_end_status_winsEx778() {
     vm.set_shell_host(Box::new(CountingBeginEndHost788Ex778));
     match vm.run() {
         VMResult::Ok(Value::Status(788)) => {}
-        other => panic!("sixteenth subshell_end(Some(788)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(788)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 20);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 18);
@@ -30807,7 +31465,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx778() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30928,7 +31589,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx778() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -30957,7 +31621,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx778() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(797)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 797, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 797, got {:?}",
+            other
+        ),
     }
 }
 
@@ -30983,10 +31650,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx778() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 798 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 798,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(798)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(798), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(798), got {:?}",
+            other
+        ),
     }
 }
 
@@ -31041,7 +31714,10 @@ fn subshell_one_hundred_one_hundred_eight_end_incrementing_from_fiveEx778() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 8 }));
     match vm.run() {
         VMResult::Ok(Value::Status(115)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(115)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(115)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31081,7 +31757,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status801Ex778() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost801Ex778 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31131,7 +31810,6 @@ fn subshell_end_exit_code_802_propagatesEx778() {
         other => panic!("exit code 802 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AD (handwritten) ─────────────────────────────────────
 
@@ -31248,7 +31926,10 @@ fn subshell_one_hundred_one_hundred_nine_end_incrementing_from_sixEx803() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
     match vm.run() {
         VMResult::Ok(Value::Status(117)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(117)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(117)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31343,7 +32024,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx803() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx803 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(810)) => {}
-        other => panic!("forty-sixth subshell_end(Some(810)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(810)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31465,7 +32149,10 @@ fn subshell_twenty_one_begins_nineteen_ends_last_end_status_winsEx803() {
     vm.set_shell_host(Box::new(CountingBeginEndHost813Ex803));
     match vm.run() {
         VMResult::Ok(Value::Status(813)) => {}
-        other => panic!("seventeenth subshell_end(Some(813)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(813)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 21);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 19);
@@ -31594,7 +32281,10 @@ fn subshell_one_hundred_one_hundred_ten_end_incrementing_from_sevenEx803() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(119)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(119)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(119)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31704,7 +32394,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx803() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx803 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(820)) => {}
-        other => panic!("forty-seventh subshell_end(Some(820)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(820)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31733,7 +32426,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx803() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -31793,7 +32489,10 @@ fn subshell_one_hundred_one_hundred_eleven_end_incrementing_from_oneEx803() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
     match vm.run() {
         VMResult::Ok(Value::Status(114)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(114)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(114)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31822,7 +32521,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx803() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(824)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 824, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 824, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31848,10 +32550,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx803() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 825 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 825,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(825)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(825), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(825), got {:?}",
+            other
+        ),
     }
 }
 
@@ -31923,7 +32631,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx803() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx803 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(827)) => {}
-        other => panic!("forty-eighth subshell_end(Some(827)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(827)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31960,7 +32671,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_828Ex803() {
     vm.set_shell_host(Box::new(PipelineSubshellHost828Ex803));
     match vm.run() {
         VMResult::Ok(Value::Status(828)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -31998,7 +32712,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_829Ex803() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost829Ex803));
     match vm.run() {
         VMResult::Ok(Value::Status(829)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32053,7 +32770,10 @@ fn subshell_one_hundred_one_hundred_twelve_end_incrementing_from_eightEx803() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 11 }));
     match vm.run() {
         VMResult::Ok(Value::Status(122)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(122)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(122)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32123,7 +32843,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status833Ex803() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost833Ex803 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32139,7 +32862,6 @@ fn subshell_end_exit_code_833_propagatesEx803() {
         other => panic!("exit code 833 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AE (handwritten) ─────────────────────────────────────
 
@@ -32256,7 +32978,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx834() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32351,7 +33076,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx834() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx834 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(841)) => {}
-        other => panic!("forty-fifth subshell_end(Some(841)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(841)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32473,7 +33201,10 @@ fn subshell_twenty_two_begins_twenty_ends_last_end_status_winsEx834() {
     vm.set_shell_host(Box::new(CountingBeginEndHost844Ex834));
     match vm.run() {
         VMResult::Ok(Value::Status(844)) => {}
-        other => panic!("sixteenth subshell_end(Some(844)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(844)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 22);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 20);
@@ -32612,7 +33343,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx834() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32733,7 +33467,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx834() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -32762,7 +33499,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx834() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(853)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 853, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 853, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32788,10 +33528,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx834() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 854 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 854,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(854)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(854), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(854), got {:?}",
+            other
+        ),
     }
 }
 
@@ -32846,7 +33592,10 @@ fn subshell_one_hundred_one_hundred_fifteen_end_incrementing_from_fiveEx834() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 11 }));
     match vm.run() {
         VMResult::Ok(Value::Status(125)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(125)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(125)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32886,7 +33635,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status857Ex834() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost857Ex834 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -32936,7 +33688,6 @@ fn subshell_end_exit_code_858_propagatesEx834() {
         other => panic!("exit code 858 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AF (handwritten) ─────────────────────────────────────
 
@@ -33053,7 +33804,10 @@ fn subshell_one_hundred_one_hundred_sixteen_end_incrementing_from_sixEx859() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 12 }));
     match vm.run() {
         VMResult::Ok(Value::Status(127)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(127)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(127)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33148,7 +33902,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx859() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx859 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(866)) => {}
-        other => panic!("forty-sixth subshell_end(Some(866)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(866)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33270,7 +34027,10 @@ fn subshell_twenty_three_begins_twenty_one_ends_last_end_status_winsEx859() {
     vm.set_shell_host(Box::new(CountingBeginEndHost869Ex859));
     match vm.run() {
         VMResult::Ok(Value::Status(869)) => {}
-        other => panic!("seventeenth subshell_end(Some(869)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(869)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 23);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 21);
@@ -33399,7 +34159,10 @@ fn subshell_one_hundred_one_hundred_seventeen_end_incrementing_from_sevenEx859()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 13 }));
     match vm.run() {
         VMResult::Ok(Value::Status(129)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(129)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(129)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33509,7 +34272,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx859() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx859 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(876)) => {}
-        other => panic!("forty-seventh subshell_end(Some(876)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(876)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33538,7 +34304,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx859() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -33598,7 +34367,10 @@ fn subshell_one_hundred_one_hundred_eighteen_end_incrementing_from_oneEx859() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
     match vm.run() {
         VMResult::Ok(Value::Status(124)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(124)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(124)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33627,7 +34399,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx859() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(880)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 880, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 880, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33653,10 +34428,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx859() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 881 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 881,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(881)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(881), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(881), got {:?}",
+            other
+        ),
     }
 }
 
@@ -33728,7 +34509,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx859() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx859 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(883)) => {}
-        other => panic!("forty-eighth subshell_end(Some(883)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(883)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33765,7 +34549,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_884Ex859() {
     vm.set_shell_host(Box::new(PipelineSubshellHost884Ex859));
     match vm.run() {
         VMResult::Ok(Value::Status(884)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33803,7 +34590,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_885Ex859() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost885Ex859));
     match vm.run() {
         VMResult::Ok(Value::Status(885)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33858,7 +34648,10 @@ fn subshell_one_hundred_one_hundred_nineteen_end_incrementing_from_eightEx859() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 14 }));
     match vm.run() {
         VMResult::Ok(Value::Status(132)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(132)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(132)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33928,7 +34721,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status889Ex859() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost889Ex859 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -33944,7 +34740,6 @@ fn subshell_end_exit_code_889_propagatesEx859() {
         other => panic!("exit code 889 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AG (handwritten) ─────────────────────────────────────
 
@@ -34061,7 +34856,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx890() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -34156,7 +34954,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx890() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx890 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(897)) => {}
-        other => panic!("forty-fifth subshell_end(Some(897)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(897)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -34278,7 +35079,10 @@ fn subshell_twenty_four_begins_twenty_two_ends_last_end_status_winsEx890() {
     vm.set_shell_host(Box::new(CountingBeginEndHost900Ex890));
     match vm.run() {
         VMResult::Ok(Value::Status(900)) => {}
-        other => panic!("sixteenth subshell_end(Some(900)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(900)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 24);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 22);
@@ -34417,7 +35221,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx890() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -34538,7 +35345,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx890() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -34567,7 +35377,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx890() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(909)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 909, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 909, got {:?}",
+            other
+        ),
     }
 }
 
@@ -34593,10 +35406,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx890() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 910 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 910,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(910)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(910), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(910), got {:?}",
+            other
+        ),
     }
 }
 
@@ -34651,7 +35470,10 @@ fn subshell_one_hundred_one_hundred_twenty_two_end_incrementing_from_fiveEx890()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 14 }));
     match vm.run() {
         VMResult::Ok(Value::Status(135)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(135)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(135)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -34691,7 +35513,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status913Ex890() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost913Ex890 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -34741,7 +35566,6 @@ fn subshell_end_exit_code_914_propagatesEx890() {
         other => panic!("exit code 914 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AH (handwritten) ─────────────────────────────────────
 
@@ -34858,7 +35682,10 @@ fn subshell_one_hundred_one_hundred_twenty_three_end_incrementing_from_sixEx915(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 15 }));
     match vm.run() {
         VMResult::Ok(Value::Status(137)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(137)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(137)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -34953,7 +35780,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx915() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx915 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(922)) => {}
-        other => panic!("forty-sixth subshell_end(Some(922)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(922)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35075,7 +35905,10 @@ fn subshell_twenty_five_begins_twenty_three_ends_last_end_status_winsEx915() {
     vm.set_shell_host(Box::new(CountingBeginEndHost925Ex915));
     match vm.run() {
         VMResult::Ok(Value::Status(925)) => {}
-        other => panic!("seventeenth subshell_end(Some(925)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(925)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 25);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 23);
@@ -35204,7 +36037,10 @@ fn subshell_one_hundred_one_hundred_twenty_four_end_incrementing_from_sevenEx915
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 16 }));
     match vm.run() {
         VMResult::Ok(Value::Status(139)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(139)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(139)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35314,7 +36150,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx915() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx915 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(932)) => {}
-        other => panic!("forty-seventh subshell_end(Some(932)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(932)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35343,7 +36182,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx915() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -35403,7 +36245,10 @@ fn subshell_one_hundred_one_hundred_twenty_five_end_incrementing_from_oneEx915()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(134)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(134)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(134)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35432,7 +36277,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx915() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(936)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 936, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 936, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35458,10 +36306,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx915() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 937 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 937,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(937)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(937), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(937), got {:?}",
+            other
+        ),
     }
 }
 
@@ -35533,7 +36387,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx915() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx915 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(939)) => {}
-        other => panic!("forty-eighth subshell_end(Some(939)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(939)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35570,7 +36427,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_940Ex915() {
     vm.set_shell_host(Box::new(PipelineSubshellHost940Ex915));
     match vm.run() {
         VMResult::Ok(Value::Status(940)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35608,7 +36468,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_941Ex915() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost941Ex915));
     match vm.run() {
         VMResult::Ok(Value::Status(941)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35663,7 +36526,10 @@ fn subshell_one_hundred_one_hundred_twenty_six_end_incrementing_from_eightEx915(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 17 }));
     match vm.run() {
         VMResult::Ok(Value::Status(142)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(142)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(142)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35733,7 +36599,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status945Ex915() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost945Ex915 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35749,7 +36618,6 @@ fn subshell_end_exit_code_945_propagatesEx915() {
         other => panic!("exit code 945 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AI (handwritten) ─────────────────────────────────────
 
@@ -35866,7 +36734,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx946() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -35961,7 +36832,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx946() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx946 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(953)) => {}
-        other => panic!("forty-fifth subshell_end(Some(953)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(953)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -36083,7 +36957,10 @@ fn subshell_twenty_six_begins_twenty_four_ends_last_end_status_winsEx946() {
     vm.set_shell_host(Box::new(CountingBeginEndHost956Ex946));
     match vm.run() {
         VMResult::Ok(Value::Status(956)) => {}
-        other => panic!("sixteenth subshell_end(Some(956)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(956)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 26);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 24);
@@ -36222,7 +37099,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx946() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -36343,7 +37223,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx946() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -36372,7 +37255,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx946() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(965)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 965, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 965, got {:?}",
+            other
+        ),
     }
 }
 
@@ -36398,10 +37284,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx946() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 966 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 966,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(966)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(966), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(966), got {:?}",
+            other
+        ),
     }
 }
 
@@ -36456,7 +37348,10 @@ fn subshell_one_hundred_one_hundred_twenty_nine_end_incrementing_from_fiveEx946(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 17 }));
     match vm.run() {
         VMResult::Ok(Value::Status(145)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(145)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(145)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -36496,7 +37391,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status969Ex946() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost969Ex946 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -36546,7 +37444,6 @@ fn subshell_end_exit_code_970_propagatesEx946() {
         other => panic!("exit code 970 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AJ (handwritten) ─────────────────────────────────────
 
@@ -36663,7 +37560,10 @@ fn subshell_one_hundred_one_hundred_thirty_end_incrementing_from_sixEx971() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 18 }));
     match vm.run() {
         VMResult::Ok(Value::Status(147)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(147)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(147)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -36758,7 +37658,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx971() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx971 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(978)) => {}
-        other => panic!("forty-sixth subshell_end(Some(978)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(978)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -36880,7 +37783,10 @@ fn subshell_twenty_seven_begins_twenty_five_ends_last_end_status_winsEx971() {
     vm.set_shell_host(Box::new(CountingBeginEndHost981Ex971));
     match vm.run() {
         VMResult::Ok(Value::Status(981)) => {}
-        other => panic!("seventeenth subshell_end(Some(981)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(981)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 27);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 25);
@@ -37009,7 +37915,10 @@ fn subshell_one_hundred_one_hundred_thirty_one_end_incrementing_from_sevenEx971(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 19 }));
     match vm.run() {
         VMResult::Ok(Value::Status(149)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(149)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(149)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37119,7 +38028,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx971() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx971 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(988)) => {}
-        other => panic!("forty-seventh subshell_end(Some(988)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(988)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37148,7 +38060,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx971() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -37208,7 +38123,10 @@ fn subshell_one_hundred_one_hundred_thirty_two_end_incrementing_from_oneEx971() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 13 }));
     match vm.run() {
         VMResult::Ok(Value::Status(144)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(144)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(144)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37237,7 +38155,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx971() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(992)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 992, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 992, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37263,10 +38184,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx971() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 993 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 993,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(993)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(993), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(993), got {:?}",
+            other
+        ),
     }
 }
 
@@ -37338,7 +38265,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx971() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx971 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(995)) => {}
-        other => panic!("forty-eighth subshell_end(Some(995)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(995)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37375,7 +38305,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_996Ex971() {
     vm.set_shell_host(Box::new(PipelineSubshellHost996Ex971));
     match vm.run() {
         VMResult::Ok(Value::Status(996)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37413,7 +38346,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_997Ex971() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost997Ex971));
     match vm.run() {
         VMResult::Ok(Value::Status(997)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37468,7 +38404,10 @@ fn subshell_one_hundred_one_hundred_thirty_three_end_incrementing_from_eightEx97
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 20 }));
     match vm.run() {
         VMResult::Ok(Value::Status(152)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(152)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(152)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37538,7 +38477,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1001Ex971() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1001Ex971 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37554,7 +38496,6 @@ fn subshell_end_exit_code_1001_propagatesEx971() {
         other => panic!("exit code 1001 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AK (handwritten) ─────────────────────────────────────
 
@@ -37671,7 +38612,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1002() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37766,7 +38710,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1002() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1002 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1009)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1009)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1009)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -37888,7 +38835,10 @@ fn subshell_twenty_eight_begins_twenty_six_ends_last_end_status_winsEx1002() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1012Ex1002));
     match vm.run() {
         VMResult::Ok(Value::Status(1012)) => {}
-        other => panic!("sixteenth subshell_end(Some(1012)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1012)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 28);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 26);
@@ -38027,7 +38977,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1002() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -38148,7 +39101,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1002() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -38177,7 +39133,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1002() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1021)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1021, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1021, got {:?}",
+            other
+        ),
     }
 }
 
@@ -38203,10 +39162,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1002() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1022 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1022,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1022)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1022), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1022), got {:?}",
+            other
+        ),
     }
 }
 
@@ -38261,7 +39226,10 @@ fn subshell_one_hundred_one_hundred_thirty_six_end_incrementing_from_fiveEx1002(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 20 }));
     match vm.run() {
         VMResult::Ok(Value::Status(155)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(155)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(155)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -38301,7 +39269,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1025Ex1002() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1025Ex1002 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -38351,7 +39322,6 @@ fn subshell_end_exit_code_1026_propagatesEx1002() {
         other => panic!("exit code 1026 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AL (handwritten) ─────────────────────────────────────
 
@@ -38468,7 +39438,10 @@ fn subshell_one_hundred_one_hundred_thirty_seven_end_incrementing_from_sixEx1027
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 21 }));
     match vm.run() {
         VMResult::Ok(Value::Status(157)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(157)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(157)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -38563,7 +39536,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1027() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1027 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1034)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1034)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1034)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -38685,7 +39661,10 @@ fn subshell_twenty_nine_begins_twenty_seven_ends_last_end_status_winsEx1027() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1037Ex1027));
     match vm.run() {
         VMResult::Ok(Value::Status(1037)) => {}
-        other => panic!("seventeenth subshell_end(Some(1037)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1037)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 29);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 27);
@@ -38814,7 +39793,10 @@ fn subshell_one_hundred_one_hundred_thirty_eight_end_incrementing_from_sevenEx10
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 22 }));
     match vm.run() {
         VMResult::Ok(Value::Status(159)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(159)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(159)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -38924,7 +39906,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1027() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1027 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1044)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1044)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1044)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -38953,7 +39938,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1027() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -39013,7 +40001,10 @@ fn subshell_one_hundred_one_hundred_thirty_nine_end_incrementing_from_oneEx1027(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 16 }));
     match vm.run() {
         VMResult::Ok(Value::Status(154)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(154)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(154)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39042,7 +40033,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1027() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1048)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1048, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1048, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39068,10 +40062,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1027() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1049 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1049,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1049)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1049), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1049), got {:?}",
+            other
+        ),
     }
 }
 
@@ -39143,7 +40143,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1027() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1027 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1051)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1051)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1051)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39180,7 +40183,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1052Ex1027() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1052Ex1027));
     match vm.run() {
         VMResult::Ok(Value::Status(1052)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39218,7 +40224,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1053Ex1027() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1053Ex1027));
     match vm.run() {
         VMResult::Ok(Value::Status(1053)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39273,7 +40282,10 @@ fn subshell_one_hundred_one_hundred_forty_end_incrementing_from_eightEx1027() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 23 }));
     match vm.run() {
         VMResult::Ok(Value::Status(162)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(162)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(162)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39343,7 +40355,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1057Ex1027() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1057Ex1027 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39359,7 +40374,6 @@ fn subshell_end_exit_code_1057_propagatesEx1027() {
         other => panic!("exit code 1057 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AM (handwritten) ─────────────────────────────────────
 
@@ -39476,7 +40490,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1058() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39571,7 +40588,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1058() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1058 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1065)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1065)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1065)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39693,7 +40713,10 @@ fn subshell_thirty_begins_twenty_eight_ends_last_end_status_winsEx1058() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1068Ex1058));
     match vm.run() {
         VMResult::Ok(Value::Status(1068)) => {}
-        other => panic!("sixteenth subshell_end(Some(1068)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1068)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 30);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 28);
@@ -39832,7 +40855,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1058() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39953,7 +40979,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1058() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -39982,7 +41011,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1058() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1077)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1077, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1077, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40008,10 +41040,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1058() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1078 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1078,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1078)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1078), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1078), got {:?}",
+            other
+        ),
     }
 }
 
@@ -40066,7 +41104,10 @@ fn subshell_one_hundred_one_hundred_forty_three_end_incrementing_from_fiveEx1058
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 23 }));
     match vm.run() {
         VMResult::Ok(Value::Status(165)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(165)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(165)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40106,7 +41147,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1081Ex1058() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1081Ex1058 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40156,7 +41200,6 @@ fn subshell_end_exit_code_1082_propagatesEx1058() {
         other => panic!("exit code 1082 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AN (handwritten) ─────────────────────────────────────
 
@@ -40273,7 +41316,10 @@ fn subshell_one_hundred_one_hundred_forty_four_end_incrementing_from_sixEx1083()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 24 }));
     match vm.run() {
         VMResult::Ok(Value::Status(167)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(167)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(167)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40368,7 +41414,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1083() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1083 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1090)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1090)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1090)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40490,7 +41539,10 @@ fn subshell_thirty_one_begins_twenty_nine_ends_last_end_status_winsEx1083() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1093Ex1083));
     match vm.run() {
         VMResult::Ok(Value::Status(1093)) => {}
-        other => panic!("seventeenth subshell_end(Some(1093)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1093)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 31);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 29);
@@ -40619,7 +41671,10 @@ fn subshell_one_hundred_one_hundred_forty_five_end_incrementing_from_sevenEx1083
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 25 }));
     match vm.run() {
         VMResult::Ok(Value::Status(169)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(169)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(169)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40729,7 +41784,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1083() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1083 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1100)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1100)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1100)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40758,7 +41816,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1083() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -40818,7 +41879,10 @@ fn subshell_one_hundred_one_hundred_forty_six_end_incrementing_from_oneEx1083() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 19 }));
     match vm.run() {
         VMResult::Ok(Value::Status(164)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(164)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(164)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40847,7 +41911,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1083() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1104)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1104, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40873,10 +41940,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1083() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1105 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1105,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1105)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1105), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1105), got {:?}",
+            other
+        ),
     }
 }
 
@@ -40948,7 +42021,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1083() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1083 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1107)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1107)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1107)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -40985,7 +42061,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1108Ex1083() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1108Ex1083));
     match vm.run() {
         VMResult::Ok(Value::Status(1108)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41023,7 +42102,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1109Ex1083() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1109Ex1083));
     match vm.run() {
         VMResult::Ok(Value::Status(1109)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41078,7 +42160,10 @@ fn subshell_one_hundred_one_hundred_forty_seven_end_incrementing_from_eightEx108
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 26 }));
     match vm.run() {
         VMResult::Ok(Value::Status(172)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(172)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(172)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41148,7 +42233,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1113Ex1083() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1113Ex1083 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41164,7 +42252,6 @@ fn subshell_end_exit_code_1113_propagatesEx1083() {
         other => panic!("exit code 1113 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AO (handwritten) ─────────────────────────────────────
 
@@ -41281,7 +42368,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1114() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41376,7 +42466,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1114() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1114 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1121)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1121)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1121)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41498,7 +42591,10 @@ fn subshell_thirty_two_begins_thirty_ends_last_end_status_winsEx1114() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1124Ex1114));
     match vm.run() {
         VMResult::Ok(Value::Status(1124)) => {}
-        other => panic!("sixteenth subshell_end(Some(1124)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1124)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 32);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 30);
@@ -41637,7 +42733,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1114() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41758,7 +42857,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1114() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -41787,7 +42889,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1114() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1133)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1133, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1133, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41813,10 +42918,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1114() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1134 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1134,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1134)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1134), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1134), got {:?}",
+            other
+        ),
     }
 }
 
@@ -41871,7 +42982,10 @@ fn subshell_one_hundred_one_hundred_fifty_end_incrementing_from_fiveEx1114() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 26 }));
     match vm.run() {
         VMResult::Ok(Value::Status(175)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(175)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(175)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41911,7 +43025,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1137Ex1114() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1137Ex1114 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -41961,7 +43078,6 @@ fn subshell_end_exit_code_1138_propagatesEx1114() {
         other => panic!("exit code 1138 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AP (handwritten) ─────────────────────────────────────
 
@@ -42078,7 +43194,10 @@ fn subshell_one_hundred_one_hundred_fifty_one_end_incrementing_from_sixEx1139() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 27 }));
     match vm.run() {
         VMResult::Ok(Value::Status(177)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(177)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(177)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42173,7 +43292,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1139() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1139 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1146)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1146)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1146)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42295,7 +43417,10 @@ fn subshell_thirty_three_begins_thirty_one_ends_last_end_status_winsEx1139() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1149Ex1139));
     match vm.run() {
         VMResult::Ok(Value::Status(1149)) => {}
-        other => panic!("seventeenth subshell_end(Some(1149)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1149)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 33);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 31);
@@ -42424,7 +43549,10 @@ fn subshell_one_hundred_one_hundred_fifty_two_end_incrementing_from_sevenEx1139(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 28 }));
     match vm.run() {
         VMResult::Ok(Value::Status(179)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(179)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(179)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42534,7 +43662,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1139() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1139 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1156)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1156)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1156)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42563,7 +43694,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1139() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -42623,7 +43757,10 @@ fn subshell_one_hundred_one_hundred_fifty_three_end_incrementing_from_oneEx1139(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 22 }));
     match vm.run() {
         VMResult::Ok(Value::Status(174)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(174)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(174)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42652,7 +43789,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1139() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1160)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1160, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1160, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42678,10 +43818,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1139() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1161 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1161,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1161)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1161), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1161), got {:?}",
+            other
+        ),
     }
 }
 
@@ -42753,7 +43899,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1139() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1139 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1163)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1163)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1163)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42790,7 +43939,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1164Ex1139() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1164Ex1139));
     match vm.run() {
         VMResult::Ok(Value::Status(1164)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42828,7 +43980,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1165Ex1139() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1165Ex1139));
     match vm.run() {
         VMResult::Ok(Value::Status(1165)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42883,7 +44038,10 @@ fn subshell_one_hundred_one_hundred_fifty_four_end_incrementing_from_eightEx1139
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 29 }));
     match vm.run() {
         VMResult::Ok(Value::Status(182)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(182)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(182)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42953,7 +44111,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1169Ex1139() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1169Ex1139 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -42969,7 +44130,6 @@ fn subshell_end_exit_code_1169_propagatesEx1139() {
         other => panic!("exit code 1169 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AQ (handwritten) ─────────────────────────────────────
 
@@ -43086,7 +44246,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1170() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -43181,7 +44344,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1170() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1170 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1177)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1177)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1177)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -43303,7 +44469,10 @@ fn subshell_thirty_four_begins_thirty_two_ends_last_end_status_winsEx1170() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1180Ex1170));
     match vm.run() {
         VMResult::Ok(Value::Status(1180)) => {}
-        other => panic!("sixteenth subshell_end(Some(1180)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1180)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 34);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 32);
@@ -43442,7 +44611,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1170() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -43563,7 +44735,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1170() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -43592,7 +44767,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1170() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1189)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1189, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1189, got {:?}",
+            other
+        ),
     }
 }
 
@@ -43618,10 +44796,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1170() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1190 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1190,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1190)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1190), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1190), got {:?}",
+            other
+        ),
     }
 }
 
@@ -43676,7 +44860,10 @@ fn subshell_one_hundred_one_hundred_fifty_seven_end_incrementing_from_fiveEx1170
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 29 }));
     match vm.run() {
         VMResult::Ok(Value::Status(185)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(185)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(185)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -43716,7 +44903,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1193Ex1170() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1193Ex1170 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -43766,7 +44956,6 @@ fn subshell_end_exit_code_1194_propagatesEx1170() {
         other => panic!("exit code 1194 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AR (handwritten) ─────────────────────────────────────
 
@@ -43883,7 +45072,10 @@ fn subshell_one_hundred_one_hundred_fifty_eight_end_incrementing_from_sixEx1195(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 30 }));
     match vm.run() {
         VMResult::Ok(Value::Status(187)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(187)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(187)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -43978,7 +45170,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1195() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1195 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1202)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1202)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1202)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44100,7 +45295,10 @@ fn subshell_thirty_five_begins_thirty_three_ends_last_end_status_winsEx1195() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1205Ex1195));
     match vm.run() {
         VMResult::Ok(Value::Status(1205)) => {}
-        other => panic!("seventeenth subshell_end(Some(1205)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1205)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 35);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 33);
@@ -44229,7 +45427,10 @@ fn subshell_one_hundred_one_hundred_fifty_nine_end_incrementing_from_sevenEx1195
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 31 }));
     match vm.run() {
         VMResult::Ok(Value::Status(189)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(189)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(189)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44339,7 +45540,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1195() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1195 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1212)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1212)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1212)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44368,7 +45572,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1195() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -44428,7 +45635,10 @@ fn subshell_one_hundred_one_hundred_sixty_end_incrementing_from_oneEx1195() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 25 }));
     match vm.run() {
         VMResult::Ok(Value::Status(184)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(184)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(184)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44457,7 +45667,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1195() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1216)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1216, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1216, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44483,10 +45696,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1195() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1217 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1217,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1217)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1217), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1217), got {:?}",
+            other
+        ),
     }
 }
 
@@ -44558,7 +45777,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1195() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1195 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1219)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1219)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1219)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44595,7 +45817,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1220Ex1195() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1220Ex1195));
     match vm.run() {
         VMResult::Ok(Value::Status(1220)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44633,7 +45858,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1221Ex1195() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1221Ex1195));
     match vm.run() {
         VMResult::Ok(Value::Status(1221)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44688,7 +45916,10 @@ fn subshell_one_hundred_one_hundred_sixty_one_end_incrementing_from_eightEx1195(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 32 }));
     match vm.run() {
         VMResult::Ok(Value::Status(192)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(192)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(192)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44758,7 +45989,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1225Ex1195() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1225Ex1195 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44774,7 +46008,6 @@ fn subshell_end_exit_code_1225_propagatesEx1195() {
         other => panic!("exit code 1225 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AS (handwritten) ─────────────────────────────────────
 
@@ -44891,7 +46124,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1226() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -44986,7 +46222,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1226() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1226 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1233)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1233)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1233)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -45108,7 +46347,10 @@ fn subshell_thirty_six_begins_thirty_four_ends_last_end_status_winsEx1226() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1236Ex1226));
     match vm.run() {
         VMResult::Ok(Value::Status(1236)) => {}
-        other => panic!("sixteenth subshell_end(Some(1236)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1236)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 36);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 34);
@@ -45247,7 +46489,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1226() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -45368,7 +46613,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1226() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -45397,7 +46645,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1226() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1245)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1245, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1245, got {:?}",
+            other
+        ),
     }
 }
 
@@ -45423,10 +46674,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1226() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1246 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1246,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1246)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1246), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1246), got {:?}",
+            other
+        ),
     }
 }
 
@@ -45481,7 +46738,10 @@ fn subshell_one_hundred_one_hundred_sixty_four_end_incrementing_from_fiveEx1226(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 32 }));
     match vm.run() {
         VMResult::Ok(Value::Status(195)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(195)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(195)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -45521,7 +46781,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1249Ex1226() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1249Ex1226 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -45571,7 +46834,6 @@ fn subshell_end_exit_code_1250_propagatesEx1226() {
         other => panic!("exit code 1250 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AT (handwritten) ─────────────────────────────────────
 
@@ -45688,7 +46950,10 @@ fn subshell_one_hundred_one_hundred_sixty_five_end_incrementing_from_sixEx1251()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 33 }));
     match vm.run() {
         VMResult::Ok(Value::Status(197)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(197)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(197)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -45783,7 +47048,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1251() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1251 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1258)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1258)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1258)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -45905,7 +47173,10 @@ fn subshell_thirty_seven_begins_thirty_five_ends_last_end_status_winsEx1251() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1261Ex1251));
     match vm.run() {
         VMResult::Ok(Value::Status(1261)) => {}
-        other => panic!("seventeenth subshell_end(Some(1261)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1261)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 37);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 35);
@@ -46034,7 +47305,10 @@ fn subshell_one_hundred_one_hundred_sixty_six_end_incrementing_from_sevenEx1251(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 34 }));
     match vm.run() {
         VMResult::Ok(Value::Status(199)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(199)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(199)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46144,7 +47418,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1251() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1251 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1268)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1268)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1268)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46173,7 +47450,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1251() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -46233,7 +47513,10 @@ fn subshell_one_hundred_one_hundred_sixty_seven_end_incrementing_from_oneEx1251(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 28 }));
     match vm.run() {
         VMResult::Ok(Value::Status(194)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(194)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(194)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46262,7 +47545,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1251() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1272)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1272, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1272, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46288,10 +47574,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1251() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1273 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1273,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1273)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1273), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1273), got {:?}",
+            other
+        ),
     }
 }
 
@@ -46363,7 +47655,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1251() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1251 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1275)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1275)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1275)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46400,7 +47695,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1276Ex1251() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1276Ex1251));
     match vm.run() {
         VMResult::Ok(Value::Status(1276)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46438,7 +47736,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1277Ex1251() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1277Ex1251));
     match vm.run() {
         VMResult::Ok(Value::Status(1277)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46493,7 +47794,10 @@ fn subshell_one_hundred_one_hundred_sixty_eight_end_incrementing_from_eightEx125
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 35 }));
     match vm.run() {
         VMResult::Ok(Value::Status(202)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(202)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(202)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46563,7 +47867,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1281Ex1251() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1281Ex1251 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46579,7 +47886,6 @@ fn subshell_end_exit_code_1281_propagatesEx1251() {
         other => panic!("exit code 1281 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AU (handwritten) ─────────────────────────────────────
 
@@ -46696,7 +48002,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1282() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46791,7 +48100,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1282() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1282 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1289)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1289)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1289)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -46913,7 +48225,10 @@ fn subshell_thirty_eight_begins_thirty_six_ends_last_end_status_winsEx1282() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1292Ex1282));
     match vm.run() {
         VMResult::Ok(Value::Status(1292)) => {}
-        other => panic!("sixteenth subshell_end(Some(1292)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1292)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 38);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 36);
@@ -47052,7 +48367,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1282() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -47173,7 +48491,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1282() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -47202,7 +48523,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1282() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1301)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1301, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1301, got {:?}",
+            other
+        ),
     }
 }
 
@@ -47228,10 +48552,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1282() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1302 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1302,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1302)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1302), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1302), got {:?}",
+            other
+        ),
     }
 }
 
@@ -47286,7 +48616,10 @@ fn subshell_one_hundred_one_hundred_seventy_one_end_incrementing_from_fiveEx1282
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 35 }));
     match vm.run() {
         VMResult::Ok(Value::Status(205)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(205)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(205)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -47326,7 +48659,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1305Ex1282() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1305Ex1282 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -47376,7 +48712,6 @@ fn subshell_end_exit_code_1306_propagatesEx1282() {
         other => panic!("exit code 1306 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AV (handwritten) ─────────────────────────────────────
 
@@ -47493,7 +48828,10 @@ fn subshell_one_hundred_one_hundred_seventy_two_end_incrementing_from_sixEx1307(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 36 }));
     match vm.run() {
         VMResult::Ok(Value::Status(207)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(207)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(207)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -47588,7 +48926,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1307() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1307 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1314)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1314)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1314)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -47710,7 +49051,10 @@ fn subshell_thirty_nine_begins_thirty_seven_ends_last_end_status_winsEx1307() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1317Ex1307));
     match vm.run() {
         VMResult::Ok(Value::Status(1317)) => {}
-        other => panic!("seventeenth subshell_end(Some(1317)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1317)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 39);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 37);
@@ -47839,7 +49183,10 @@ fn subshell_one_hundred_one_hundred_seventy_three_end_incrementing_from_sevenEx1
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 37 }));
     match vm.run() {
         VMResult::Ok(Value::Status(209)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(209)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(209)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -47949,7 +49296,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1307() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1307 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1324)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1324)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1324)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -47978,7 +49328,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1307() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -48038,7 +49391,10 @@ fn subshell_one_hundred_one_hundred_seventy_four_end_incrementing_from_oneEx1307
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 31 }));
     match vm.run() {
         VMResult::Ok(Value::Status(204)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(204)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(204)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48067,7 +49423,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1307() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1328)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1328, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1328, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48093,10 +49452,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1307() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1329 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1329,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1329)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1329), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1329), got {:?}",
+            other
+        ),
     }
 }
 
@@ -48168,7 +49533,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1307() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1307 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1331)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1331)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1331)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48205,7 +49573,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1332Ex1307() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1332Ex1307));
     match vm.run() {
         VMResult::Ok(Value::Status(1332)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48243,7 +49614,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1333Ex1307() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1333Ex1307));
     match vm.run() {
         VMResult::Ok(Value::Status(1333)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48298,7 +49672,10 @@ fn subshell_one_hundred_one_hundred_seventy_five_end_incrementing_from_eightEx13
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 38 }));
     match vm.run() {
         VMResult::Ok(Value::Status(212)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(212)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(212)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48368,7 +49745,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1337Ex1307() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1337Ex1307 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48384,7 +49764,6 @@ fn subshell_end_exit_code_1337_propagatesEx1307() {
         other => panic!("exit code 1337 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AW (handwritten) ─────────────────────────────────────
 
@@ -48501,7 +49880,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1338() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48596,7 +49978,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1338() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1338 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1345)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1345)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1345)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48718,7 +50103,10 @@ fn subshell_forty_begins_thirty_eight_ends_last_end_status_winsEx1338() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1348Ex1338));
     match vm.run() {
         VMResult::Ok(Value::Status(1348)) => {}
-        other => panic!("sixteenth subshell_end(Some(1348)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1348)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 40);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 38);
@@ -48857,7 +50245,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1338() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -48978,7 +50369,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1338() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -49007,7 +50401,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1338() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1357)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1357, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1357, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49033,10 +50430,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1338() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1358 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1358,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1358)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1358), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1358), got {:?}",
+            other
+        ),
     }
 }
 
@@ -49091,7 +50494,10 @@ fn subshell_one_hundred_one_hundred_seventy_eight_end_incrementing_from_fiveEx13
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 38 }));
     match vm.run() {
         VMResult::Ok(Value::Status(215)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(215)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(215)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49131,7 +50537,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1361Ex1338() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1361Ex1338 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49181,7 +50590,6 @@ fn subshell_end_exit_code_1362_propagatesEx1338() {
         other => panic!("exit code 1362 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AX (handwritten) ─────────────────────────────────────
 
@@ -49298,7 +50706,10 @@ fn subshell_one_hundred_one_hundred_seventy_nine_end_incrementing_from_sixEx1363
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 39 }));
     match vm.run() {
         VMResult::Ok(Value::Status(217)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(217)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(217)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49393,7 +50804,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1363() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1363 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1370)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1370)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1370)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49515,7 +50929,10 @@ fn subshell_forty_one_begins_thirty_nine_ends_last_end_status_winsEx1363() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1373Ex1363));
     match vm.run() {
         VMResult::Ok(Value::Status(1373)) => {}
-        other => panic!("seventeenth subshell_end(Some(1373)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1373)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 41);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 39);
@@ -49644,7 +51061,10 @@ fn subshell_one_hundred_one_hundred_eighty_end_incrementing_from_sevenEx1363() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 40 }));
     match vm.run() {
         VMResult::Ok(Value::Status(219)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(219)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(219)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49754,7 +51174,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1363() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1363 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1380)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1380)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1380)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49783,7 +51206,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1363() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -49843,7 +51269,10 @@ fn subshell_one_hundred_one_hundred_eighty_one_end_incrementing_from_oneEx1363()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 34 }));
     match vm.run() {
         VMResult::Ok(Value::Status(214)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(214)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(214)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49872,7 +51301,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1363() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1384)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1384, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1384, got {:?}",
+            other
+        ),
     }
 }
 
@@ -49898,10 +51330,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1363() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1385 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1385,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1385)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1385), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1385), got {:?}",
+            other
+        ),
     }
 }
 
@@ -49973,7 +51411,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1363() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1363 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1387)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1387)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1387)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50010,7 +51451,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1388Ex1363() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1388Ex1363));
     match vm.run() {
         VMResult::Ok(Value::Status(1388)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50048,7 +51492,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1389Ex1363() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1389Ex1363));
     match vm.run() {
         VMResult::Ok(Value::Status(1389)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50103,7 +51550,10 @@ fn subshell_one_hundred_one_hundred_eighty_two_end_incrementing_from_eightEx1363
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 41 }));
     match vm.run() {
         VMResult::Ok(Value::Status(222)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(222)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(222)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50173,7 +51623,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1393Ex1363() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1393Ex1363 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50189,7 +51642,6 @@ fn subshell_end_exit_code_1393_propagatesEx1363() {
         other => panic!("exit code 1393 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AY (handwritten) ─────────────────────────────────────
 
@@ -50306,7 +51758,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1394() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50401,7 +51856,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1394() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1394 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1401)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1401)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1401)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50523,7 +51981,10 @@ fn subshell_forty_two_begins_forty_ends_last_end_status_winsEx1394() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1404Ex1394));
     match vm.run() {
         VMResult::Ok(Value::Status(1404)) => {}
-        other => panic!("sixteenth subshell_end(Some(1404)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1404)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 42);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 40);
@@ -50662,7 +52123,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1394() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50783,7 +52247,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1394() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -50812,7 +52279,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1394() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1413)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1413, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1413, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50838,10 +52308,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1394() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1414 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1414,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1414)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1414), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1414), got {:?}",
+            other
+        ),
     }
 }
 
@@ -50896,7 +52372,10 @@ fn subshell_one_hundred_one_hundred_eighty_five_end_incrementing_from_fiveEx1394
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 41 }));
     match vm.run() {
         VMResult::Ok(Value::Status(225)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(225)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(225)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50936,7 +52415,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1417Ex1394() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1417Ex1394 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -50986,7 +52468,6 @@ fn subshell_end_exit_code_1418_propagatesEx1394() {
         other => panic!("exit code 1418 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch AZ (handwritten) ─────────────────────────────────────
 
@@ -51103,7 +52584,10 @@ fn subshell_one_hundred_one_hundred_eighty_six_end_incrementing_from_sixEx1419()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 42 }));
     match vm.run() {
         VMResult::Ok(Value::Status(227)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(227)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(227)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51198,7 +52682,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1419() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1419 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1426)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1426)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1426)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51320,7 +52807,10 @@ fn subshell_forty_three_begins_forty_one_ends_last_end_status_winsEx1419() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1429Ex1419));
     match vm.run() {
         VMResult::Ok(Value::Status(1429)) => {}
-        other => panic!("seventeenth subshell_end(Some(1429)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1429)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 43);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 41);
@@ -51449,7 +52939,10 @@ fn subshell_one_hundred_one_hundred_eighty_seven_end_incrementing_from_sevenEx14
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 43 }));
     match vm.run() {
         VMResult::Ok(Value::Status(229)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(229)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(229)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51559,7 +53052,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1419() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1419 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1436)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1436)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1436)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51588,7 +53084,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1419() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -51648,7 +53147,10 @@ fn subshell_one_hundred_one_hundred_eighty_eight_end_incrementing_from_oneEx1419
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 37 }));
     match vm.run() {
         VMResult::Ok(Value::Status(224)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(224)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(224)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51677,7 +53179,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1419() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1440)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1440, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1440, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51703,10 +53208,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1419() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1441 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1441,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1441)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1441), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1441), got {:?}",
+            other
+        ),
     }
 }
 
@@ -51778,7 +53289,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1419() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1419 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1443)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1443)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1443)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51815,7 +53329,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1444Ex1419() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1444Ex1419));
     match vm.run() {
         VMResult::Ok(Value::Status(1444)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51853,7 +53370,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1445Ex1419() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1445Ex1419));
     match vm.run() {
         VMResult::Ok(Value::Status(1445)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51908,7 +53428,10 @@ fn subshell_one_hundred_one_hundred_eighty_nine_end_incrementing_from_eightEx141
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 44 }));
     match vm.run() {
         VMResult::Ok(Value::Status(232)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(232)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(232)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51978,7 +53501,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1449Ex1419() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1449Ex1419 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -51994,7 +53520,6 @@ fn subshell_end_exit_code_1449_propagatesEx1419() {
         other => panic!("exit code 1449 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BA (handwritten) ─────────────────────────────────────
 
@@ -52111,7 +53636,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1450() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -52206,7 +53734,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1450() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1450 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1457)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1457)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1457)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -52328,7 +53859,10 @@ fn subshell_forty_four_begins_forty_two_ends_last_end_status_winsEx1450() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1460Ex1450));
     match vm.run() {
         VMResult::Ok(Value::Status(1460)) => {}
-        other => panic!("sixteenth subshell_end(Some(1460)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1460)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 44);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 42);
@@ -52467,7 +54001,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1450() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -52588,7 +54125,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1450() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -52617,7 +54157,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1450() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1469)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1469, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1469, got {:?}",
+            other
+        ),
     }
 }
 
@@ -52643,10 +54186,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1450() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1470 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1470,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1470)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1470), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1470), got {:?}",
+            other
+        ),
     }
 }
 
@@ -52701,7 +54250,10 @@ fn subshell_one_hundred_one_hundred_ninety_two_end_incrementing_from_fiveEx1450(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 44 }));
     match vm.run() {
         VMResult::Ok(Value::Status(235)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(235)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(235)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -52741,7 +54293,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1473Ex1450() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1473Ex1450 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -52791,7 +54346,6 @@ fn subshell_end_exit_code_1474_propagatesEx1450() {
         other => panic!("exit code 1474 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BB (handwritten) ─────────────────────────────────────
 
@@ -52908,7 +54462,10 @@ fn subshell_one_hundred_one_hundred_ninety_three_end_incrementing_from_sixEx1475
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 45 }));
     match vm.run() {
         VMResult::Ok(Value::Status(237)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(237)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(237)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53003,7 +54560,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1475() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1475 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1482)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1482)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1482)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53125,7 +54685,10 @@ fn subshell_forty_five_begins_forty_three_ends_last_end_status_winsEx1475() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1485Ex1475));
     match vm.run() {
         VMResult::Ok(Value::Status(1485)) => {}
-        other => panic!("seventeenth subshell_end(Some(1485)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1485)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 45);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 43);
@@ -53254,7 +54817,10 @@ fn subshell_one_hundred_one_hundred_ninety_four_end_incrementing_from_sevenEx147
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 46 }));
     match vm.run() {
         VMResult::Ok(Value::Status(239)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(239)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(239)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53364,7 +54930,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1475() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1475 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1492)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1492)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1492)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53393,7 +54962,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1475() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -53453,7 +55025,10 @@ fn subshell_one_hundred_one_hundred_ninety_five_end_incrementing_from_oneEx1475(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 40 }));
     match vm.run() {
         VMResult::Ok(Value::Status(234)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(234)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(234)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53482,7 +55057,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1475() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1496)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1496, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1496, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53508,10 +55086,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1475() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1497 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1497,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1497)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1497), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1497), got {:?}",
+            other
+        ),
     }
 }
 
@@ -53583,7 +55167,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1475() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1475 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1499)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1499)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1499)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53620,7 +55207,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1500Ex1475() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1500Ex1475));
     match vm.run() {
         VMResult::Ok(Value::Status(1500)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53658,7 +55248,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1501Ex1475() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1501Ex1475));
     match vm.run() {
         VMResult::Ok(Value::Status(1501)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53713,7 +55306,10 @@ fn subshell_one_hundred_one_hundred_ninety_six_end_incrementing_from_eightEx1475
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 47 }));
     match vm.run() {
         VMResult::Ok(Value::Status(242)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(242)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(242)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53783,7 +55379,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1505Ex1475() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1505Ex1475 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -53799,7 +55398,6 @@ fn subshell_end_exit_code_1505_propagatesEx1475() {
         other => panic!("exit code 1505 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BC (handwritten) ─────────────────────────────────────
 
@@ -53916,7 +55514,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1506() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -54011,7 +55612,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1506() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1506 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1513)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1513)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1513)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -54133,7 +55737,10 @@ fn subshell_forty_six_begins_forty_four_ends_last_end_status_winsEx1506() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1516Ex1506));
     match vm.run() {
         VMResult::Ok(Value::Status(1516)) => {}
-        other => panic!("sixteenth subshell_end(Some(1516)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1516)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 46);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 44);
@@ -54272,7 +55879,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1506() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -54393,7 +56003,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1506() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -54422,7 +56035,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1506() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1525)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1525, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1525, got {:?}",
+            other
+        ),
     }
 }
 
@@ -54448,10 +56064,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1506() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1526 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1526,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1526)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1526), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1526), got {:?}",
+            other
+        ),
     }
 }
 
@@ -54506,7 +56128,10 @@ fn subshell_one_hundred_one_hundred_ninety_nine_end_incrementing_from_fiveEx1506
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 47 }));
     match vm.run() {
         VMResult::Ok(Value::Status(245)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(245)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(245)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -54546,7 +56171,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1529Ex1506() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1529Ex1506 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -54596,7 +56224,6 @@ fn subshell_end_exit_code_1530_propagatesEx1506() {
         other => panic!("exit code 1530 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BD (handwritten) ─────────────────────────────────────
 
@@ -54713,7 +56340,10 @@ fn subshell_one_hundred_two_hundred_end_incrementing_from_sixEx1531() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 48 }));
     match vm.run() {
         VMResult::Ok(Value::Status(247)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(247)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(247)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -54808,7 +56438,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1531() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1531 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1538)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1538)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1538)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -54930,7 +56563,10 @@ fn subshell_forty_seven_begins_forty_five_ends_last_end_status_winsEx1531() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1541Ex1531));
     match vm.run() {
         VMResult::Ok(Value::Status(1541)) => {}
-        other => panic!("seventeenth subshell_end(Some(1541)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1541)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 47);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 45);
@@ -55059,7 +56695,10 @@ fn subshell_one_hundred_two_hundred_one_end_incrementing_from_sevenEx1531() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 49 }));
     match vm.run() {
         VMResult::Ok(Value::Status(249)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(249)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(249)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55169,7 +56808,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1531() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1531 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1548)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1548)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1548)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55198,7 +56840,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1531() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -55258,7 +56903,10 @@ fn subshell_one_hundred_two_hundred_two_end_incrementing_from_oneEx1531() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 43 }));
     match vm.run() {
         VMResult::Ok(Value::Status(244)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(244)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(244)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55287,7 +56935,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1531() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1552)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1552, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1552, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55313,10 +56964,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1531() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1553 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1553,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1553)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1553), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1553), got {:?}",
+            other
+        ),
     }
 }
 
@@ -55388,7 +57045,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1531() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1531 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1555)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1555)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1555)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55425,7 +57085,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1556Ex1531() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1556Ex1531));
     match vm.run() {
         VMResult::Ok(Value::Status(1556)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55463,7 +57126,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1557Ex1531() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1557Ex1531));
     match vm.run() {
         VMResult::Ok(Value::Status(1557)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55518,7 +57184,10 @@ fn subshell_one_hundred_two_hundred_three_end_incrementing_from_eightEx1531() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 50 }));
     match vm.run() {
         VMResult::Ok(Value::Status(252)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(252)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(252)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55588,7 +57257,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1561Ex1531() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1561Ex1531 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55604,7 +57276,6 @@ fn subshell_end_exit_code_1561_propagatesEx1531() {
         other => panic!("exit code 1561 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BE (handwritten) ─────────────────────────────────────
 
@@ -55721,7 +57392,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1562() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55816,7 +57490,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1562() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1562 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1569)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1569)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1569)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -55938,7 +57615,10 @@ fn subshell_forty_eight_begins_forty_six_ends_last_end_status_winsEx1562() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1572Ex1562));
     match vm.run() {
         VMResult::Ok(Value::Status(1572)) => {}
-        other => panic!("sixteenth subshell_end(Some(1572)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1572)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 48);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 46);
@@ -56077,7 +57757,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1562() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -56198,7 +57881,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1562() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -56227,7 +57913,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1562() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1581)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1581, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1581, got {:?}",
+            other
+        ),
     }
 }
 
@@ -56253,10 +57942,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1562() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1582 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1582,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1582)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1582), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1582), got {:?}",
+            other
+        ),
     }
 }
 
@@ -56311,7 +58006,10 @@ fn subshell_one_hundred_two_hundred_six_end_incrementing_from_fiveEx1562() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 50 }));
     match vm.run() {
         VMResult::Ok(Value::Status(255)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(255)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(255)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -56351,7 +58049,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1585Ex1562() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1585Ex1562 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -56401,7 +58102,6 @@ fn subshell_end_exit_code_1586_propagatesEx1562() {
         other => panic!("exit code 1586 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BF (handwritten) ─────────────────────────────────────
 
@@ -56518,7 +58218,10 @@ fn subshell_one_hundred_two_hundred_seven_end_incrementing_from_sixEx1587() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 51 }));
     match vm.run() {
         VMResult::Ok(Value::Status(257)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(257)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(257)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -56613,7 +58316,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1587() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1587 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1594)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1594)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1594)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -56735,7 +58441,10 @@ fn subshell_forty_nine_begins_forty_seven_ends_last_end_status_winsEx1587() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1597Ex1587));
     match vm.run() {
         VMResult::Ok(Value::Status(1597)) => {}
-        other => panic!("seventeenth subshell_end(Some(1597)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1597)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 49);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 47);
@@ -56864,7 +58573,10 @@ fn subshell_one_hundred_two_hundred_eight_end_incrementing_from_sevenEx1587() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 52 }));
     match vm.run() {
         VMResult::Ok(Value::Status(259)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(259)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(259)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -56974,7 +58686,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1587() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1587 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1604)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1604)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1604)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57003,7 +58718,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1587() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -57063,7 +58781,10 @@ fn subshell_one_hundred_two_hundred_nine_end_incrementing_from_oneEx1587() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 46 }));
     match vm.run() {
         VMResult::Ok(Value::Status(254)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(254)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(254)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57092,7 +58813,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1587() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1608)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1608, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1608, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57118,10 +58842,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1587() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1609 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1609,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1609)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1609), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1609), got {:?}",
+            other
+        ),
     }
 }
 
@@ -57193,7 +58923,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1587() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1587 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1611)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1611)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1611)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57230,7 +58963,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1612Ex1587() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1612Ex1587));
     match vm.run() {
         VMResult::Ok(Value::Status(1612)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57268,7 +59004,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1613Ex1587() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1613Ex1587));
     match vm.run() {
         VMResult::Ok(Value::Status(1613)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57323,7 +59062,10 @@ fn subshell_one_hundred_two_hundred_ten_end_incrementing_from_eightEx1587() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 53 }));
     match vm.run() {
         VMResult::Ok(Value::Status(262)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(262)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(262)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57393,7 +59135,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1617Ex1587() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1617Ex1587 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57409,7 +59154,6 @@ fn subshell_end_exit_code_1617_propagatesEx1587() {
         other => panic!("exit code 1617 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BG (handwritten) ─────────────────────────────────────
 
@@ -57526,7 +59270,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1618() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57621,7 +59368,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1618() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1618 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1625)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1625)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1625)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -57743,7 +59493,10 @@ fn subshell_fifty_begins_forty_eight_ends_last_end_status_winsEx1618() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1628Ex1618));
     match vm.run() {
         VMResult::Ok(Value::Status(1628)) => {}
-        other => panic!("sixteenth subshell_end(Some(1628)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1628)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 50);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 48);
@@ -57882,7 +59635,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1618() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58003,7 +59759,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1618() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -58032,7 +59791,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1618() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1637)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1637, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1637, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58058,10 +59820,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1618() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1638 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1638,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1638)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1638), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1638), got {:?}",
+            other
+        ),
     }
 }
 
@@ -58116,7 +59884,10 @@ fn subshell_one_hundred_two_hundred_thirteen_end_incrementing_from_fiveEx1618() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 53 }));
     match vm.run() {
         VMResult::Ok(Value::Status(265)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(265)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(265)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58156,7 +59927,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1641Ex1618() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1641Ex1618 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58206,7 +59980,6 @@ fn subshell_end_exit_code_1642_propagatesEx1618() {
         other => panic!("exit code 1642 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BH (handwritten) ─────────────────────────────────────
 
@@ -58323,7 +60096,10 @@ fn subshell_one_hundred_two_hundred_fourteen_end_incrementing_from_sixEx1643() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 54 }));
     match vm.run() {
         VMResult::Ok(Value::Status(267)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(267)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(267)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58418,7 +60194,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1643() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1643 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1650)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1650)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1650)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58540,7 +60319,10 @@ fn subshell_fifty_one_begins_forty_nine_ends_last_end_status_winsEx1643() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1653Ex1643));
     match vm.run() {
         VMResult::Ok(Value::Status(1653)) => {}
-        other => panic!("seventeenth subshell_end(Some(1653)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1653)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 51);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 49);
@@ -58669,7 +60451,10 @@ fn subshell_one_hundred_two_hundred_fifteen_end_incrementing_from_sevenEx1643() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 55 }));
     match vm.run() {
         VMResult::Ok(Value::Status(269)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(269)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(269)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58779,7 +60564,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1643() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1643 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1660)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1660)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1660)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58808,7 +60596,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1643() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -58868,7 +60659,10 @@ fn subshell_one_hundred_two_hundred_sixteen_end_incrementing_from_oneEx1643() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 49 }));
     match vm.run() {
         VMResult::Ok(Value::Status(264)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(264)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(264)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58897,7 +60691,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1643() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1664)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1664, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1664, got {:?}",
+            other
+        ),
     }
 }
 
@@ -58923,10 +60720,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1643() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1665 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1665,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1665)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1665), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1665), got {:?}",
+            other
+        ),
     }
 }
 
@@ -58998,7 +60801,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1643() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1643 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1667)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1667)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1667)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59035,7 +60841,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1668Ex1643() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1668Ex1643));
     match vm.run() {
         VMResult::Ok(Value::Status(1668)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59073,7 +60882,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1669Ex1643() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1669Ex1643));
     match vm.run() {
         VMResult::Ok(Value::Status(1669)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59128,7 +60940,10 @@ fn subshell_one_hundred_two_hundred_seventeen_end_incrementing_from_eightEx1643(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 56 }));
     match vm.run() {
         VMResult::Ok(Value::Status(272)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(272)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(272)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59198,7 +61013,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1673Ex1643() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1673Ex1643 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59214,7 +61032,6 @@ fn subshell_end_exit_code_1673_propagatesEx1643() {
         other => panic!("exit code 1673 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BI (handwritten) ─────────────────────────────────────
 
@@ -59331,7 +61148,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1674() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59426,7 +61246,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1674() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1674 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1681)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1681)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1681)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59548,7 +61371,10 @@ fn subshell_fifty_two_begins_fifty_ends_last_end_status_winsEx1674() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1684Ex1674));
     match vm.run() {
         VMResult::Ok(Value::Status(1684)) => {}
-        other => panic!("sixteenth subshell_end(Some(1684)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1684)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 52);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 50);
@@ -59687,7 +61513,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1674() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59808,7 +61637,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1674() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -59837,7 +61669,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1674() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1693)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1693, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1693, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59863,10 +61698,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1674() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1694 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1694,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1694)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1694), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1694), got {:?}",
+            other
+        ),
     }
 }
 
@@ -59921,7 +61762,10 @@ fn subshell_one_hundred_two_hundred_twenty_end_incrementing_from_fiveEx1674() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 56 }));
     match vm.run() {
         VMResult::Ok(Value::Status(275)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(275)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(275)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -59961,7 +61805,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1697Ex1674() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1697Ex1674 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60011,7 +61858,6 @@ fn subshell_end_exit_code_1698_propagatesEx1674() {
         other => panic!("exit code 1698 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BJ (handwritten) ─────────────────────────────────────
 
@@ -60128,7 +61974,10 @@ fn subshell_one_hundred_two_hundred_twenty_one_end_incrementing_from_sixEx1699()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 57 }));
     match vm.run() {
         VMResult::Ok(Value::Status(277)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(277)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(277)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60223,7 +62072,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1699() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1699 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1706)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1706)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1706)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60345,7 +62197,10 @@ fn subshell_fifty_three_begins_fifty_one_ends_last_end_status_winsEx1699() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1709Ex1699));
     match vm.run() {
         VMResult::Ok(Value::Status(1709)) => {}
-        other => panic!("seventeenth subshell_end(Some(1709)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1709)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 53);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 51);
@@ -60474,7 +62329,10 @@ fn subshell_one_hundred_two_hundred_twenty_two_end_incrementing_from_sevenEx1699
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 58 }));
     match vm.run() {
         VMResult::Ok(Value::Status(279)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(279)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(279)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60584,7 +62442,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1699() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1699 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1716)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1716)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1716)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60613,7 +62474,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1699() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -60673,7 +62537,10 @@ fn subshell_one_hundred_two_hundred_twenty_three_end_incrementing_from_oneEx1699
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 52 }));
     match vm.run() {
         VMResult::Ok(Value::Status(274)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(274)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(274)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60702,7 +62569,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1699() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1720)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1720, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1720, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60728,10 +62598,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1699() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1721 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1721,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1721)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1721), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1721), got {:?}",
+            other
+        ),
     }
 }
 
@@ -60803,7 +62679,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1699() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1699 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1723)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1723)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1723)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60840,7 +62719,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1724Ex1699() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1724Ex1699));
     match vm.run() {
         VMResult::Ok(Value::Status(1724)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60878,7 +62760,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1725Ex1699() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1725Ex1699));
     match vm.run() {
         VMResult::Ok(Value::Status(1725)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -60933,7 +62818,10 @@ fn subshell_one_hundred_two_hundred_twenty_four_end_incrementing_from_eightEx169
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 59 }));
     match vm.run() {
         VMResult::Ok(Value::Status(282)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(282)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(282)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -61003,7 +62891,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1729Ex1699() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1729Ex1699 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -61019,7 +62910,6 @@ fn subshell_end_exit_code_1729_propagatesEx1699() {
         other => panic!("exit code 1729 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BK (handwritten) ─────────────────────────────────────
 
@@ -61136,7 +63026,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1730() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -61231,7 +63124,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1730() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1730 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1737)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1737)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1737)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -61353,7 +63249,10 @@ fn subshell_fifty_four_begins_fifty_two_ends_last_end_status_winsEx1730() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1740Ex1730));
     match vm.run() {
         VMResult::Ok(Value::Status(1740)) => {}
-        other => panic!("sixteenth subshell_end(Some(1740)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1740)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 54);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 52);
@@ -61492,7 +63391,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1730() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -61613,7 +63515,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1730() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -61642,7 +63547,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1730() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1749)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1749, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1749, got {:?}",
+            other
+        ),
     }
 }
 
@@ -61668,10 +63576,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1730() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1750 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1750,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1750)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1750), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1750), got {:?}",
+            other
+        ),
     }
 }
 
@@ -61726,7 +63640,10 @@ fn subshell_one_hundred_two_hundred_twenty_seven_end_incrementing_from_fiveEx173
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 59 }));
     match vm.run() {
         VMResult::Ok(Value::Status(285)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(285)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(285)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -61766,7 +63683,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1753Ex1730() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1753Ex1730 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -61816,7 +63736,6 @@ fn subshell_end_exit_code_1754_propagatesEx1730() {
         other => panic!("exit code 1754 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BL (handwritten) ─────────────────────────────────────
 
@@ -61933,7 +63852,10 @@ fn subshell_one_hundred_two_hundred_twenty_eight_end_incrementing_from_sixEx1755
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 60 }));
     match vm.run() {
         VMResult::Ok(Value::Status(287)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(287)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(287)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62028,7 +63950,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1755() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1755 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1762)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1762)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1762)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62150,7 +64075,10 @@ fn subshell_fifty_five_begins_fifty_three_ends_last_end_status_winsEx1755() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1765Ex1755));
     match vm.run() {
         VMResult::Ok(Value::Status(1765)) => {}
-        other => panic!("seventeenth subshell_end(Some(1765)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1765)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 55);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 53);
@@ -62279,7 +64207,10 @@ fn subshell_one_hundred_two_hundred_twenty_nine_end_incrementing_from_sevenEx175
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 61 }));
     match vm.run() {
         VMResult::Ok(Value::Status(289)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(289)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(289)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62389,7 +64320,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1755() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1755 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1772)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1772)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1772)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62418,7 +64352,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1755() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -62478,7 +64415,10 @@ fn subshell_one_hundred_two_hundred_thirty_end_incrementing_from_oneEx1755() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 55 }));
     match vm.run() {
         VMResult::Ok(Value::Status(284)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(284)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(284)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62507,7 +64447,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1755() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1776)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1776, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1776, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62533,10 +64476,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1755() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1777 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1777,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1777)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1777), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1777), got {:?}",
+            other
+        ),
     }
 }
 
@@ -62608,7 +64557,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1755() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1755 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1779)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1779)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1779)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62645,7 +64597,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1780Ex1755() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1780Ex1755));
     match vm.run() {
         VMResult::Ok(Value::Status(1780)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62683,7 +64638,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1781Ex1755() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1781Ex1755));
     match vm.run() {
         VMResult::Ok(Value::Status(1781)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62738,7 +64696,10 @@ fn subshell_one_hundred_two_hundred_thirty_one_end_incrementing_from_eightEx1755
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 62 }));
     match vm.run() {
         VMResult::Ok(Value::Status(292)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(292)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(292)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62808,7 +64769,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1785Ex1755() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1785Ex1755 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -62824,7 +64788,6 @@ fn subshell_end_exit_code_1785_propagatesEx1755() {
         other => panic!("exit code 1785 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BM (handwritten) ─────────────────────────────────────
 
@@ -62941,7 +64904,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1786() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -63036,7 +65002,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1786() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1786 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1793)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1793)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1793)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -63158,7 +65127,10 @@ fn subshell_fifty_six_begins_fifty_four_ends_last_end_status_winsEx1786() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1796Ex1786));
     match vm.run() {
         VMResult::Ok(Value::Status(1796)) => {}
-        other => panic!("sixteenth subshell_end(Some(1796)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1796)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 56);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 54);
@@ -63297,7 +65269,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1786() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -63418,7 +65393,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1786() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -63447,7 +65425,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1786() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1805)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1805, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1805, got {:?}",
+            other
+        ),
     }
 }
 
@@ -63473,10 +65454,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1786() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1806 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1806,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1806)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1806), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1806), got {:?}",
+            other
+        ),
     }
 }
 
@@ -63531,7 +65518,10 @@ fn subshell_one_hundred_two_hundred_thirty_four_end_incrementing_from_fiveEx1786
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 62 }));
     match vm.run() {
         VMResult::Ok(Value::Status(295)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(295)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(295)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -63571,7 +65561,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1809Ex1786() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1809Ex1786 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -63621,7 +65614,6 @@ fn subshell_end_exit_code_1810_propagatesEx1786() {
         other => panic!("exit code 1810 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BN (handwritten) ─────────────────────────────────────
 
@@ -63738,7 +65730,10 @@ fn subshell_one_hundred_two_hundred_thirty_five_end_incrementing_from_sixEx1811(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 63 }));
     match vm.run() {
         VMResult::Ok(Value::Status(297)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(297)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(297)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -63833,7 +65828,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1811() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1811 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1818)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1818)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1818)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -63955,7 +65953,10 @@ fn subshell_fifty_seven_begins_fifty_five_ends_last_end_status_winsEx1811() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1821Ex1811));
     match vm.run() {
         VMResult::Ok(Value::Status(1821)) => {}
-        other => panic!("seventeenth subshell_end(Some(1821)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1821)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 57);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 55);
@@ -64084,7 +66085,10 @@ fn subshell_one_hundred_two_hundred_thirty_six_end_incrementing_from_sevenEx1811
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 64 }));
     match vm.run() {
         VMResult::Ok(Value::Status(299)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(299)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(299)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64194,7 +66198,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1811() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1811 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1828)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1828)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1828)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64223,7 +66230,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1811() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -64283,7 +66293,10 @@ fn subshell_one_hundred_two_hundred_thirty_seven_end_incrementing_from_oneEx1811
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 58 }));
     match vm.run() {
         VMResult::Ok(Value::Status(294)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(294)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(294)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64312,7 +66325,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1811() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1832)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1832, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1832, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64338,10 +66354,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1811() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1833 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1833,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1833)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1833), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1833), got {:?}",
+            other
+        ),
     }
 }
 
@@ -64413,7 +66435,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1811() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1811 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1835)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1835)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1835)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64450,7 +66475,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1836Ex1811() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1836Ex1811));
     match vm.run() {
         VMResult::Ok(Value::Status(1836)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64488,7 +66516,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1837Ex1811() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1837Ex1811));
     match vm.run() {
         VMResult::Ok(Value::Status(1837)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64543,7 +66574,10 @@ fn subshell_one_hundred_two_hundred_thirty_eight_end_incrementing_from_eightEx18
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 65 }));
     match vm.run() {
         VMResult::Ok(Value::Status(302)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(302)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(302)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64613,7 +66647,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1841Ex1811() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1841Ex1811 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64629,7 +66666,6 @@ fn subshell_end_exit_code_1841_propagatesEx1811() {
         other => panic!("exit code 1841 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BO (handwritten) ─────────────────────────────────────
 
@@ -64746,7 +66782,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1842() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64841,7 +66880,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1842() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1842 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1849)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1849)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1849)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -64963,7 +67005,10 @@ fn subshell_fifty_eight_begins_fifty_six_ends_last_end_status_winsEx1842() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1852Ex1842));
     match vm.run() {
         VMResult::Ok(Value::Status(1852)) => {}
-        other => panic!("sixteenth subshell_end(Some(1852)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1852)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 58);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 56);
@@ -65102,7 +67147,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1842() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -65223,7 +67271,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1842() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -65252,7 +67303,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1842() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1861)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1861, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1861, got {:?}",
+            other
+        ),
     }
 }
 
@@ -65278,10 +67332,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1842() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1862 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1862,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1862)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1862), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1862), got {:?}",
+            other
+        ),
     }
 }
 
@@ -65336,7 +67396,10 @@ fn subshell_one_hundred_two_hundred_forty_one_end_incrementing_from_fiveEx1842()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 65 }));
     match vm.run() {
         VMResult::Ok(Value::Status(305)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(305)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(305)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -65376,7 +67439,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1865Ex1842() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1865Ex1842 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -65426,7 +67492,6 @@ fn subshell_end_exit_code_1866_propagatesEx1842() {
         other => panic!("exit code 1866 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BP (handwritten) ─────────────────────────────────────
 
@@ -65543,7 +67608,10 @@ fn subshell_one_hundred_two_hundred_forty_two_end_incrementing_from_sixEx1867() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 66 }));
     match vm.run() {
         VMResult::Ok(Value::Status(307)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(307)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(307)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -65638,7 +67706,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1867() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1867 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1874)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1874)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1874)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -65760,7 +67831,10 @@ fn subshell_fifty_nine_begins_fifty_seven_ends_last_end_status_winsEx1867() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1877Ex1867));
     match vm.run() {
         VMResult::Ok(Value::Status(1877)) => {}
-        other => panic!("seventeenth subshell_end(Some(1877)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1877)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 59);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 57);
@@ -65889,7 +67963,10 @@ fn subshell_one_hundred_two_hundred_forty_three_end_incrementing_from_sevenEx186
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 67 }));
     match vm.run() {
         VMResult::Ok(Value::Status(309)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(309)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(309)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -65999,7 +68076,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1867() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1867 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1884)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1884)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1884)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66028,7 +68108,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1867() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -66088,7 +68171,10 @@ fn subshell_one_hundred_two_hundred_forty_four_end_incrementing_from_oneEx1867()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 61 }));
     match vm.run() {
         VMResult::Ok(Value::Status(304)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(304)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(304)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66117,7 +68203,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1867() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1888)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1888, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1888, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66143,10 +68232,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1867() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1889 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1889,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1889)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1889), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1889), got {:?}",
+            other
+        ),
     }
 }
 
@@ -66218,7 +68313,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1867() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1867 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1891)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1891)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1891)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66255,7 +68353,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1892Ex1867() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1892Ex1867));
     match vm.run() {
         VMResult::Ok(Value::Status(1892)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66293,7 +68394,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1893Ex1867() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1893Ex1867));
     match vm.run() {
         VMResult::Ok(Value::Status(1893)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66348,7 +68452,10 @@ fn subshell_one_hundred_two_hundred_forty_five_end_incrementing_from_eightEx1867
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 68 }));
     match vm.run() {
         VMResult::Ok(Value::Status(312)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(312)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(312)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66418,7 +68525,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1897Ex1867() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1897Ex1867 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66434,7 +68544,6 @@ fn subshell_end_exit_code_1897_propagatesEx1867() {
         other => panic!("exit code 1897 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BQ (handwritten) ─────────────────────────────────────
 
@@ -66551,7 +68660,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1898() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66646,7 +68758,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1898() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1898 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1905)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1905)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1905)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -66768,7 +68883,10 @@ fn subshell_sixty_begins_fifty_eight_ends_last_end_status_winsEx1898() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1908Ex1898));
     match vm.run() {
         VMResult::Ok(Value::Status(1908)) => {}
-        other => panic!("sixteenth subshell_end(Some(1908)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1908)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 60);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 58);
@@ -66907,7 +69025,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1898() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67028,7 +69149,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1898() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -67057,7 +69181,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1898() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1917)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1917, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1917, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67083,10 +69210,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1898() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1918 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1918,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1918)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1918), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1918), got {:?}",
+            other
+        ),
     }
 }
 
@@ -67141,7 +69274,10 @@ fn subshell_one_hundred_two_hundred_forty_eight_end_incrementing_from_fiveEx1898
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 68 }));
     match vm.run() {
         VMResult::Ok(Value::Status(315)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(315)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(315)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67181,7 +69317,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1921Ex1898() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1921Ex1898 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67231,7 +69370,6 @@ fn subshell_end_exit_code_1922_propagatesEx1898() {
         other => panic!("exit code 1922 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BR (handwritten) ─────────────────────────────────────
 
@@ -67348,7 +69486,10 @@ fn subshell_one_hundred_two_hundred_forty_nine_end_incrementing_from_sixEx1923()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 69 }));
     match vm.run() {
         VMResult::Ok(Value::Status(317)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(317)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(317)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67443,7 +69584,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1923() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1923 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1930)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1930)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1930)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67565,7 +69709,10 @@ fn subshell_sixty_one_begins_fifty_nine_ends_last_end_status_winsEx1923() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1933Ex1923));
     match vm.run() {
         VMResult::Ok(Value::Status(1933)) => {}
-        other => panic!("seventeenth subshell_end(Some(1933)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1933)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 61);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 59);
@@ -67694,7 +69841,10 @@ fn subshell_one_hundred_two_hundred_fifty_end_incrementing_from_sevenEx1923() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 70 }));
     match vm.run() {
         VMResult::Ok(Value::Status(319)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(319)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(319)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67804,7 +69954,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1923() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1923 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1940)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1940)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1940)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67833,7 +69986,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1923() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -67893,7 +70049,10 @@ fn subshell_one_hundred_two_hundred_fifty_one_end_incrementing_from_oneEx1923() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 64 }));
     match vm.run() {
         VMResult::Ok(Value::Status(314)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(314)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(314)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67922,7 +70081,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1923() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1944)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 1944, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 1944, got {:?}",
+            other
+        ),
     }
 }
 
@@ -67948,10 +70110,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1923() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1945 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1945,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1945)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(1945), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(1945), got {:?}",
+            other
+        ),
     }
 }
 
@@ -68023,7 +70191,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1923() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1923 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1947)) => {}
-        other => panic!("forty-eighth subshell_end(Some(1947)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(1947)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68060,7 +70231,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_1948Ex1923() {
     vm.set_shell_host(Box::new(PipelineSubshellHost1948Ex1923));
     match vm.run() {
         VMResult::Ok(Value::Status(1948)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68098,7 +70272,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_1949Ex1923() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost1949Ex1923));
     match vm.run() {
         VMResult::Ok(Value::Status(1949)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68153,7 +70330,10 @@ fn subshell_one_hundred_two_hundred_fifty_two_end_incrementing_from_eightEx1923(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 71 }));
     match vm.run() {
         VMResult::Ok(Value::Status(322)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(322)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(322)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68223,7 +70403,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1953Ex1923() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1953Ex1923 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68239,7 +70422,6 @@ fn subshell_end_exit_code_1953_propagatesEx1923() {
         other => panic!("exit code 1953 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BS (handwritten) ─────────────────────────────────────
 
@@ -68356,7 +70538,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx1954() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68451,7 +70636,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx1954() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx1954 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1961)) => {}
-        other => panic!("forty-fifth subshell_end(Some(1961)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(1961)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68573,7 +70761,10 @@ fn subshell_sixty_two_begins_sixty_ends_last_end_status_winsEx1954() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1964Ex1954));
     match vm.run() {
         VMResult::Ok(Value::Status(1964)) => {}
-        other => panic!("sixteenth subshell_end(Some(1964)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(1964)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 62);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 60);
@@ -68712,7 +70903,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx1954() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68833,7 +71027,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx1954() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -68862,7 +71059,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx1954() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(1973)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 1973, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 1973, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68888,10 +71088,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx1954() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 1974 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 1974,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(1974)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(1974), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(1974), got {:?}",
+            other
+        ),
     }
 }
 
@@ -68946,7 +71152,10 @@ fn subshell_one_hundred_two_hundred_fifty_five_end_incrementing_from_fiveEx1954(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 71 }));
     match vm.run() {
         VMResult::Ok(Value::Status(325)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(325)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(325)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -68986,7 +71195,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status1977Ex1954() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost1977Ex1954 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69036,7 +71248,6 @@ fn subshell_end_exit_code_1978_propagatesEx1954() {
         other => panic!("exit code 1978 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BT (handwritten) ─────────────────────────────────────
 
@@ -69153,7 +71364,10 @@ fn subshell_one_hundred_two_hundred_fifty_six_end_incrementing_from_sixEx1979() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 72 }));
     match vm.run() {
         VMResult::Ok(Value::Status(327)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(327)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(327)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69248,7 +71462,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx1979() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx1979 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1986)) => {}
-        other => panic!("forty-sixth subshell_end(Some(1986)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(1986)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69370,7 +71587,10 @@ fn subshell_sixty_three_begins_sixty_one_ends_last_end_status_winsEx1979() {
     vm.set_shell_host(Box::new(CountingBeginEndHost1989Ex1979));
     match vm.run() {
         VMResult::Ok(Value::Status(1989)) => {}
-        other => panic!("seventeenth subshell_end(Some(1989)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(1989)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 63);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 61);
@@ -69499,7 +71719,10 @@ fn subshell_one_hundred_two_hundred_fifty_seven_end_incrementing_from_sevenEx197
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 73 }));
     match vm.run() {
         VMResult::Ok(Value::Status(329)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(329)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(329)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69609,7 +71832,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx1979() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx1979 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(1996)) => {}
-        other => panic!("forty-seventh subshell_end(Some(1996)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(1996)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69638,7 +71864,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx1979() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -69698,7 +71927,10 @@ fn subshell_one_hundred_two_hundred_fifty_eight_end_incrementing_from_oneEx1979(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 67 }));
     match vm.run() {
         VMResult::Ok(Value::Status(324)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(324)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(324)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69727,7 +71959,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx1979() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2000)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2000, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2000, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69753,10 +71988,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx1979() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2001 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2001,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2001)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2001), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2001), got {:?}",
+            other
+        ),
     }
 }
 
@@ -69828,7 +72069,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx1979() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx1979 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2003)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2003)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2003)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69865,7 +72109,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2004Ex1979() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2004Ex1979));
     match vm.run() {
         VMResult::Ok(Value::Status(2004)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69903,7 +72150,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2005Ex1979() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2005Ex1979));
     match vm.run() {
         VMResult::Ok(Value::Status(2005)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -69958,7 +72208,10 @@ fn subshell_one_hundred_two_hundred_fifty_nine_end_incrementing_from_eightEx1979
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 74 }));
     match vm.run() {
         VMResult::Ok(Value::Status(332)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(332)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(332)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -70028,7 +72281,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2009Ex1979() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2009Ex1979 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -70044,7 +72300,6 @@ fn subshell_end_exit_code_2009_propagatesEx1979() {
         other => panic!("exit code 2009 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BU (handwritten) ─────────────────────────────────────
 
@@ -70161,7 +72416,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2010() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -70256,7 +72514,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2010() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2010 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2017)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2017)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2017)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -70378,7 +72639,10 @@ fn subshell_sixty_four_begins_sixty_two_ends_last_end_status_winsEx2010() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2020Ex2010));
     match vm.run() {
         VMResult::Ok(Value::Status(2020)) => {}
-        other => panic!("sixteenth subshell_end(Some(2020)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2020)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 64);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 62);
@@ -70517,7 +72781,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2010() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -70638,7 +72905,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2010() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -70667,7 +72937,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2010() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2029)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2029, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2029, got {:?}",
+            other
+        ),
     }
 }
 
@@ -70693,10 +72966,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2010() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2030 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2030,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2030)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2030), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2030), got {:?}",
+            other
+        ),
     }
 }
 
@@ -70751,7 +73030,10 @@ fn subshell_one_hundred_two_hundred_sixty_two_end_incrementing_from_fiveEx2010()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 74 }));
     match vm.run() {
         VMResult::Ok(Value::Status(335)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(335)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(335)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -70791,7 +73073,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2033Ex2010() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2033Ex2010 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -70841,7 +73126,6 @@ fn subshell_end_exit_code_2034_propagatesEx2010() {
         other => panic!("exit code 2034 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BV (handwritten) ─────────────────────────────────────
 
@@ -70958,7 +73242,10 @@ fn subshell_one_hundred_two_hundred_sixty_three_end_incrementing_from_sixEx2035(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 75 }));
     match vm.run() {
         VMResult::Ok(Value::Status(337)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(337)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(337)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71053,7 +73340,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2035() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2035 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2042)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2042)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2042)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71175,7 +73465,10 @@ fn subshell_sixty_five_begins_sixty_three_ends_last_end_status_winsEx2035() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2045Ex2035));
     match vm.run() {
         VMResult::Ok(Value::Status(2045)) => {}
-        other => panic!("seventeenth subshell_end(Some(2045)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2045)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 65);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 63);
@@ -71304,7 +73597,10 @@ fn subshell_one_hundred_two_hundred_sixty_four_end_incrementing_from_sevenEx2035
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 76 }));
     match vm.run() {
         VMResult::Ok(Value::Status(339)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(339)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(339)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71414,7 +73710,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2035() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2035 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2052)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2052)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2052)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71443,7 +73742,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2035() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -71503,7 +73805,10 @@ fn subshell_one_hundred_two_hundred_sixty_five_end_incrementing_from_oneEx2035()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 70 }));
     match vm.run() {
         VMResult::Ok(Value::Status(334)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(334)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(334)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71532,7 +73837,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2035() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2056)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2056, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2056, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71558,10 +73866,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2035() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2057 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2057,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2057)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2057), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2057), got {:?}",
+            other
+        ),
     }
 }
 
@@ -71633,7 +73947,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2035() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2035 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2059)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2059)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2059)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71670,7 +73987,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2060Ex2035() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2060Ex2035));
     match vm.run() {
         VMResult::Ok(Value::Status(2060)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71708,7 +74028,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2061Ex2035() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2061Ex2035));
     match vm.run() {
         VMResult::Ok(Value::Status(2061)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71763,7 +74086,10 @@ fn subshell_one_hundred_two_hundred_sixty_six_end_incrementing_from_eightEx2035(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 77 }));
     match vm.run() {
         VMResult::Ok(Value::Status(342)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(342)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(342)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71833,7 +74159,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2065Ex2035() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2065Ex2035 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -71849,7 +74178,6 @@ fn subshell_end_exit_code_2065_propagatesEx2035() {
         other => panic!("exit code 2065 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BW (handwritten) ─────────────────────────────────────
 
@@ -71966,7 +74294,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2066() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -72061,7 +74392,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2066() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2066 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2073)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2073)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2073)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -72183,7 +74517,10 @@ fn subshell_sixty_six_begins_sixty_four_ends_last_end_status_winsEx2066() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2076Ex2066));
     match vm.run() {
         VMResult::Ok(Value::Status(2076)) => {}
-        other => panic!("sixteenth subshell_end(Some(2076)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2076)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 66);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 64);
@@ -72322,7 +74659,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2066() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -72443,7 +74783,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2066() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -72472,7 +74815,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2066() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2085)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2085, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2085, got {:?}",
+            other
+        ),
     }
 }
 
@@ -72498,10 +74844,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2066() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2086 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2086,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2086)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2086), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2086), got {:?}",
+            other
+        ),
     }
 }
 
@@ -72556,7 +74908,10 @@ fn subshell_one_hundred_two_hundred_sixty_nine_end_incrementing_from_fiveEx2066(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 77 }));
     match vm.run() {
         VMResult::Ok(Value::Status(345)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(345)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(345)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -72596,7 +74951,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2089Ex2066() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2089Ex2066 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -72646,7 +75004,6 @@ fn subshell_end_exit_code_2090_propagatesEx2066() {
         other => panic!("exit code 2090 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BX (handwritten) ─────────────────────────────────────
 
@@ -72763,7 +75120,10 @@ fn subshell_one_hundred_two_hundred_seventy_end_incrementing_from_sixEx2091() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 78 }));
     match vm.run() {
         VMResult::Ok(Value::Status(347)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(347)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(347)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -72858,7 +75218,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2091() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2091 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2098)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2098)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2098)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -72980,7 +75343,10 @@ fn subshell_sixty_seven_begins_sixty_five_ends_last_end_status_winsEx2091() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2101Ex2091));
     match vm.run() {
         VMResult::Ok(Value::Status(2101)) => {}
-        other => panic!("seventeenth subshell_end(Some(2101)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2101)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 67);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 65);
@@ -73109,7 +75475,10 @@ fn subshell_one_hundred_two_hundred_seventy_one_end_incrementing_from_sevenEx209
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 79 }));
     match vm.run() {
         VMResult::Ok(Value::Status(349)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(349)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(349)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73219,7 +75588,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2091() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2091 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2108)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2108)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2108)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73248,7 +75620,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2091() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -73308,7 +75683,10 @@ fn subshell_one_hundred_two_hundred_seventy_two_end_incrementing_from_oneEx2091(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 73 }));
     match vm.run() {
         VMResult::Ok(Value::Status(344)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(344)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(344)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73337,7 +75715,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2091() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2112)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2112, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2112, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73363,10 +75744,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2091() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2113 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2113,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2113)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2113), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2113), got {:?}",
+            other
+        ),
     }
 }
 
@@ -73438,7 +75825,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2091() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2091 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2115)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2115)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2115)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73475,7 +75865,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2116Ex2091() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2116Ex2091));
     match vm.run() {
         VMResult::Ok(Value::Status(2116)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73513,7 +75906,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2117Ex2091() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2117Ex2091));
     match vm.run() {
         VMResult::Ok(Value::Status(2117)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73568,7 +75964,10 @@ fn subshell_one_hundred_two_hundred_seventy_three_end_incrementing_from_eightEx2
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 80 }));
     match vm.run() {
         VMResult::Ok(Value::Status(352)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(352)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(352)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73638,7 +76037,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2121Ex2091() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2121Ex2091 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73654,7 +76056,6 @@ fn subshell_end_exit_code_2121_propagatesEx2091() {
         other => panic!("exit code 2121 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BY (handwritten) ─────────────────────────────────────
 
@@ -73771,7 +76172,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2122() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73866,7 +76270,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2122() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2122 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2129)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2129)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2129)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -73988,7 +76395,10 @@ fn subshell_sixty_eight_begins_sixty_six_ends_last_end_status_winsEx2122() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2132Ex2122));
     match vm.run() {
         VMResult::Ok(Value::Status(2132)) => {}
-        other => panic!("sixteenth subshell_end(Some(2132)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2132)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 68);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 66);
@@ -74127,7 +76537,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2122() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -74248,7 +76661,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2122() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -74277,7 +76693,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2122() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2141)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2141, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2141, got {:?}",
+            other
+        ),
     }
 }
 
@@ -74303,10 +76722,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2122() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2142 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2142,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2142)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2142), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2142), got {:?}",
+            other
+        ),
     }
 }
 
@@ -74361,7 +76786,10 @@ fn subshell_one_hundred_two_hundred_seventy_six_end_incrementing_from_fiveEx2122
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 80 }));
     match vm.run() {
         VMResult::Ok(Value::Status(355)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(355)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(355)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -74401,7 +76829,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2145Ex2122() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2145Ex2122 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -74451,7 +76882,6 @@ fn subshell_end_exit_code_2146_propagatesEx2122() {
         other => panic!("exit code 2146 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch BZ (handwritten) ─────────────────────────────────────
 
@@ -74568,7 +76998,10 @@ fn subshell_one_hundred_two_hundred_seventy_seven_end_incrementing_from_sixEx214
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 81 }));
     match vm.run() {
         VMResult::Ok(Value::Status(357)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(357)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(357)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -74663,7 +77096,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2147() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2147 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2154)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2154)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2154)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -74785,7 +77221,10 @@ fn subshell_sixty_nine_begins_sixty_seven_ends_last_end_status_winsEx2147() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2157Ex2147));
     match vm.run() {
         VMResult::Ok(Value::Status(2157)) => {}
-        other => panic!("seventeenth subshell_end(Some(2157)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2157)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 69);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 67);
@@ -74914,7 +77353,10 @@ fn subshell_one_hundred_two_hundred_seventy_eight_end_incrementing_from_sevenEx2
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 82 }));
     match vm.run() {
         VMResult::Ok(Value::Status(359)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(359)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(359)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75024,7 +77466,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2147() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2147 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2164)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2164)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2164)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75053,7 +77498,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2147() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -75113,7 +77561,10 @@ fn subshell_one_hundred_two_hundred_seventy_nine_end_incrementing_from_oneEx2147
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 76 }));
     match vm.run() {
         VMResult::Ok(Value::Status(354)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(354)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(354)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75142,7 +77593,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2147() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2168)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2168, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2168, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75168,10 +77622,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2147() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2169 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2169,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2169)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2169), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2169), got {:?}",
+            other
+        ),
     }
 }
 
@@ -75243,7 +77703,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2147() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2147 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2171)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2171)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2171)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75280,7 +77743,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2172Ex2147() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2172Ex2147));
     match vm.run() {
         VMResult::Ok(Value::Status(2172)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75318,7 +77784,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2173Ex2147() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2173Ex2147));
     match vm.run() {
         VMResult::Ok(Value::Status(2173)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75373,7 +77842,10 @@ fn subshell_one_hundred_two_hundred_eighty_end_incrementing_from_eightEx2147() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 83 }));
     match vm.run() {
         VMResult::Ok(Value::Status(362)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(362)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(362)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75443,7 +77915,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2177Ex2147() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2177Ex2147 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75459,7 +77934,6 @@ fn subshell_end_exit_code_2177_propagatesEx2147() {
         other => panic!("exit code 2177 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CA (handwritten) ─────────────────────────────────────
 
@@ -75576,7 +78050,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2178() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75671,7 +78148,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2178() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2178 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2185)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2185)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2185)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -75793,7 +78273,10 @@ fn subshell_seventy_begins_sixty_eight_ends_last_end_status_winsEx2178() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2188Ex2178));
     match vm.run() {
         VMResult::Ok(Value::Status(2188)) => {}
-        other => panic!("sixteenth subshell_end(Some(2188)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2188)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 70);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 68);
@@ -75932,7 +78415,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2178() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76053,7 +78539,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2178() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -76082,7 +78571,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2178() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2197)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2197, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2197, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76108,10 +78600,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2178() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2198 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2198,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2198)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2198), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2198), got {:?}",
+            other
+        ),
     }
 }
 
@@ -76166,7 +78664,10 @@ fn subshell_one_hundred_two_hundred_eighty_three_end_incrementing_from_fiveEx217
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 83 }));
     match vm.run() {
         VMResult::Ok(Value::Status(365)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(365)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(365)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76206,7 +78707,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2201Ex2178() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2201Ex2178 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76256,7 +78760,6 @@ fn subshell_end_exit_code_2202_propagatesEx2178() {
         other => panic!("exit code 2202 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CB (handwritten) ─────────────────────────────────────
 
@@ -76373,7 +78876,10 @@ fn subshell_one_hundred_two_hundred_eighty_four_end_incrementing_from_sixEx2203(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 84 }));
     match vm.run() {
         VMResult::Ok(Value::Status(367)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(367)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(367)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76468,7 +78974,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2203() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2203 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2210)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2210)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2210)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76590,7 +79099,10 @@ fn subshell_seventy_one_begins_sixty_nine_ends_last_end_status_winsEx2203() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2213Ex2203));
     match vm.run() {
         VMResult::Ok(Value::Status(2213)) => {}
-        other => panic!("seventeenth subshell_end(Some(2213)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2213)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 71);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 69);
@@ -76719,7 +79231,10 @@ fn subshell_one_hundred_two_hundred_eighty_five_end_incrementing_from_sevenEx220
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 85 }));
     match vm.run() {
         VMResult::Ok(Value::Status(369)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(369)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(369)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76829,7 +79344,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2203() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2203 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2220)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2220)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2220)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76858,7 +79376,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2203() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -76918,7 +79439,10 @@ fn subshell_one_hundred_two_hundred_eighty_six_end_incrementing_from_oneEx2203()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 79 }));
     match vm.run() {
         VMResult::Ok(Value::Status(364)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(364)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(364)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76947,7 +79471,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2203() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2224)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2224, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2224, got {:?}",
+            other
+        ),
     }
 }
 
@@ -76973,10 +79500,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2203() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2225 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2225,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2225)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2225), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2225), got {:?}",
+            other
+        ),
     }
 }
 
@@ -77048,7 +79581,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2203() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2203 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2227)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2227)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2227)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77085,7 +79621,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2228Ex2203() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2228Ex2203));
     match vm.run() {
         VMResult::Ok(Value::Status(2228)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77123,7 +79662,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2229Ex2203() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2229Ex2203));
     match vm.run() {
         VMResult::Ok(Value::Status(2229)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77178,7 +79720,10 @@ fn subshell_one_hundred_two_hundred_eighty_seven_end_incrementing_from_eightEx22
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 86 }));
     match vm.run() {
         VMResult::Ok(Value::Status(372)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(372)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(372)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77248,7 +79793,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2233Ex2203() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2233Ex2203 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77264,7 +79812,6 @@ fn subshell_end_exit_code_2233_propagatesEx2203() {
         other => panic!("exit code 2233 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CC (handwritten) ─────────────────────────────────────
 
@@ -77381,7 +79928,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2234() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77476,7 +80026,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2234() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2234 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2241)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2241)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2241)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77598,7 +80151,10 @@ fn subshell_seventy_two_begins_seventy_ends_last_end_status_winsEx2234() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2244Ex2234));
     match vm.run() {
         VMResult::Ok(Value::Status(2244)) => {}
-        other => panic!("sixteenth subshell_end(Some(2244)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2244)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 72);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 70);
@@ -77737,7 +80293,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2234() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77858,7 +80417,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2234() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -77887,7 +80449,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2234() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2253)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2253, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2253, got {:?}",
+            other
+        ),
     }
 }
 
@@ -77913,10 +80478,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2234() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2254 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2254,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2254)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2254), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2254), got {:?}",
+            other
+        ),
     }
 }
 
@@ -77971,7 +80542,10 @@ fn subshell_one_hundred_two_hundred_ninety_end_incrementing_from_fiveEx2234() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 86 }));
     match vm.run() {
         VMResult::Ok(Value::Status(375)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(375)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(375)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78011,7 +80585,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2257Ex2234() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2257Ex2234 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78061,7 +80638,6 @@ fn subshell_end_exit_code_2258_propagatesEx2234() {
         other => panic!("exit code 2258 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CD (handwritten) ─────────────────────────────────────
 
@@ -78178,7 +80754,10 @@ fn subshell_one_hundred_two_hundred_ninety_one_end_incrementing_from_sixEx2259()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 87 }));
     match vm.run() {
         VMResult::Ok(Value::Status(377)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(377)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(377)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78273,7 +80852,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2259() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2259 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2266)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2266)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2266)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78395,7 +80977,10 @@ fn subshell_seventy_three_begins_seventy_one_ends_last_end_status_winsEx2259() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2269Ex2259));
     match vm.run() {
         VMResult::Ok(Value::Status(2269)) => {}
-        other => panic!("seventeenth subshell_end(Some(2269)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2269)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 73);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 71);
@@ -78524,7 +81109,10 @@ fn subshell_one_hundred_two_hundred_ninety_two_end_incrementing_from_sevenEx2259
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 88 }));
     match vm.run() {
         VMResult::Ok(Value::Status(379)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(379)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(379)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78634,7 +81222,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2259() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2259 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2276)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2276)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2276)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78663,7 +81254,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2259() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -78723,7 +81317,10 @@ fn subshell_one_hundred_two_hundred_ninety_three_end_incrementing_from_oneEx2259
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 82 }));
     match vm.run() {
         VMResult::Ok(Value::Status(374)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(374)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(374)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78752,7 +81349,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2259() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2280)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2280, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2280, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78778,10 +81378,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2259() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2281 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2281,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2281)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2281), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2281), got {:?}",
+            other
+        ),
     }
 }
 
@@ -78853,7 +81459,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2259() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2259 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2283)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2283)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2283)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78890,7 +81499,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2284Ex2259() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2284Ex2259));
     match vm.run() {
         VMResult::Ok(Value::Status(2284)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78928,7 +81540,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2285Ex2259() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2285Ex2259));
     match vm.run() {
         VMResult::Ok(Value::Status(2285)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -78983,7 +81598,10 @@ fn subshell_one_hundred_two_hundred_ninety_four_end_incrementing_from_eightEx225
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 89 }));
     match vm.run() {
         VMResult::Ok(Value::Status(382)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(382)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(382)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -79053,7 +81671,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2289Ex2259() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2289Ex2259 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -79069,7 +81690,6 @@ fn subshell_end_exit_code_2289_propagatesEx2259() {
         other => panic!("exit code 2289 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CE (handwritten) ─────────────────────────────────────
 
@@ -79186,7 +81806,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2290() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -79281,7 +81904,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2290() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2290 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2297)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2297)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2297)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -79403,7 +82029,10 @@ fn subshell_seventy_four_begins_seventy_two_ends_last_end_status_winsEx2290() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2300Ex2290));
     match vm.run() {
         VMResult::Ok(Value::Status(2300)) => {}
-        other => panic!("sixteenth subshell_end(Some(2300)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2300)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 74);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 72);
@@ -79542,7 +82171,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2290() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -79663,7 +82295,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2290() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -79692,7 +82327,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2290() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2309)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2309, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2309, got {:?}",
+            other
+        ),
     }
 }
 
@@ -79718,10 +82356,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2290() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2310 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2310,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2310)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2310), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2310), got {:?}",
+            other
+        ),
     }
 }
 
@@ -79776,7 +82420,10 @@ fn subshell_one_hundred_two_hundred_ninety_seven_end_incrementing_from_fiveEx229
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 89 }));
     match vm.run() {
         VMResult::Ok(Value::Status(385)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(385)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(385)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -79816,7 +82463,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2313Ex2290() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2313Ex2290 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -79866,7 +82516,6 @@ fn subshell_end_exit_code_2314_propagatesEx2290() {
         other => panic!("exit code 2314 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CF (handwritten) ─────────────────────────────────────
 
@@ -79983,7 +82632,10 @@ fn subshell_one_hundred_two_hundred_ninety_eight_end_incrementing_from_sixEx2315
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 90 }));
     match vm.run() {
         VMResult::Ok(Value::Status(387)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(387)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(387)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80078,7 +82730,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2315() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2315 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2322)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2322)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2322)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80200,7 +82855,10 @@ fn subshell_seventy_five_begins_seventy_three_ends_last_end_status_winsEx2315() 
     vm.set_shell_host(Box::new(CountingBeginEndHost2325Ex2315));
     match vm.run() {
         VMResult::Ok(Value::Status(2325)) => {}
-        other => panic!("seventeenth subshell_end(Some(2325)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2325)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 75);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 73);
@@ -80329,7 +82987,10 @@ fn subshell_one_hundred_two_hundred_ninety_nine_end_incrementing_from_sevenEx231
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 91 }));
     match vm.run() {
         VMResult::Ok(Value::Status(389)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(389)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(389)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80439,7 +83100,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2315() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2315 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2332)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2332)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2332)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80468,7 +83132,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2315() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -80528,7 +83195,10 @@ fn subshell_one_hundred_three_hundred_end_incrementing_from_oneEx2315() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 85 }));
     match vm.run() {
         VMResult::Ok(Value::Status(384)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(384)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(384)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80557,7 +83227,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2315() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2336)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2336, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2336, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80583,10 +83256,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2315() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2337 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2337,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2337)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2337), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2337), got {:?}",
+            other
+        ),
     }
 }
 
@@ -80658,7 +83337,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2315() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2315 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2339)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2339)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2339)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80695,7 +83377,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2340Ex2315() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2340Ex2315));
     match vm.run() {
         VMResult::Ok(Value::Status(2340)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80733,7 +83418,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2341Ex2315() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2341Ex2315));
     match vm.run() {
         VMResult::Ok(Value::Status(2341)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80788,7 +83476,10 @@ fn subshell_one_hundred_three_hundred_one_end_incrementing_from_eightEx2315() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 92 }));
     match vm.run() {
         VMResult::Ok(Value::Status(392)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(392)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(392)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80858,7 +83549,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2345Ex2315() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2345Ex2315 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -80874,7 +83568,6 @@ fn subshell_end_exit_code_2345_propagatesEx2315() {
         other => panic!("exit code 2345 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CG (handwritten) ─────────────────────────────────────
 
@@ -80991,7 +83684,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2346() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -81086,7 +83782,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2346() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2346 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2353)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2353)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2353)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -81208,7 +83907,10 @@ fn subshell_seventy_six_begins_seventy_four_ends_last_end_status_winsEx2346() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2356Ex2346));
     match vm.run() {
         VMResult::Ok(Value::Status(2356)) => {}
-        other => panic!("sixteenth subshell_end(Some(2356)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2356)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 76);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 74);
@@ -81347,7 +84049,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2346() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -81468,7 +84173,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2346() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -81497,7 +84205,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2346() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2365)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2365, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2365, got {:?}",
+            other
+        ),
     }
 }
 
@@ -81523,10 +84234,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2346() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2366 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2366,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2366)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2366), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2366), got {:?}",
+            other
+        ),
     }
 }
 
@@ -81581,7 +84298,10 @@ fn subshell_one_hundred_three_hundred_four_end_incrementing_from_fiveEx2346() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 92 }));
     match vm.run() {
         VMResult::Ok(Value::Status(395)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(395)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(395)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -81621,7 +84341,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2369Ex2346() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2369Ex2346 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -81671,7 +84394,6 @@ fn subshell_end_exit_code_2370_propagatesEx2346() {
         other => panic!("exit code 2370 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CH (handwritten) ─────────────────────────────────────
 
@@ -81788,7 +84510,10 @@ fn subshell_one_hundred_three_hundred_five_end_incrementing_from_sixEx2371() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 93 }));
     match vm.run() {
         VMResult::Ok(Value::Status(397)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(397)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(397)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -81883,7 +84608,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2371() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2371 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2378)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2378)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2378)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82005,7 +84733,10 @@ fn subshell_seventy_seven_begins_seventy_five_ends_last_end_status_winsEx2371() 
     vm.set_shell_host(Box::new(CountingBeginEndHost2381Ex2371));
     match vm.run() {
         VMResult::Ok(Value::Status(2381)) => {}
-        other => panic!("seventeenth subshell_end(Some(2381)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2381)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 77);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 75);
@@ -82134,7 +84865,10 @@ fn subshell_one_hundred_three_hundred_six_end_incrementing_from_sevenEx2371() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 94 }));
     match vm.run() {
         VMResult::Ok(Value::Status(399)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(399)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(399)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82244,7 +84978,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2371() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2371 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2388)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2388)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2388)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82273,7 +85010,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2371() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -82333,7 +85073,10 @@ fn subshell_one_hundred_three_hundred_seven_end_incrementing_from_oneEx2371() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 88 }));
     match vm.run() {
         VMResult::Ok(Value::Status(394)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(394)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(394)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82362,7 +85105,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2371() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2392)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2392, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2392, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82388,10 +85134,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2371() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2393 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2393,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2393)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2393), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2393), got {:?}",
+            other
+        ),
     }
 }
 
@@ -82463,7 +85215,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2371() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2371 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2395)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2395)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2395)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82500,7 +85255,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2396Ex2371() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2396Ex2371));
     match vm.run() {
         VMResult::Ok(Value::Status(2396)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82538,7 +85296,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2397Ex2371() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2397Ex2371));
     match vm.run() {
         VMResult::Ok(Value::Status(2397)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82593,7 +85354,10 @@ fn subshell_one_hundred_three_hundred_eight_end_incrementing_from_eightEx2371() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 95 }));
     match vm.run() {
         VMResult::Ok(Value::Status(402)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(402)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(402)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82663,7 +85427,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2401Ex2371() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2401Ex2371 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82679,7 +85446,6 @@ fn subshell_end_exit_code_2401_propagatesEx2371() {
         other => panic!("exit code 2401 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CI (handwritten) ─────────────────────────────────────
 
@@ -82796,7 +85562,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2402() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -82891,7 +85660,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2402() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2402 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2409)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2409)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2409)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -83013,7 +85785,10 @@ fn subshell_seventy_eight_begins_seventy_six_ends_last_end_status_winsEx2402() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2412Ex2402));
     match vm.run() {
         VMResult::Ok(Value::Status(2412)) => {}
-        other => panic!("sixteenth subshell_end(Some(2412)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2412)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 78);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 76);
@@ -83152,7 +85927,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2402() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -83273,7 +86051,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2402() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -83302,7 +86083,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2402() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2421)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2421, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2421, got {:?}",
+            other
+        ),
     }
 }
 
@@ -83328,10 +86112,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2402() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2422 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2422,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2422)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2422), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2422), got {:?}",
+            other
+        ),
     }
 }
 
@@ -83386,7 +86176,10 @@ fn subshell_one_hundred_three_hundred_eleven_end_incrementing_from_fiveEx2402() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 95 }));
     match vm.run() {
         VMResult::Ok(Value::Status(405)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(405)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(405)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -83426,7 +86219,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2425Ex2402() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2425Ex2402 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -83476,7 +86272,6 @@ fn subshell_end_exit_code_2426_propagatesEx2402() {
         other => panic!("exit code 2426 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CJ (handwritten) ─────────────────────────────────────
 
@@ -83593,7 +86388,10 @@ fn subshell_one_hundred_three_hundred_twelve_end_incrementing_from_sixEx2427() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 96 }));
     match vm.run() {
         VMResult::Ok(Value::Status(407)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(407)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(407)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -83688,7 +86486,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2427() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2427 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2434)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2434)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2434)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -83810,7 +86611,10 @@ fn subshell_seventy_nine_begins_seventy_seven_ends_last_end_status_winsEx2427() 
     vm.set_shell_host(Box::new(CountingBeginEndHost2437Ex2427));
     match vm.run() {
         VMResult::Ok(Value::Status(2437)) => {}
-        other => panic!("seventeenth subshell_end(Some(2437)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2437)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 79);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 77);
@@ -83939,7 +86743,10 @@ fn subshell_one_hundred_three_hundred_thirteen_end_incrementing_from_sevenEx2427
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 97 }));
     match vm.run() {
         VMResult::Ok(Value::Status(409)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(409)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(409)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84049,7 +86856,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2427() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2427 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2444)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2444)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2444)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84078,7 +86888,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2427() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -84138,7 +86951,10 @@ fn subshell_one_hundred_three_hundred_fourteen_end_incrementing_from_oneEx2427()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 91 }));
     match vm.run() {
         VMResult::Ok(Value::Status(404)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(404)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(404)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84167,7 +86983,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2427() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2448)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2448, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2448, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84193,10 +87012,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2427() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2449 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2449,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2449)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2449), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2449), got {:?}",
+            other
+        ),
     }
 }
 
@@ -84268,7 +87093,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2427() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2427 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2451)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2451)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2451)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84305,7 +87133,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2452Ex2427() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2452Ex2427));
     match vm.run() {
         VMResult::Ok(Value::Status(2452)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84343,7 +87174,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2453Ex2427() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2453Ex2427));
     match vm.run() {
         VMResult::Ok(Value::Status(2453)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84398,7 +87232,10 @@ fn subshell_one_hundred_three_hundred_fifteen_end_incrementing_from_eightEx2427(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 98 }));
     match vm.run() {
         VMResult::Ok(Value::Status(412)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(412)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(412)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84468,7 +87305,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2457Ex2427() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2457Ex2427 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84484,7 +87324,6 @@ fn subshell_end_exit_code_2457_propagatesEx2427() {
         other => panic!("exit code 2457 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CK (handwritten) ─────────────────────────────────────
 
@@ -84601,7 +87440,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2458() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84696,7 +87538,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2458() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2458 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2465)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2465)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2465)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -84818,7 +87663,10 @@ fn subshell_eighty_begins_seventy_eight_ends_last_end_status_winsEx2458() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2468Ex2458));
     match vm.run() {
         VMResult::Ok(Value::Status(2468)) => {}
-        other => panic!("sixteenth subshell_end(Some(2468)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2468)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 80);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 78);
@@ -84957,7 +87805,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2458() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85078,7 +87929,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2458() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -85107,7 +87961,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2458() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2477)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2477, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2477, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85133,10 +87990,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2458() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2478 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2478,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2478)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2478), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2478), got {:?}",
+            other
+        ),
     }
 }
 
@@ -85191,7 +88054,10 @@ fn subshell_one_hundred_three_hundred_eighteen_end_incrementing_from_fiveEx2458(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 98 }));
     match vm.run() {
         VMResult::Ok(Value::Status(415)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(415)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(415)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85231,7 +88097,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2481Ex2458() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2481Ex2458 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85281,7 +88150,6 @@ fn subshell_end_exit_code_2482_propagatesEx2458() {
         other => panic!("exit code 2482 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CL (handwritten) ─────────────────────────────────────
 
@@ -85398,7 +88266,10 @@ fn subshell_one_hundred_three_hundred_nineteen_end_incrementing_from_sixEx2483()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 99 }));
     match vm.run() {
         VMResult::Ok(Value::Status(417)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(417)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(417)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85493,7 +88364,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2483() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2483 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2490)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2490)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2490)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85615,7 +88489,10 @@ fn subshell_eighty_one_begins_seventy_nine_ends_last_end_status_winsEx2483() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2493Ex2483));
     match vm.run() {
         VMResult::Ok(Value::Status(2493)) => {}
-        other => panic!("seventeenth subshell_end(Some(2493)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2493)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 81);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 79);
@@ -85744,7 +88621,10 @@ fn subshell_one_hundred_three_hundred_twenty_end_incrementing_from_sevenEx2483()
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 100 }));
     match vm.run() {
         VMResult::Ok(Value::Status(419)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(419)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(419)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85854,7 +88734,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2483() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2483 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2500)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2500)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2500)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85883,7 +88766,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2483() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -85943,7 +88829,10 @@ fn subshell_one_hundred_three_hundred_twenty_one_end_incrementing_from_oneEx2483
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 94 }));
     match vm.run() {
         VMResult::Ok(Value::Status(414)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(414)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(414)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85972,7 +88861,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2483() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2504)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2504, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2504, got {:?}",
+            other
+        ),
     }
 }
 
@@ -85998,10 +88890,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2483() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2505 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2505,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2505)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2505), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2505), got {:?}",
+            other
+        ),
     }
 }
 
@@ -86073,7 +88971,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2483() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2483 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2507)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2507)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2507)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86110,7 +89011,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2508Ex2483() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2508Ex2483));
     match vm.run() {
         VMResult::Ok(Value::Status(2508)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86148,7 +89052,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2509Ex2483() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2509Ex2483));
     match vm.run() {
         VMResult::Ok(Value::Status(2509)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86203,7 +89110,10 @@ fn subshell_one_hundred_three_hundred_twenty_two_end_incrementing_from_eightEx24
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 101 }));
     match vm.run() {
         VMResult::Ok(Value::Status(422)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(422)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(422)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86273,7 +89183,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2513Ex2483() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2513Ex2483 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86289,7 +89202,6 @@ fn subshell_end_exit_code_2513_propagatesEx2483() {
         other => panic!("exit code 2513 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CM (handwritten) ─────────────────────────────────────
 
@@ -86406,7 +89318,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2514() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86501,7 +89416,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2514() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2514 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2521)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2521)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2521)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86623,7 +89541,10 @@ fn subshell_eighty_two_begins_eighty_ends_last_end_status_winsEx2514() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2524Ex2514));
     match vm.run() {
         VMResult::Ok(Value::Status(2524)) => {}
-        other => panic!("sixteenth subshell_end(Some(2524)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2524)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 82);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 80);
@@ -86762,7 +89683,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2514() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86883,7 +89807,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2514() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -86912,7 +89839,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2514() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2533)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2533, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2533, got {:?}",
+            other
+        ),
     }
 }
 
@@ -86938,10 +89868,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2514() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2534 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2534,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2534)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2534), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2534), got {:?}",
+            other
+        ),
     }
 }
 
@@ -86996,7 +89932,10 @@ fn subshell_one_hundred_three_hundred_twenty_five_end_incrementing_from_fiveEx25
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 101 }));
     match vm.run() {
         VMResult::Ok(Value::Status(425)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(425)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(425)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87036,7 +89975,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2537Ex2514() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2537Ex2514 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87086,7 +90028,6 @@ fn subshell_end_exit_code_2538_propagatesEx2514() {
         other => panic!("exit code 2538 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CN (handwritten) ─────────────────────────────────────
 
@@ -87203,7 +90144,10 @@ fn subshell_one_hundred_three_hundred_twenty_six_end_incrementing_from_sixEx2539
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 102 }));
     match vm.run() {
         VMResult::Ok(Value::Status(427)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(427)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(427)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87298,7 +90242,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2539() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2539 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2546)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2546)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2546)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87420,7 +90367,10 @@ fn subshell_eighty_three_begins_eighty_one_ends_last_end_status_winsEx2539() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2549Ex2539));
     match vm.run() {
         VMResult::Ok(Value::Status(2549)) => {}
-        other => panic!("seventeenth subshell_end(Some(2549)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2549)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 83);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 81);
@@ -87549,7 +90499,10 @@ fn subshell_one_hundred_three_hundred_twenty_seven_end_incrementing_from_sevenEx
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 103 }));
     match vm.run() {
         VMResult::Ok(Value::Status(429)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(429)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(429)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87659,7 +90612,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2539() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2539 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2556)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2556)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2556)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87688,7 +90644,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2539() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -87748,7 +90707,10 @@ fn subshell_one_hundred_three_hundred_twenty_eight_end_incrementing_from_oneEx25
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 97 }));
     match vm.run() {
         VMResult::Ok(Value::Status(424)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(424)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(424)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87777,7 +90739,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2539() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2560)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2560, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2560, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87803,10 +90768,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2539() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2561 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2561,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2561)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2561), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2561), got {:?}",
+            other
+        ),
     }
 }
 
@@ -87878,7 +90849,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2539() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2539 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2563)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2563)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2563)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87915,7 +90889,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2564Ex2539() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2564Ex2539));
     match vm.run() {
         VMResult::Ok(Value::Status(2564)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -87953,7 +90930,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2565Ex2539() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2565Ex2539));
     match vm.run() {
         VMResult::Ok(Value::Status(2565)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88008,7 +90988,10 @@ fn subshell_one_hundred_three_hundred_twenty_nine_end_incrementing_from_eightEx2
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 104 }));
     match vm.run() {
         VMResult::Ok(Value::Status(432)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(432)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(432)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88078,7 +91061,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2569Ex2539() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2569Ex2539 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88094,7 +91080,6 @@ fn subshell_end_exit_code_2569_propagatesEx2539() {
         other => panic!("exit code 2569 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CO (handwritten) ─────────────────────────────────────
 
@@ -88211,7 +91196,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2570() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88306,7 +91294,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2570() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2570 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2577)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2577)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2577)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88428,7 +91419,10 @@ fn subshell_eighty_four_begins_eighty_two_ends_last_end_status_winsEx2570() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2580Ex2570));
     match vm.run() {
         VMResult::Ok(Value::Status(2580)) => {}
-        other => panic!("sixteenth subshell_end(Some(2580)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2580)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 84);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 82);
@@ -88567,7 +91561,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2570() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88688,7 +91685,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2570() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -88717,7 +91717,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2570() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2589)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2589, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2589, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88743,10 +91746,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2570() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2590 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2590,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2590)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2590), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2590), got {:?}",
+            other
+        ),
     }
 }
 
@@ -88801,7 +91810,10 @@ fn subshell_one_hundred_three_hundred_thirty_two_end_incrementing_from_fiveEx257
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 104 }));
     match vm.run() {
         VMResult::Ok(Value::Status(435)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(435)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(435)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88841,7 +91853,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2593Ex2570() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2593Ex2570 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -88891,7 +91906,6 @@ fn subshell_end_exit_code_2594_propagatesEx2570() {
         other => panic!("exit code 2594 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CP (handwritten) ─────────────────────────────────────
 
@@ -89008,7 +92022,10 @@ fn subshell_one_hundred_three_hundred_thirty_three_end_incrementing_from_sixEx25
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 105 }));
     match vm.run() {
         VMResult::Ok(Value::Status(437)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(437)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(437)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89103,7 +92120,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2595() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2595 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2602)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2602)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2602)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89225,7 +92245,10 @@ fn subshell_eighty_five_begins_eighty_three_ends_last_end_status_winsEx2595() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2605Ex2595));
     match vm.run() {
         VMResult::Ok(Value::Status(2605)) => {}
-        other => panic!("seventeenth subshell_end(Some(2605)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2605)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 85);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 83);
@@ -89354,7 +92377,10 @@ fn subshell_one_hundred_three_hundred_thirty_four_end_incrementing_from_sevenEx2
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 106 }));
     match vm.run() {
         VMResult::Ok(Value::Status(439)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(439)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(439)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89464,7 +92490,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2595() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2595 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2612)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2612)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2612)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89493,7 +92522,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2595() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -89553,7 +92585,10 @@ fn subshell_one_hundred_three_hundred_thirty_five_end_incrementing_from_oneEx259
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 100 }));
     match vm.run() {
         VMResult::Ok(Value::Status(434)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(434)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(434)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89582,7 +92617,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2595() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2616)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2616, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2616, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89608,10 +92646,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2595() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2617 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2617,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2617)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2617), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2617), got {:?}",
+            other
+        ),
     }
 }
 
@@ -89683,7 +92727,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2595() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2595 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2619)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2619)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2619)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89720,7 +92767,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2620Ex2595() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2620Ex2595));
     match vm.run() {
         VMResult::Ok(Value::Status(2620)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89758,7 +92808,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2621Ex2595() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2621Ex2595));
     match vm.run() {
         VMResult::Ok(Value::Status(2621)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89813,7 +92866,10 @@ fn subshell_one_hundred_three_hundred_thirty_six_end_incrementing_from_eightEx25
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 107 }));
     match vm.run() {
         VMResult::Ok(Value::Status(442)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(442)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(442)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89883,7 +92939,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2625Ex2595() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2625Ex2595 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -89899,7 +92958,6 @@ fn subshell_end_exit_code_2625_propagatesEx2595() {
         other => panic!("exit code 2625 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CQ (handwritten) ─────────────────────────────────────
 
@@ -90016,7 +93074,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2626() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -90111,7 +93172,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2626() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2626 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2633)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2633)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2633)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -90233,7 +93297,10 @@ fn subshell_eighty_six_begins_eighty_four_ends_last_end_status_winsEx2626() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2636Ex2626));
     match vm.run() {
         VMResult::Ok(Value::Status(2636)) => {}
-        other => panic!("sixteenth subshell_end(Some(2636)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2636)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 86);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 84);
@@ -90372,7 +93439,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2626() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -90493,7 +93563,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2626() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -90522,7 +93595,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2626() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2645)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2645, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2645, got {:?}",
+            other
+        ),
     }
 }
 
@@ -90548,10 +93624,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2626() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2646 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2646,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2646)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2646), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2646), got {:?}",
+            other
+        ),
     }
 }
 
@@ -90606,7 +93688,10 @@ fn subshell_one_hundred_three_hundred_thirty_nine_end_incrementing_from_fiveEx26
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 107 }));
     match vm.run() {
         VMResult::Ok(Value::Status(445)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(445)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(445)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -90646,7 +93731,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2649Ex2626() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2649Ex2626 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -90696,7 +93784,6 @@ fn subshell_end_exit_code_2650_propagatesEx2626() {
         other => panic!("exit code 2650 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CR (handwritten) ─────────────────────────────────────
 
@@ -90813,7 +93900,10 @@ fn subshell_one_hundred_three_hundred_forty_end_incrementing_from_sixEx2651() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 108 }));
     match vm.run() {
         VMResult::Ok(Value::Status(447)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(447)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(447)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -90908,7 +93998,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2651() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2651 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2658)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2658)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2658)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91030,7 +94123,10 @@ fn subshell_eighty_seven_begins_eighty_five_ends_last_end_status_winsEx2651() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2661Ex2651));
     match vm.run() {
         VMResult::Ok(Value::Status(2661)) => {}
-        other => panic!("seventeenth subshell_end(Some(2661)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2661)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 87);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 85);
@@ -91159,7 +94255,10 @@ fn subshell_one_hundred_three_hundred_forty_one_end_incrementing_from_sevenEx265
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 109 }));
     match vm.run() {
         VMResult::Ok(Value::Status(449)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(449)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(449)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91269,7 +94368,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2651() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2651 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2668)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2668)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2668)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91298,7 +94400,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2651() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -91358,7 +94463,10 @@ fn subshell_one_hundred_three_hundred_forty_two_end_incrementing_from_oneEx2651(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 103 }));
     match vm.run() {
         VMResult::Ok(Value::Status(444)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(444)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(444)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91387,7 +94495,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2651() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2672)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2672, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2672, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91413,10 +94524,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2651() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2673 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2673,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2673)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2673), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2673), got {:?}",
+            other
+        ),
     }
 }
 
@@ -91488,7 +94605,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2651() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2651 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2675)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2675)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2675)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91525,7 +94645,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2676Ex2651() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2676Ex2651));
     match vm.run() {
         VMResult::Ok(Value::Status(2676)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91563,7 +94686,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2677Ex2651() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2677Ex2651));
     match vm.run() {
         VMResult::Ok(Value::Status(2677)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91618,7 +94744,10 @@ fn subshell_one_hundred_three_hundred_forty_three_end_incrementing_from_eightEx2
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 110 }));
     match vm.run() {
         VMResult::Ok(Value::Status(452)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(452)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(452)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91688,7 +94817,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2681Ex2651() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2681Ex2651 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91704,7 +94836,6 @@ fn subshell_end_exit_code_2681_propagatesEx2651() {
         other => panic!("exit code 2681 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CS (handwritten) ─────────────────────────────────────
 
@@ -91821,7 +94952,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2682() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -91916,7 +95050,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2682() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2682 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2689)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2689)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2689)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -92038,7 +95175,10 @@ fn subshell_eighty_eight_begins_eighty_six_ends_last_end_status_winsEx2682() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2692Ex2682));
     match vm.run() {
         VMResult::Ok(Value::Status(2692)) => {}
-        other => panic!("sixteenth subshell_end(Some(2692)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2692)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 88);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 86);
@@ -92177,7 +95317,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2682() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -92298,7 +95441,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2682() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -92327,7 +95473,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2682() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2701)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2701, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2701, got {:?}",
+            other
+        ),
     }
 }
 
@@ -92353,10 +95502,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2682() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2702 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2702,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2702)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2702), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2702), got {:?}",
+            other
+        ),
     }
 }
 
@@ -92411,7 +95566,10 @@ fn subshell_one_hundred_three_hundred_forty_six_end_incrementing_from_fiveEx2682
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 110 }));
     match vm.run() {
         VMResult::Ok(Value::Status(455)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(455)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(455)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -92451,7 +95609,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2705Ex2682() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2705Ex2682 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -92501,7 +95662,6 @@ fn subshell_end_exit_code_2706_propagatesEx2682() {
         other => panic!("exit code 2706 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CT (handwritten) ─────────────────────────────────────
 
@@ -92618,7 +95778,10 @@ fn subshell_one_hundred_three_hundred_forty_seven_end_incrementing_from_sixEx270
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 111 }));
     match vm.run() {
         VMResult::Ok(Value::Status(457)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(457)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(457)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -92713,7 +95876,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2707() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2707 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2714)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2714)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2714)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -92835,7 +96001,10 @@ fn subshell_eighty_nine_begins_eighty_seven_ends_last_end_status_winsEx2707() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2717Ex2707));
     match vm.run() {
         VMResult::Ok(Value::Status(2717)) => {}
-        other => panic!("seventeenth subshell_end(Some(2717)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2717)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 89);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 87);
@@ -92964,7 +96133,10 @@ fn subshell_one_hundred_three_hundred_forty_eight_end_incrementing_from_sevenEx2
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 112 }));
     match vm.run() {
         VMResult::Ok(Value::Status(459)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(459)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(459)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93074,7 +96246,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2707() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2707 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2724)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2724)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2724)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93103,7 +96278,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2707() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -93163,7 +96341,10 @@ fn subshell_one_hundred_three_hundred_forty_nine_end_incrementing_from_oneEx2707
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 106 }));
     match vm.run() {
         VMResult::Ok(Value::Status(454)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(454)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(454)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93192,7 +96373,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2707() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2728)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2728, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2728, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93218,10 +96402,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2707() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2729 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2729,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2729)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2729), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2729), got {:?}",
+            other
+        ),
     }
 }
 
@@ -93293,7 +96483,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2707() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2707 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2731)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2731)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2731)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93330,7 +96523,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2732Ex2707() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2732Ex2707));
     match vm.run() {
         VMResult::Ok(Value::Status(2732)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93368,7 +96564,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2733Ex2707() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2733Ex2707));
     match vm.run() {
         VMResult::Ok(Value::Status(2733)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93423,7 +96622,10 @@ fn subshell_one_hundred_three_hundred_fifty_end_incrementing_from_eightEx2707() 
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 113 }));
     match vm.run() {
         VMResult::Ok(Value::Status(462)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(462)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(462)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93493,7 +96695,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2737Ex2707() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2737Ex2707 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93509,7 +96714,6 @@ fn subshell_end_exit_code_2737_propagatesEx2707() {
         other => panic!("exit code 2737 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CU (handwritten) ─────────────────────────────────────
 
@@ -93626,7 +96830,10 @@ fn subshell_ninety_nine_end_incrementing_from_tenEx2738() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
     match vm.run() {
         VMResult::Ok(Value::Status(108)) => {}
-        other => panic!("ninety-ninth subshell_end(Some(108)) MUST win, got {:?}", other),
+        other => panic!(
+            "ninety-ninth subshell_end(Some(108)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93721,7 +96928,10 @@ fn subshell_forty_fifth_some_host_applies_on_forty_fifth_endEx2738() {
     vm.set_shell_host(Box::new(FortyFifthSomeHostEx2738 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2745)) => {}
-        other => panic!("forty-fifth subshell_end(Some(2745)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-fifth subshell_end(Some(2745)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -93843,7 +97053,10 @@ fn subshell_ninety_begins_eighty_eight_ends_last_end_status_winsEx2738() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2748Ex2738));
     match vm.run() {
         VMResult::Ok(Value::Status(2748)) => {}
-        other => panic!("sixteenth subshell_end(Some(2748)) MUST win, got {:?}", other),
+        other => panic!(
+            "sixteenth subshell_end(Some(2748)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 90);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 88);
@@ -93982,7 +97195,10 @@ fn subshell_one_hundred_end_incrementing_from_threeEx2738() {
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
     match vm.run() {
         VMResult::Ok(Value::Status(102)) => {}
-        other => panic!("one-hundredth subshell_end(Some(102)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundredth subshell_end(Some(102)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94103,7 +97319,10 @@ fn subshell_alternating_status_twenty_second_none_keeps_ninthEx2738() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-second None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -94132,7 +97351,10 @@ fn subshell_none_host_twenty_one_ends_leaves_initial_statusEx2738() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2757)) => {}
-        other => panic!("NoneHost twenty-one ends MUST leave last_status 2757, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-one ends MUST leave last_status 2757, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94158,10 +97380,16 @@ fn subshell_first_some_then_none_host_twenty_first_none_keeps_firstEx2738() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2758 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2758,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2758)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-first None MUST keep first Some(2758), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-first None MUST keep first Some(2758), got {:?}",
+            other
+        ),
     }
 }
 
@@ -94216,7 +97444,10 @@ fn subshell_one_hundred_three_hundred_fifty_three_end_incrementing_from_fiveEx27
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 113 }));
     match vm.run() {
         VMResult::Ok(Value::Status(465)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(465)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(465)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94256,7 +97487,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2761Ex2738() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2761Ex2738 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -104, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -104, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94306,7 +97540,6 @@ fn subshell_end_exit_code_2762_propagatesEx2738() {
         other => panic!("exit code 2762 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Pin tests batch CV (handwritten) ─────────────────────────────────────
 
@@ -94423,7 +97656,10 @@ fn subshell_one_hundred_three_hundred_fifty_four_end_incrementing_from_sixEx2763
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 114 }));
     match vm.run() {
         VMResult::Ok(Value::Status(467)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(467)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(467)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94518,7 +97754,10 @@ fn subshell_forty_sixth_some_host_applies_on_forty_sixth_endEx2763() {
     vm.set_shell_host(Box::new(FortySixthSomeHostEx2763 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2770)) => {}
-        other => panic!("forty-sixth subshell_end(Some(2770)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-sixth subshell_end(Some(2770)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94640,7 +97879,10 @@ fn subshell_ninety_one_begins_eighty_nine_ends_last_end_status_winsEx2763() {
     vm.set_shell_host(Box::new(CountingBeginEndHost2773Ex2763));
     match vm.run() {
         VMResult::Ok(Value::Status(2773)) => {}
-        other => panic!("seventeenth subshell_end(Some(2773)) MUST win, got {:?}", other),
+        other => panic!(
+            "seventeenth subshell_end(Some(2773)) MUST win, got {:?}",
+            other
+        ),
     }
     assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 91);
     assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 89);
@@ -94769,7 +98011,10 @@ fn subshell_one_hundred_three_hundred_fifty_five_end_incrementing_from_sevenEx27
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 115 }));
     match vm.run() {
         VMResult::Ok(Value::Status(469)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(469)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(469)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94879,7 +98124,10 @@ fn subshell_forty_seventh_some_host_applies_on_forty_seventh_endEx2763() {
     vm.set_shell_host(Box::new(FortySeventhSomeHostEx2763 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2780)) => {}
-        other => panic!("forty-seventh subshell_end(Some(2780)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-seventh subshell_end(Some(2780)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94908,7 +98156,10 @@ fn subshell_alternating_status_twenty_third_none_keeps_ninthEx2763() {
     vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(9)) => {}
-        other => panic!("AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}", other),
+        other => panic!(
+            "AlternatingStatusHost twenty-third None MUST keep Some(9), got {:?}",
+            other
+        ),
     }
 }
 
@@ -94968,7 +98219,10 @@ fn subshell_one_hundred_three_hundred_fifty_six_end_incrementing_from_oneEx2763(
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 109 }));
     match vm.run() {
         VMResult::Ok(Value::Status(464)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(464)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(464)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -94997,7 +98251,10 @@ fn subshell_none_host_twenty_two_ends_leaves_initial_statusEx2763() {
     vm.set_shell_host(Box::new(NoneHost));
     match vm.run() {
         VMResult::Ok(Value::Status(2784)) => {}
-        other => panic!("NoneHost twenty-two ends MUST leave last_status 2784, got {:?}", other),
+        other => panic!(
+            "NoneHost twenty-two ends MUST leave last_status 2784, got {:?}",
+            other
+        ),
     }
 }
 
@@ -95023,10 +98280,16 @@ fn subshell_first_some_then_none_host_twenty_second_none_keeps_firstEx2763() {
     }
     b.emit(Op::GetStatus, 1);
     let mut vm = VM::new(b.build());
-    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 2785 }));
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost {
+        calls: 0,
+        status: 2785,
+    }));
     match vm.run() {
         VMResult::Ok(Value::Status(2785)) => {}
-        other => panic!("FirstSomeThenNoneHost twenty-second None MUST keep first Some(2785), got {:?}", other),
+        other => panic!(
+            "FirstSomeThenNoneHost twenty-second None MUST keep first Some(2785), got {:?}",
+            other
+        ),
     }
 }
 
@@ -95098,7 +98361,10 @@ fn subshell_forty_eighth_some_host_applies_on_forty_eighth_endEx2763() {
     vm.set_shell_host(Box::new(FortyEighthSomeHostEx2763 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(2787)) => {}
-        other => panic!("forty-eighth subshell_end(Some(2787)) MUST apply, got {:?}", other),
+        other => panic!(
+            "forty-eighth subshell_end(Some(2787)) MUST apply, got {:?}",
+            other
+        ),
     }
 }
 
@@ -95135,7 +98401,10 @@ fn subshell_pipeline_then_subshell_getstatus_reads_subshell_2788Ex2763() {
     vm.set_shell_host(Box::new(PipelineSubshellHost2788Ex2763));
     match vm.run() {
         VMResult::Ok(Value::Status(2788)) => {}
-        other => panic!("GetStatus after pipeline+subshell MUST read subshell 772, got {:?}", other),
+        other => panic!(
+            "GetStatus after pipeline+subshell MUST read subshell 772, got {:?}",
+            other
+        ),
     }
 }
 
@@ -95173,7 +98442,10 @@ fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_2789Ex2763() {
     vm.set_shell_host(Box::new(SubshellThenPipelineHost2789Ex2763));
     match vm.run() {
         VMResult::Ok(Value::Status(2789)) => {}
-        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}", other),
+        other => panic!(
+            "GetStatus after subshell+pipeline MUST read pipeline 773, got {:?}",
+            other
+        ),
     }
 }
 
@@ -95228,7 +98500,10 @@ fn subshell_one_hundred_three_hundred_fifty_seven_end_incrementing_from_eightEx2
     vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 116 }));
     match vm.run() {
         VMResult::Ok(Value::Status(472)) => {}
-        other => panic!("one-hundred-END subshell_end(Some(472)) MUST win, got {:?}", other),
+        other => panic!(
+            "one-hundred-END subshell_end(Some(472)) MUST win, got {:?}",
+            other
+        ),
     }
 }
 
@@ -95298,7 +98573,10 @@ fn subshell_negative_then_zero_host_last_zero_wins_status2793Ex2763() {
     vm.set_shell_host(Box::new(NegativeThenZeroHost2793Ex2763 { calls: 0 }));
     match vm.run() {
         VMResult::Ok(Value::Status(0)) => {}
-        other => panic!("second subshell_end(Some(0)) MUST win over -107, got {:?}", other),
+        other => panic!(
+            "second subshell_end(Some(0)) MUST win over -107, got {:?}",
+            other
+        ),
     }
 }
 
@@ -95314,7 +98592,6 @@ fn subshell_end_exit_code_2793_propagatesEx2763() {
         other => panic!("exit code 2793 MUST propagate, got {:?}", other),
     }
 }
-
 
 // ─── Combined ───────────────────────────────────────────────────────────
 

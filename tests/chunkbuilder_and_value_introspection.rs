@@ -2,7 +2,7 @@
 //! sub_entries/sub_chunks, op_hash) and Value introspection methods
 //! (as_str_cow Borrowed vs Owned, len, is_empty, Hash collisions).
 
-use fusevm::{Chunk, ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{Chunk, ChunkBuilder, Op, VMResult, Value, VM};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};

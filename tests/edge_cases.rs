@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 //! Edge case tests for the fusevm interpreter.
 //!
 //! VM testing patterns demonstrated here:

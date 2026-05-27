@@ -7,7 +7,7 @@
 use fusevm::host::ShellHost;
 use fusevm::shell_builtins::{self as sb, builtin_id, is_builtin};
 use fusevm::vm::{ExtensionHandler, ExtensionWideHandler};
-use fusevm::{Chunk, ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{Chunk, ChunkBuilder, Op, VMResult, Value, VM};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -254,7 +254,10 @@ fn shared_log_host(log: Arc<Mutex<Vec<String>>>) -> Box<dyn ShellHost> {
                 .push(format!("with_redirects_begin({n})"));
         }
         fn with_redirects_end(&mut self) {
-            self.0.lock().unwrap().push("with_redirects_end".to_string());
+            self.0
+                .lock()
+                .unwrap()
+                .push("with_redirects_end".to_string());
         }
     }
     Box::new(Sharing(log))

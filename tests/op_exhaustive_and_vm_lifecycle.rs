@@ -3,7 +3,7 @@
 //! semantics not exercised elsewhere.
 
 use fusevm::op::{file_test, param_mod, redirect_op};
-use fusevm::{Chunk, ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{Chunk, ChunkBuilder, Op, VMResult, Value, VM};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -214,10 +214,7 @@ fn distinct_payload_variants_hash_differently() {
             Op::SlotLtIntJumpIfFalse(0, 10, 5),
             Op::SlotLtIntJumpIfFalse(0, 10, 6),
         ),
-        (
-            Op::AccumSumLoop(0, 1, 10),
-            Op::AccumSumLoop(0, 1, 11),
-        ),
+        (Op::AccumSumLoop(0, 1, 10), Op::AccumSumLoop(0, 1, 11)),
         (
             Op::ConcatConstLoop(0, 1, 2, 3),
             Op::ConcatConstLoop(0, 1, 2, 4),
@@ -226,10 +223,7 @@ fn distinct_payload_variants_hash_differently() {
             Op::PushIntRangeLoop(0, 1, 10),
             Op::PushIntRangeLoop(1, 1, 10),
         ),
-        (
-            Op::AddAssignSlotVoid(0, 1),
-            Op::AddAssignSlotVoid(1, 0),
-        ),
+        (Op::AddAssignSlotVoid(0, 1), Op::AddAssignSlotVoid(1, 0)),
     ];
     for (a, b) in pairs {
         assert_ne!(
@@ -692,9 +686,18 @@ fn run_bitwise_and_or_xor_not_match_native() {
         bb.emit(op, 1);
         run(bb)
     }
-    assert!(matches!(bin(0b1100, 0b1010, Op::BitAnd), Value::Int(0b1000) | Value::Undef));
-    assert!(matches!(bin(0b1100, 0b1010, Op::BitOr), Value::Int(0b1110) | Value::Undef));
-    assert!(matches!(bin(0b1100, 0b1010, Op::BitXor), Value::Int(0b0110) | Value::Undef));
+    assert!(matches!(
+        bin(0b1100, 0b1010, Op::BitAnd),
+        Value::Int(0b1000) | Value::Undef
+    ));
+    assert!(matches!(
+        bin(0b1100, 0b1010, Op::BitOr),
+        Value::Int(0b1110) | Value::Undef
+    ));
+    assert!(matches!(
+        bin(0b1100, 0b1010, Op::BitXor),
+        Value::Int(0b0110) | Value::Undef
+    ));
     assert!(matches!(bin(1, 3, Op::Shl), Value::Int(8) | Value::Undef));
     assert!(matches!(bin(32, 2, Op::Shr), Value::Int(8) | Value::Undef));
 }

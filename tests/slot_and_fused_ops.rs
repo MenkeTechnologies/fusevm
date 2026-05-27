@@ -1,4 +1,4 @@
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 
 fn run(b: ChunkBuilder) -> Value {
     match VM::new(b.build()).run() {
@@ -144,7 +144,7 @@ fn slot_array_set_basic() {
     b.emit(Op::MakeArray(3), 1);
     b.emit(Op::SetSlot(0), 1);
     b.emit(Op::LoadInt(99), 1); // value
-    b.emit(Op::LoadInt(1), 1);  // index
+    b.emit(Op::LoadInt(1), 1); // index
     b.emit(Op::SlotArraySet(0), 1);
     b.emit(Op::LoadInt(1), 1);
     b.emit(Op::SlotArrayGet(0), 1);

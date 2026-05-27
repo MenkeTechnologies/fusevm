@@ -2,7 +2,7 @@
 //! Extended/ExtendedWide, builtin_id lookup table, and constant stability.
 
 use fusevm::chunk::{Chunk, ChunkBuilder};
-use fusevm::op::{file_test, redirect_op, param_mod, Op};
+use fusevm::op::{file_test, param_mod, redirect_op, Op};
 use fusevm::shell_builtins::*;
 use fusevm::value::Value;
 use fusevm::vm::{VMResult, VM};
@@ -332,14 +332,10 @@ fn builtin_id_unknown_returns_none() {
 #[test]
 fn is_builtin_agrees_with_builtin_id() {
     for name in [
-        "cd", "pwd", "echo", "printf", "test", "[", "true", "false", "source", ".",
-        "alias", "set", "unset", "exit", "trap", "jobs", "fg", "bg", "break", "continue",
+        "cd", "pwd", "echo", "printf", "test", "[", "true", "false", "source", ".", "alias", "set",
+        "unset", "exit", "trap", "jobs", "fg", "bg", "break", "continue",
     ] {
-        assert!(
-            is_builtin(name),
-            "is_builtin({:?}) should be true",
-            name
-        );
+        assert!(is_builtin(name), "is_builtin({:?}) should be true", name);
         assert!(builtin_id(name).is_some(), "{:?} has no id", name);
     }
     assert!(!is_builtin("definitely_not_a_builtin"));

@@ -1,4 +1,5 @@
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+#![allow(clippy::approx_constant)]
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 
 fn run(b: ChunkBuilder) -> Value {
     match VM::new(b.build()).run() {

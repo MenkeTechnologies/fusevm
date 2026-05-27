@@ -35,9 +35,18 @@ fn run_bool(ops: &[(Op, u32)]) -> bool {
 
 #[test]
 fn spaceship_returns_minus_one_zero_one() {
-    assert_eq!(run_int(&[(Op::LoadInt(5), 1), (Op::LoadInt(9), 1), (Op::Spaceship, 1)]), -1);
-    assert_eq!(run_int(&[(Op::LoadInt(7), 1), (Op::LoadInt(7), 1), (Op::Spaceship, 1)]), 0);
-    assert_eq!(run_int(&[(Op::LoadInt(9), 1), (Op::LoadInt(5), 1), (Op::Spaceship, 1)]), 1);
+    assert_eq!(
+        run_int(&[(Op::LoadInt(5), 1), (Op::LoadInt(9), 1), (Op::Spaceship, 1)]),
+        -1
+    );
+    assert_eq!(
+        run_int(&[(Op::LoadInt(7), 1), (Op::LoadInt(7), 1), (Op::Spaceship, 1)]),
+        0
+    );
+    assert_eq!(
+        run_int(&[(Op::LoadInt(9), 1), (Op::LoadInt(5), 1), (Op::Spaceship, 1)]),
+        1
+    );
 }
 
 #[test]
@@ -272,13 +281,25 @@ fn range_step_wrong_direction_yields_empty() {
 
 #[test]
 fn num_lt_int_vs_float_uses_float_compare() {
-    assert!(run_bool(&[(Op::LoadInt(2), 1), (Op::LoadFloat(2.5), 1), (Op::NumLt, 1)]));
-    assert!(!run_bool(&[(Op::LoadInt(3), 1), (Op::LoadFloat(2.5), 1), (Op::NumLt, 1)]));
+    assert!(run_bool(&[
+        (Op::LoadInt(2), 1),
+        (Op::LoadFloat(2.5), 1),
+        (Op::NumLt, 1)
+    ]));
+    assert!(!run_bool(&[
+        (Op::LoadInt(3), 1),
+        (Op::LoadFloat(2.5), 1),
+        (Op::NumLt, 1)
+    ]));
 }
 
 #[test]
 fn num_eq_int_and_equal_float_is_true() {
-    assert!(run_bool(&[(Op::LoadInt(4), 1), (Op::LoadFloat(4.0), 1), (Op::NumEq, 1)]));
+    assert!(run_bool(&[
+        (Op::LoadInt(4), 1),
+        (Op::LoadFloat(4.0), 1),
+        (Op::NumEq, 1)
+    ]));
 }
 
 #[test]

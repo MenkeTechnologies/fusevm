@@ -5,7 +5,7 @@
 //! - LogAnd/LogOr/LogNot evaluate both sides (not short-circuit)
 //! - BitAnd/Or/Xor/Not, Shl/Shr — coercion via to_int, large-shift mask 63
 
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 
 fn run(b: ChunkBuilder) -> Value {
     match VM::new(b.build()).run() {
@@ -125,9 +125,18 @@ fn spaceship_int_int_returns_negative_zero_positive() {
 
 #[test]
 fn spaceship_mixed_types_uses_float_compare() {
-    assert_eq!(i(two_val(Value::Float(1.5), Value::Int(2), Op::Spaceship)), -1);
-    assert_eq!(i(two_val(Value::Float(2.0), Value::Int(2), Op::Spaceship)), 0);
-    assert_eq!(i(two_val(Value::Float(2.5), Value::Int(2), Op::Spaceship)), 1);
+    assert_eq!(
+        i(two_val(Value::Float(1.5), Value::Int(2), Op::Spaceship)),
+        -1
+    );
+    assert_eq!(
+        i(two_val(Value::Float(2.0), Value::Int(2), Op::Spaceship)),
+        0
+    );
+    assert_eq!(
+        i(two_val(Value::Float(2.5), Value::Int(2), Op::Spaceship)),
+        1
+    );
 }
 
 #[test]
@@ -155,11 +164,31 @@ fn strne_distinguishes_different_reprs() {
 
 #[test]
 fn strlt_le_gt_ge_lexicographic() {
-    assert!(b(two_val(Value::str("apple"), Value::str("banana"), Op::StrLt)));
-    assert!(b(two_val(Value::str("apple"), Value::str("apple"), Op::StrLe)));
-    assert!(b(two_val(Value::str("banana"), Value::str("apple"), Op::StrGt)));
-    assert!(b(two_val(Value::str("banana"), Value::str("banana"), Op::StrGe)));
-    assert!(!b(two_val(Value::str("apple"), Value::str("apple"), Op::StrLt)));
+    assert!(b(two_val(
+        Value::str("apple"),
+        Value::str("banana"),
+        Op::StrLt
+    )));
+    assert!(b(two_val(
+        Value::str("apple"),
+        Value::str("apple"),
+        Op::StrLe
+    )));
+    assert!(b(two_val(
+        Value::str("banana"),
+        Value::str("apple"),
+        Op::StrGt
+    )));
+    assert!(b(two_val(
+        Value::str("banana"),
+        Value::str("banana"),
+        Op::StrGe
+    )));
+    assert!(!b(two_val(
+        Value::str("apple"),
+        Value::str("apple"),
+        Op::StrLt
+    )));
 }
 
 #[test]
@@ -172,8 +201,14 @@ fn strcmp_returns_negative_zero_positive() {
 #[test]
 fn strcmp_uses_bool_repr_true_is_one_false_is_empty() {
     // Bool(true).as_str_cow() == "1", Bool(false) == ""
-    assert_eq!(i(two_val(Value::Bool(true), Value::str("1"), Op::StrCmp)), 0);
-    assert_eq!(i(two_val(Value::Bool(false), Value::str(""), Op::StrCmp)), 0);
+    assert_eq!(
+        i(two_val(Value::Bool(true), Value::str("1"), Op::StrCmp)),
+        0
+    );
+    assert_eq!(
+        i(two_val(Value::Bool(false), Value::str(""), Op::StrCmp)),
+        0
+    );
 }
 
 #[test]
@@ -267,8 +302,14 @@ fn shr_amount_is_masked_to_63() {
 #[test]
 fn bitops_coerce_via_to_int() {
     // String "12" coerces to 12; Float 5.7 coerces to 5.
-    assert_eq!(i(two_val(Value::str("12"), Value::Int(10), Op::BitAnd)), 12 & 10);
-    assert_eq!(i(two_val(Value::Float(5.7), Value::Int(3), Op::BitAnd)), 5 & 3);
+    assert_eq!(
+        i(two_val(Value::str("12"), Value::Int(10), Op::BitAnd)),
+        12 & 10
+    );
+    assert_eq!(
+        i(two_val(Value::Float(5.7), Value::Int(3), Op::BitAnd)),
+        5 & 3
+    );
     // Undef coerces to 0; bool true coerces to 1.
     assert_eq!(i(two_val(Value::Undef, Value::Int(15), Op::BitAnd)), 0);
     assert_eq!(i(two_val(Value::Bool(true), Value::Int(1), Op::BitOr)), 1);

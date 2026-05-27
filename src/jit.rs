@@ -3904,6 +3904,7 @@ impl JitCompiler {
     pub fn trace_bump_side_exit(&self, _chunk: &crate::Chunk, _anchor_ip: usize) {}
 
     #[cfg(not(feature = "jit"))]
+    #[allow(clippy::too_many_arguments)]
     pub fn trace_install_with_kind(
         &self,
         _chunk: &crate::Chunk,

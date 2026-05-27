@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 //! Control-flow + arithmetic-edge tests:
 //!  - Op::Jump forward/backward
 //!  - Op::JumpIfTrue/False (consuming) vs JumpIfTrue/FalseKeep (peeking)
@@ -9,7 +10,7 @@
 //!  - Op::Negate on Int (incl. i64::MIN wrapping) and Float
 //!  - Op::Inc / Op::Dec on Int (incl. overflow wrap)
 
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 
 fn exec(b: ChunkBuilder) -> VMResult {
     VM::new(b.build()).run()

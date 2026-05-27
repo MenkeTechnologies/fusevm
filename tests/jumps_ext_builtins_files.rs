@@ -1,4 +1,4 @@
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 use std::sync::{Arc, Mutex};
 
 fn run(b: ChunkBuilder) -> Value {

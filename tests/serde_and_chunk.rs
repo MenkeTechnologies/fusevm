@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 //! Serde round-trip and Chunk/ChunkBuilder edge-case coverage.
 
 use fusevm::{Chunk, ChunkBuilder, Op, Value};
@@ -94,7 +95,10 @@ fn value_serde_hash() {
 #[test]
 fn value_serde_empty_collections() {
     assert_eq!(rt(&Value::array(vec![])), Value::array(vec![]));
-    assert_eq!(rt(&Value::hash(HashMap::new())), Value::hash(HashMap::new()));
+    assert_eq!(
+        rt(&Value::hash(HashMap::new())),
+        Value::hash(HashMap::new())
+    );
 }
 
 #[test]

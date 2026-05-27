@@ -1,7 +1,7 @@
 //! Coverage for fused superinstructions, scope frame ops, higher-order
 //! block stubs, and `CallBuiltin` dispatch.
 
-use fusevm::{ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{ChunkBuilder, Op, VMResult, Value, VM};
 
 fn run(b: ChunkBuilder) -> Value {
     match VM::new(b.build()).run() {

@@ -196,7 +196,7 @@ mod tests {
     fn test_coercions() {
         assert_eq!(Value::str("42").to_int(), 42);
         assert_eq!(Value::Int(42).to_str(), "42");
-        assert_eq!(Value::Float(3.14).to_int(), 3);
+        assert_eq!(Value::Float(3.25).to_int(), 3);
         assert_eq!(Value::Bool(true).to_int(), 1);
     }
 
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(Value::Bool(true).to_float(), 1.0);
         assert_eq!(Value::Bool(false).to_float(), 0.0);
         assert_eq!(Value::Status(7).to_float(), 7.0);
-        assert_eq!(Value::str("3.14").to_float(), 3.14);
+        assert_eq!(Value::str("3.25").to_float(), 3.25);
         assert_eq!(Value::str("garbage").to_float(), 0.0);
     }
 
@@ -456,7 +456,7 @@ mod tests {
             Value::Undef,
             Value::Bool(true),
             Value::Int(-42),
-            Value::Float(3.14),
+            Value::Float(3.25),
             Value::str("hello"),
             Value::Status(127),
         ];

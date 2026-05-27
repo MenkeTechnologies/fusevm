@@ -198,10 +198,7 @@ fn heredoc_and_herestring_no_op() {
 fn call_function_returns_none_for_unknown() {
     let mut h = DefaultHost;
     assert_eq!(h.call_function("missing", vec![]), None);
-    assert_eq!(
-        h.call_function("foo", vec!["a".into(), "b".into()]),
-        None
-    );
+    assert_eq!(h.call_function("foo", vec!["a".into(), "b".into()]), None);
 }
 
 #[test]
@@ -238,18 +235,14 @@ fn exec_bg_empty_args_returns_zero() {
 #[test]
 fn exec_nonexistent_command_returns_127() {
     let mut h = DefaultHost;
-    let status = h.exec(vec![
-        "/this/binary/does/not/exist/zzz_fusevm_test".into()
-    ]);
+    let status = h.exec(vec!["/this/binary/does/not/exist/zzz_fusevm_test".into()]);
     assert_eq!(status, 127);
 }
 
 #[test]
 fn exec_bg_nonexistent_command_returns_zero() {
     let mut h = DefaultHost;
-    let pid = h.exec_bg(vec![
-        "/this/binary/does/not/exist/zzz_fusevm_test".into()
-    ]);
+    let pid = h.exec_bg(vec!["/this/binary/does/not/exist/zzz_fusevm_test".into()]);
     assert_eq!(pid, 0);
 }
 

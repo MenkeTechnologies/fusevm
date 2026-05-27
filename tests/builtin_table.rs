@@ -149,7 +149,13 @@ fn all_canonical_builtin_names_map_correctly() {
     for (name, id) in cases {
         assert_eq!(builtin_id(name), Some(*id), "mismatch for {:?}", name);
         assert!(is_builtin(name), "{:?} should be a builtin", name);
-        assert!(*id < BUILTIN_MAX, "{:?} id {} exceeds BUILTIN_MAX {}", name, id, BUILTIN_MAX);
+        assert!(
+            *id < BUILTIN_MAX,
+            "{:?} id {} exceeds BUILTIN_MAX {}",
+            name,
+            id,
+            BUILTIN_MAX
+        );
     }
 }
 
@@ -195,7 +201,11 @@ fn unknown_names_return_none() {
         "cd/",
     ];
     for name in unknowns {
-        assert!(builtin_id(name).is_none(), "{:?} should not be a builtin", name);
+        assert!(
+            builtin_id(name).is_none(),
+            "{:?} should not be a builtin",
+            name
+        );
         assert!(!is_builtin(name));
     }
 }
@@ -203,8 +213,19 @@ fn unknown_names_return_none() {
 #[test]
 fn is_builtin_is_consistent_with_builtin_id() {
     let names = [
-        "cd", "echo", "true", "false", ":", "test", "[", "type", "source",
-        ".", "ls", "rm", "definitely_no_such_thing",
+        "cd",
+        "echo",
+        "true",
+        "false",
+        ":",
+        "test",
+        "[",
+        "type",
+        "source",
+        ".",
+        "ls",
+        "rm",
+        "definitely_no_such_thing",
     ];
     for n in names {
         assert_eq!(is_builtin(n), builtin_id(n).is_some());
@@ -214,14 +235,37 @@ fn is_builtin_is_consistent_with_builtin_id() {
 #[test]
 fn all_builtin_ids_are_below_max() {
     let ids = [
-        BUILTIN_CD, BUILTIN_PWD, BUILTIN_ECHO, BUILTIN_PRINT, BUILTIN_PRINTF,
-        BUILTIN_EXPORT, BUILTIN_UNSET, BUILTIN_SOURCE, BUILTIN_EXIT,
-        BUILTIN_RETURN, BUILTIN_TRUE, BUILTIN_FALSE, BUILTIN_TEST,
-        BUILTIN_COLON, BUILTIN_DOT, BUILTIN_LOCAL, BUILTIN_DECLARE,
-        BUILTIN_TYPESET, BUILTIN_READONLY, BUILTIN_INTEGER, BUILTIN_FLOAT,
-        BUILTIN_READ, BUILTIN_MAPFILE, BUILTIN_BREAK, BUILTIN_CONTINUE,
-        BUILTIN_SHIFT, BUILTIN_EVAL, BUILTIN_EXEC, BUILTIN_COMMAND,
-        BUILTIN_BUILTIN, BUILTIN_MKTEMP,
+        BUILTIN_CD,
+        BUILTIN_PWD,
+        BUILTIN_ECHO,
+        BUILTIN_PRINT,
+        BUILTIN_PRINTF,
+        BUILTIN_EXPORT,
+        BUILTIN_UNSET,
+        BUILTIN_SOURCE,
+        BUILTIN_EXIT,
+        BUILTIN_RETURN,
+        BUILTIN_TRUE,
+        BUILTIN_FALSE,
+        BUILTIN_TEST,
+        BUILTIN_COLON,
+        BUILTIN_DOT,
+        BUILTIN_LOCAL,
+        BUILTIN_DECLARE,
+        BUILTIN_TYPESET,
+        BUILTIN_READONLY,
+        BUILTIN_INTEGER,
+        BUILTIN_FLOAT,
+        BUILTIN_READ,
+        BUILTIN_MAPFILE,
+        BUILTIN_BREAK,
+        BUILTIN_CONTINUE,
+        BUILTIN_SHIFT,
+        BUILTIN_EVAL,
+        BUILTIN_EXEC,
+        BUILTIN_COMMAND,
+        BUILTIN_BUILTIN,
+        BUILTIN_MKTEMP,
     ];
     for id in ids {
         assert!(id < BUILTIN_MAX);
@@ -256,7 +300,12 @@ fn special_one_char_builtins() {
 fn no_builtin_returns_id_equal_to_max() {
     // BUILTIN_MAX is an exclusive upper bound — no builtin's id should equal it.
     for name in &[
-        "cd", "mktemp", "zprof", "sync", "barrier", "intercept_proceed",
+        "cd",
+        "mktemp",
+        "zprof",
+        "sync",
+        "barrier",
+        "intercept_proceed",
     ] {
         let id = builtin_id(name).expect("known builtin");
         assert!(id < BUILTIN_MAX);

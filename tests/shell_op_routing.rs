@@ -6,7 +6,7 @@
 
 use fusevm::host::ShellHost;
 use fusevm::op::{param_mod, redirect_op};
-use fusevm::{Chunk, ChunkBuilder, Op, VM, VMResult, Value};
+use fusevm::{Chunk, ChunkBuilder, Op, VMResult, Value, VM};
 use std::sync::{Arc, Mutex};
 
 fn run(b: ChunkBuilder) -> Value {
@@ -20,12 +20,13 @@ fn run(b: ChunkBuilder) -> Value {
 // ── Recording host that captures host-method arguments ──
 
 #[derive(Clone, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum Call {
     ExpandParam(String, u8, Vec<Value>),
     Heredoc(String),
     Herestring(String),
     Redirect(u8, u8, String),
-    CmdSubst(usize),    // sub.ops.len() as fingerprint
+    CmdSubst(usize), // sub.ops.len() as fingerprint
     ProcessSubIn(usize),
     ProcessSubOut(usize),
     TrapSet(String, usize),
@@ -53,11 +54,10 @@ impl Recorder {
 
 impl ShellHost for Recorder {
     fn expand_param(&mut self, name: &str, modifier: u8, args: &[Value]) -> Value {
-        self.log.lock().unwrap().push(Call::ExpandParam(
-            name.to_string(),
-            modifier,
-            args.to_vec(),
-        ));
+        self.log
+            .lock()
+            .unwrap()
+            .push(Call::ExpandParam(name.to_string(), modifier, args.to_vec()));
         self.expand_reply.clone().unwrap_or(Value::str(""))
     }
     fn heredoc(&mut self, c: &str) {
@@ -76,10 +76,7 @@ impl ShellHost for Recorder {
             .push(Call::Redirect(fd, op, target.to_string()));
     }
     fn cmd_subst(&mut self, sub: &Chunk) -> String {
-        self.log
-            .lock()
-            .unwrap()
-            .push(Call::CmdSubst(sub.ops.len()));
+        self.log.lock().unwrap().push(Call::CmdSubst(sub.ops.len()));
         self.cmd_subst_reply.clone().unwrap_or_default()
     }
     fn process_sub_in(&mut self, sub: &Chunk) -> String {
@@ -615,7 +612,10 @@ fn callfunction_flattens_array_args() {
     let calls = log.lock().unwrap().clone();
     match &calls[0] {
         Call::CallFunction(_, args) => {
-            assert_eq!(args, &vec!["x".to_string(), "y".to_string(), "z".to_string()]);
+            assert_eq!(
+                args,
+                &vec!["x".to_string(), "y".to_string(), "z".to_string()]
+            );
         }
         other => panic!("unexpected: {:?}", other),
     }

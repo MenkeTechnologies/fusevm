@@ -1,3 +1,4 @@
+#![allow(clippy::approx_constant)]
 #![cfg(feature = "jit")]
 
 use fusevm::{ChunkBuilder, JitCompiler, Op, Value};
