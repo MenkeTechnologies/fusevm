@@ -23119,6 +23119,5420 @@ fn subshell_end_exit_code_553_propagates() {
     }
 }
 
+// ─── Pin tests batch U (handwritten) ──────────────────────────────────────
+
+#[test]
+fn subshell_end_exit_code_554_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(554)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(554)) => {}
+        other => panic!("exit code 554 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_ninety_four_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..94 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_555_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(555)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(555)) => {}
+        other => panic!("exit code 555 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_ninety_five_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..95 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_556_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(556)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(556)) => {}
+        other => panic!("exit code 556 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_ninety_six_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..96 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_557_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(557)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(557)) => {}
+        other => panic!("exit code 557 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_seventy_eight_end_incrementing_from_two() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..78 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(79)) => {}
+        other => panic!("seventy-eighth subshell_end(Some(79)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_558_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(558)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(558)) => {}
+        other => panic!("exit code 558 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-80)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-80)) => {}
+        other => panic!("status -80 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_559_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(559)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(559)) => {}
+        other => panic!("exit code 559 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_one_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-81)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-81)) => {}
+        other => panic!("status -81 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_560_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(560)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(560)) => {}
+        other => panic!("exit code 560 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_thirty_fourth_some_host_applies_on_thirty_fourth_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..34 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct ThirtyFourthSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for ThirtyFourthSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 34 {
+                Some(561)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 7;
+    vm.set_shell_host(Box::new(ThirtyFourthSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(561)) => {}
+        other => panic!("thirty-fourth subshell_end(Some(561)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_561_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(561)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(561)) => {}
+        other => panic!("exit code 561 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_halt_reset_subshell_end_sixteenth_run_applies() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let sub = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::CallBuiltin(100, 0), 1);
+        b.build()
+    };
+    let end_only = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.build()
+    };
+    let mut vm = VM::new(sub.clone());
+    vm.set_shell_host(Box::new(CountingSubshellEndHost(562)));
+    vm.register_builtin(100, builtin_request_halt);
+    let _ = vm.run();
+    vm.reset(sub);
+    let _ = vm.run();
+    for _ in 0..13 {
+        vm.reset(end_only.clone());
+        let _ = vm.run();
+    }
+    vm.reset(end_only);
+    let _ = vm.run();
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 16);
+    assert_eq!(vm.last_status, 562);
+}
+
+#[test]
+fn subshell_end_exit_code_562_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(562)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(562)) => {}
+        other => panic!("exit code 562 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_bit_xor_after_subshell_end_status563() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(12), 1);
+    b.emit(Op::LoadInt(5), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::BitXor, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(563)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 563);
+}
+
+#[test]
+fn subshell_end_exit_code_563_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(563)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(563)) => {}
+        other => panic!("exit code 563 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_twelve_begins_ten_ends_last_end_status_wins() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    for _ in 0..12 {
+        b.emit(Op::SubshellBegin, 1);
+    }
+    for _ in 0..10 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct CountingBeginEndHost564;
+    impl ShellHost for CountingBeginEndHost564 {
+        fn subshell_begin(&mut self) {
+            SUBSHELL_BEGIN_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            SUBSHELL_END_CALLS.fetch_add(1, Ordering::SeqCst);
+            Some(564)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(CountingBeginEndHost564));
+    match vm.run() {
+        VMResult::Ok(Value::Status(564)) => {}
+        other => panic!("tenth subshell_end(Some(564)) MUST win, got {:?}", other),
+    }
+    assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 12);
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 10);
+}
+
+#[test]
+fn subshell_end_exit_code_564_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(564)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(564)) => {}
+        other => panic!("exit code 564 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_bit_not_after_subshell_end_status565() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(7), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::BitNot, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(565)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 565);
+}
+
+#[test]
+fn subshell_end_exit_code_565_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(565)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(565)) => {}
+        other => panic!("exit code 565 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_thirteen_reset_runs_same_host_same_status() {
+    let chunk = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::GetStatus, 1);
+        b.build()
+    };
+    let mut vm = VM::new(chunk.clone());
+    vm.set_shell_host(Box::new(StatusReturningHost(566)));
+    for _ in 0..13 {
+        match vm.run() {
+            VMResult::Ok(Value::Status(566)) => {}
+            other => panic!("reset run MUST return Status(566), got {:?}", other),
+        }
+        vm.reset(chunk.clone());
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_566_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(566)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(566)) => {}
+        other => panic!("exit code 566 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_shl_after_subshell_end_status567() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(3), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::Shl, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(567)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 567);
+}
+
+#[test]
+fn subshell_end_exit_code_567_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(567)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(567)) => {}
+        other => panic!("exit code 567 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_seventy_nine_end_incrementing_from_six() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..79 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(84)) => {}
+        other => panic!("seventy-ninth subshell_end(Some(84)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_568_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(568)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(568)) => {}
+        other => panic!("exit code 568 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_shr_after_subshell_end_status569() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(16), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::Shr, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(569)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 569);
+}
+
+#[test]
+fn subshell_end_exit_code_569_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(569)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(569)) => {}
+        other => panic!("exit code 569 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_ninety_seven_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..97 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_570_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(570)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(570)) => {}
+        other => panic!("exit code 570 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_ninety_eight_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..98 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_571_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(571)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(571)) => {}
+        other => panic!("exit code 571 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_pop_after_subshell_end_status572() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(9), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::Pop, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(572)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 572);
+}
+
+#[test]
+fn subshell_end_exit_code_572_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(572)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(572)) => {}
+        other => panic!("exit code 572 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_end_incrementing_from_one() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..80 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 1 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(80)) => {}
+        other => panic!("eightieth subshell_end(Some(80)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_573_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(573)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(573)) => {}
+        other => panic!("exit code 573 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_log_and_after_subshell_end_status574() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadTrue, 1);
+    b.emit(Op::LoadFalse, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::LogAnd, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(574)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 574);
+}
+
+#[test]
+fn subshell_end_exit_code_574_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(574)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(574)) => {}
+        other => panic!("exit code 574 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_two_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-82)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-82)) => {}
+        other => panic!("status -82 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_575_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(575)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(575)) => {}
+        other => panic!("exit code 575 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_log_or_after_subshell_end_status576() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadFalse, 1);
+    b.emit(Op::LoadTrue, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::LogOr, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(576)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 576);
+}
+
+#[test]
+fn subshell_end_exit_code_576_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(576)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(576)) => {}
+        other => panic!("exit code 576 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_none_host_seventeen_ends_leaves_initial_status() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..17 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.last_status = 577;
+    vm.set_shell_host(Box::new(NoneHost));
+    match vm.run() {
+        VMResult::Ok(Value::Status(577)) => {}
+        other => panic!("NoneHost seventeen ends MUST leave last_status 577, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_577_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(577)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(577)) => {}
+        other => panic!("exit code 577 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_first_some_then_none_host_seventeenth_none_keeps_first() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..17 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 578 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(578)) => {}
+        other => panic!("FirstSomeThenNoneHost seventeenth None MUST keep first Some(578), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_578_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(578)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(578)) => {}
+        other => panic!("exit code 578 MUST propagate, got {:?}", other),
+    }
+}
+
+// ─── Pin tests batch V (handwritten) ──────────────────────────────────────
+
+#[test]
+fn subshell_end_exit_code_579_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(579)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(579)) => {}
+        other => panic!("exit code 579 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_ninety_nine_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..99 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_580_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(580)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(580)) => {}
+        other => panic!("exit code 580 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..100 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_581_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(581)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(581)) => {}
+        other => panic!("exit code 581 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_one_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..101 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_582_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(582)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(582)) => {}
+        other => panic!("exit code 582 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_one_end_incrementing_from_fifteen() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..81 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 15 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(95)) => {}
+        other => panic!("eighty-first subshell_end(Some(95)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_583_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(583)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(583)) => {}
+        other => panic!("exit code 583 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_three_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-83)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-83)) => {}
+        other => panic!("status -83 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_584_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(584)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(584)) => {}
+        other => panic!("exit code 584 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_four_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-84)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-84)) => {}
+        other => panic!("status -84 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_585_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(585)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(585)) => {}
+        other => panic!("exit code 585 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_thirty_fifth_some_host_applies_on_thirty_fifth_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..35 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct ThirtyFifthSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for ThirtyFifthSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 35 {
+                Some(586)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 5;
+    vm.set_shell_host(Box::new(ThirtyFifthSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(586)) => {}
+        other => panic!("thirty-fifth subshell_end(Some(586)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_586_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(586)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(586)) => {}
+        other => panic!("exit code 586 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_halt_reset_subshell_end_seventeenth_run_applies() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let sub = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::CallBuiltin(100, 0), 1);
+        b.build()
+    };
+    let end_only = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.build()
+    };
+    let mut vm = VM::new(sub.clone());
+    vm.set_shell_host(Box::new(CountingSubshellEndHost(587)));
+    vm.register_builtin(100, builtin_request_halt);
+    let _ = vm.run();
+    vm.reset(sub);
+    let _ = vm.run();
+    for _ in 0..14 {
+        vm.reset(end_only.clone());
+        let _ = vm.run();
+    }
+    vm.reset(end_only);
+    let _ = vm.run();
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 17);
+    assert_eq!(vm.last_status, 587);
+}
+
+#[test]
+fn subshell_end_exit_code_587_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(587)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(587)) => {}
+        other => panic!("exit code 587 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_load_float_after_subshell_end_status588() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::LoadFloat(3.14), 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(588)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 588);
+}
+
+#[test]
+fn subshell_end_exit_code_588_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(588)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(588)) => {}
+        other => panic!("exit code 588 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_thirteen_begins_eleven_ends_last_end_status_wins() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    for _ in 0..13 {
+        b.emit(Op::SubshellBegin, 1);
+    }
+    for _ in 0..11 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct CountingBeginEndHost589;
+    impl ShellHost for CountingBeginEndHost589 {
+        fn subshell_begin(&mut self) {
+            SUBSHELL_BEGIN_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            SUBSHELL_END_CALLS.fetch_add(1, Ordering::SeqCst);
+            Some(589)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(CountingBeginEndHost589));
+    match vm.run() {
+        VMResult::Ok(Value::Status(589)) => {}
+        other => panic!("eleventh subshell_end(Some(589)) MUST win, got {:?}", other),
+    }
+    assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 13);
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 11);
+}
+
+#[test]
+fn subshell_end_exit_code_589_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(589)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(589)) => {}
+        other => panic!("exit code 589 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_concat_after_subshell_end_status590() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let a = cb.add_constant(Value::str("a"));
+        let bidx = cb.add_constant(Value::str("b"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(a), 1);
+        cb.emit(Op::LoadConst(bidx), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::Concat, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(590)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 590);
+}
+
+#[test]
+fn subshell_end_exit_code_590_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(590)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(590)) => {}
+        other => panic!("exit code 590 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_fourteen_reset_runs_same_host_same_status() {
+    let chunk = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::GetStatus, 1);
+        b.build()
+    };
+    let mut vm = VM::new(chunk.clone());
+    vm.set_shell_host(Box::new(StatusReturningHost(591)));
+    for _ in 0..14 {
+        match vm.run() {
+            VMResult::Ok(Value::Status(591)) => {}
+            other => panic!("reset run MUST return Status(591), got {:?}", other),
+        }
+        vm.reset(chunk.clone());
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_591_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(591)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(591)) => {}
+        other => panic!("exit code 591 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_str_eq_after_subshell_end_status592() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let a = cb.add_constant(Value::str("x"));
+        let bidx = cb.add_constant(Value::str("x"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(a), 1);
+        cb.emit(Op::LoadConst(bidx), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StrEq, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(592)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 592);
+}
+
+#[test]
+fn subshell_end_exit_code_592_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(592)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(592)) => {}
+        other => panic!("exit code 592 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_two_end_incrementing_from_four() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..82 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(85)) => {}
+        other => panic!("eighty-second subshell_end(Some(85)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_593_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(593)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(593)) => {}
+        other => panic!("exit code 593 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_str_ne_after_subshell_end_status594() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let a = cb.add_constant(Value::str("a"));
+        let bidx = cb.add_constant(Value::str("b"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(a), 1);
+        cb.emit(Op::LoadConst(bidx), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StrNe, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(594)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 594);
+}
+
+#[test]
+fn subshell_end_exit_code_594_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(594)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(594)) => {}
+        other => panic!("exit code 594 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_negative_then_zero_host_last_zero_wins_status595() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct NegativeThenZeroHost595 {
+        calls: u32,
+    }
+    impl ShellHost for NegativeThenZeroHost595 {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Some(-85)
+            } else {
+                Some(0)
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(NegativeThenZeroHost595 { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(0)) => {}
+        other => panic!("second subshell_end(Some(0)) MUST win over -85, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_595_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(595)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(595)) => {}
+        other => panic!("exit code 595 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_two_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..102 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_596_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(596)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(596)) => {}
+        other => panic!("exit code 596 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_thirty_sixth_some_host_applies_on_thirty_sixth_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..36 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct ThirtySixthSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for ThirtySixthSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 36 {
+                Some(597)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 8;
+    vm.set_shell_host(Box::new(ThirtySixthSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(597)) => {}
+        other => panic!("thirty-sixth subshell_end(Some(597)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_597_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(597)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(597)) => {}
+        other => panic!("exit code 597 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_alternating_status_seventeenth_none_keeps_ninth() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..17 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(9)) => {}
+        other => panic!("AlternatingStatusHost seventeenth None MUST keep Some(9), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_598_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(598)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(598)) => {}
+        other => panic!("exit code 598 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_str_lt_after_subshell_end_status599() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let a = cb.add_constant(Value::str("a"));
+        let bidx = cb.add_constant(Value::str("z"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(a), 1);
+        cb.emit(Op::LoadConst(bidx), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StrLt, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(599)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 599);
+}
+
+#[test]
+fn subshell_end_exit_code_599_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(599)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(599)) => {}
+        other => panic!("exit code 599 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_pipeline_then_subshell_getstatus_reads_subshell_600() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::PipelineEnd, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct PipelineSubshellHost600;
+    impl ShellHost for PipelineSubshellHost600 {
+        fn pipeline_end(&mut self) -> i32 {
+            4
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            Some(600)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(PipelineSubshellHost600));
+    match vm.run() {
+        VMResult::Ok(Value::Status(600)) => {}
+        other => panic!("GetStatus after pipeline+subshell MUST read subshell 600, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_600_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(600)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(600)) => {}
+        other => panic!("exit code 600 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_str_gt_after_subshell_end_status601() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let a = cb.add_constant(Value::str("z"));
+        let bidx = cb.add_constant(Value::str("a"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(a), 1);
+        cb.emit(Op::LoadConst(bidx), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StrGt, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(601)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 601);
+}
+
+#[test]
+fn subshell_end_exit_code_601_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(601)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(601)) => {}
+        other => panic!("exit code 601 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_three_end_incrementing_from_seven() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..83 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(89)) => {}
+        other => panic!("eighty-third subshell_end(Some(89)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_602_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(602)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(602)) => {}
+        other => panic!("exit code 602 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_str_le_after_subshell_end_status603() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let a = cb.add_constant(Value::str("a"));
+        let bidx = cb.add_constant(Value::str("a"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(a), 1);
+        cb.emit(Op::LoadConst(bidx), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StrLe, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(603)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 603);
+}
+
+#[test]
+fn subshell_end_exit_code_603_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(603)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(603)) => {}
+        other => panic!("exit code 603 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_three_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..103 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_604_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(604)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(604)) => {}
+        other => panic!("exit code 604 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_str_ge_after_subshell_end_status605() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let a = cb.add_constant(Value::str("z"));
+        let bidx = cb.add_constant(Value::str("a"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(a), 1);
+        cb.emit(Op::LoadConst(bidx), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StrGe, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(605)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 605);
+}
+
+#[test]
+fn subshell_end_exit_code_605_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(605)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(605)) => {}
+        other => panic!("exit code 605 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_six_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-86)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-86)) => {}
+        other => panic!("status -86 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_606_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(606)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(606)) => {}
+        other => panic!("exit code 606 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_607() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::PipelineEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct SubshellThenPipelineHost607;
+    impl ShellHost for SubshellThenPipelineHost607 {
+        fn subshell_end(&mut self) -> Option<i32> {
+            Some(13)
+        }
+        fn pipeline_end(&mut self) -> i32 {
+            607
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(SubshellThenPipelineHost607));
+    match vm.run() {
+        VMResult::Ok(Value::Status(607)) => {}
+        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 607, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_607_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(607)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(607)) => {}
+        other => panic!("exit code 607 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_four_end_incrementing_from_ten() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..84 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 10 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(93)) => {}
+        other => panic!("eighty-fourth subshell_end(Some(93)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_608_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(608)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(608)) => {}
+        other => panic!("exit code 608 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_four_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..104 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_609_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(609)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(609)) => {}
+        other => panic!("exit code 609 MUST propagate, got {:?}", other),
+    }
+}
+
+// ─── Pin tests batch W (handwritten) ──────────────────────────────────────
+
+#[test]
+fn subshell_end_exit_code_610_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(610)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(610)) => {}
+        other => panic!("exit code 610 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_five_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..105 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_611_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(611)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(611)) => {}
+        other => panic!("exit code 611 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_six_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..106 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_612_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(612)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(612)) => {}
+        other => panic!("exit code 612 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_seven_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..107 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_613_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(613)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(613)) => {}
+        other => panic!("exit code 613 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_five_end_incrementing_from_two() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..85 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(86)) => {}
+        other => panic!("eighty-fifth subshell_end(Some(86)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_614_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(614)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(614)) => {}
+        other => panic!("exit code 614 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_seven_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-87)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-87)) => {}
+        other => panic!("status -87 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_615_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(615)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(615)) => {}
+        other => panic!("exit code 615 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_eight_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-88)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-88)) => {}
+        other => panic!("status -88 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_616_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(616)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(616)) => {}
+        other => panic!("exit code 616 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_thirty_seventh_some_host_applies_on_thirty_seventh_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..37 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct ThirtySeventhSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for ThirtySeventhSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 37 {
+                Some(617)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 3;
+    vm.set_shell_host(Box::new(ThirtySeventhSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(617)) => {}
+        other => panic!("thirty-seventh subshell_end(Some(617)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_617_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(617)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(617)) => {}
+        other => panic!("exit code 617 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_halt_reset_subshell_end_eighteenth_run_applies() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let sub = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::CallBuiltin(100, 0), 1);
+        b.build()
+    };
+    let end_only = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.build()
+    };
+    let mut vm = VM::new(sub.clone());
+    vm.set_shell_host(Box::new(CountingSubshellEndHost(618)));
+    vm.register_builtin(100, builtin_request_halt);
+    let _ = vm.run();
+    vm.reset(sub);
+    let _ = vm.run();
+    for _ in 0..15 {
+        vm.reset(end_only.clone());
+        let _ = vm.run();
+    }
+    vm.reset(end_only);
+    let _ = vm.run();
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 18);
+    assert_eq!(vm.last_status, 618);
+}
+
+#[test]
+fn subshell_end_exit_code_618_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(618)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(618)) => {}
+        other => panic!("exit code 618 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_string_len_after_subshell_end_status619() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let s = cb.add_constant(Value::str("abc"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(s), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StringLen, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(619)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 619);
+}
+
+#[test]
+fn subshell_end_exit_code_619_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(619)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(619)) => {}
+        other => panic!("exit code 619 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_fourteen_begins_twelve_ends_last_end_status_wins() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    for _ in 0..14 {
+        b.emit(Op::SubshellBegin, 1);
+    }
+    for _ in 0..12 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct CountingBeginEndHost620;
+    impl ShellHost for CountingBeginEndHost620 {
+        fn subshell_begin(&mut self) {
+            SUBSHELL_BEGIN_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            SUBSHELL_END_CALLS.fetch_add(1, Ordering::SeqCst);
+            Some(620)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(CountingBeginEndHost620));
+    match vm.run() {
+        VMResult::Ok(Value::Status(620)) => {}
+        other => panic!("twelfth subshell_end(Some(620)) MUST win, got {:?}", other),
+    }
+    assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 14);
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 12);
+}
+
+#[test]
+fn subshell_end_exit_code_620_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(620)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(620)) => {}
+        other => panic!("exit code 620 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_string_repeat_after_subshell_end_status621() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let s = cb.add_constant(Value::str("x"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(s), 1);
+        cb.emit(Op::LoadInt(3), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StringRepeat, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(621)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 621);
+}
+
+#[test]
+fn subshell_end_exit_code_621_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(621)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(621)) => {}
+        other => panic!("exit code 621 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_fifteen_reset_runs_same_host_same_status() {
+    let chunk = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::GetStatus, 1);
+        b.build()
+    };
+    let mut vm = VM::new(chunk.clone());
+    vm.set_shell_host(Box::new(StatusReturningHost(622)));
+    for _ in 0..15 {
+        match vm.run() {
+            VMResult::Ok(Value::Status(622)) => {}
+            other => panic!("reset run MUST return Status(622), got {:?}", other),
+        }
+        vm.reset(chunk.clone());
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_622_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(622)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(622)) => {}
+        other => panic!("exit code 622 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_range_after_subshell_end_status623() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::LoadInt(4), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::Range, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(623)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 623);
+}
+
+#[test]
+fn subshell_end_exit_code_623_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(623)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(623)) => {}
+        other => panic!("exit code 623 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_six_end_incrementing_from_nine() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..86 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(94)) => {}
+        other => panic!("eighty-sixth subshell_end(Some(94)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_624_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(624)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(624)) => {}
+        other => panic!("exit code 624 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_range_step_after_subshell_end_status625() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::LoadInt(6), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::RangeStep, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(625)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 625);
+}
+
+#[test]
+fn subshell_end_exit_code_625_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(625)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(625)) => {}
+        other => panic!("exit code 625 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_eight_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..108 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_626_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(626)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(626)) => {}
+        other => panic!("exit code 626 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_nine_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..109 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_627_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(627)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(627)) => {}
+        other => panic!("exit code 627 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_make_hash_after_subshell_end_status628() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let k = cb.add_constant(Value::str("a"));
+        let v = cb.add_constant(Value::str("b"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(k), 1);
+        cb.emit(Op::LoadConst(v), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::MakeHash(1), 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(628)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 628);
+}
+
+#[test]
+fn subshell_end_exit_code_628_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(628)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(628)) => {}
+        other => panic!("exit code 628 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_alternating_status_eighteenth_none_keeps_ninth() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..18 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(9)) => {}
+        other => panic!("AlternatingStatusHost eighteenth None MUST keep Some(9), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_629_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(629)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(629)) => {}
+        other => panic!("exit code 629 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_none_host_eighteen_ends_leaves_initial_status() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..18 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.last_status = 630;
+    vm.set_shell_host(Box::new(NoneHost));
+    match vm.run() {
+        VMResult::Ok(Value::Status(630)) => {}
+        other => panic!("NoneHost eighteen ends MUST leave last_status 630, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_630_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(630)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(630)) => {}
+        other => panic!("exit code 630 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_first_some_then_none_host_eighteenth_none_keeps_first() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..18 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 631 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(631)) => {}
+        other => panic!("FirstSomeThenNoneHost eighteenth None MUST keep first Some(631), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_631_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(631)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(631)) => {}
+        other => panic!("exit code 631 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_eighty_nine_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-89)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-89)) => {}
+        other => panic!("status -89 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_632_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(632)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(632)) => {}
+        other => panic!("exit code 632 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_setstatus_after_subshell_end_status633() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(99), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::SetStatus, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(633)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 633);
+}
+
+#[test]
+fn subshell_end_exit_code_633_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(633)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(633)) => {}
+        other => panic!("exit code 633 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_seven_end_incrementing_from_four() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..87 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(90)) => {}
+        other => panic!("eighty-seventh subshell_end(Some(90)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_634_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(634)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(634)) => {}
+        other => panic!("exit code 634 MUST propagate, got {:?}", other),
+    }
+}
+
+// ─── Pin tests batch X (handwritten) ──────────────────────────────────────
+
+#[test]
+fn subshell_end_exit_code_635_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(635)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(635)) => {}
+        other => panic!("exit code 635 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_ten_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..110 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_636_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(636)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(636)) => {}
+        other => panic!("exit code 636 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_eleven_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..111 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_637_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(637)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(637)) => {}
+        other => panic!("exit code 637 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_twelve_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..112 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_638_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(638)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(638)) => {}
+        other => panic!("exit code 638 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_eight_end_incrementing_from_eleven() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..88 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 11 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(98)) => {}
+        other => panic!("eighty-eighth subshell_end(Some(98)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_639_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(639)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(639)) => {}
+        other => panic!("exit code 639 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_ninety_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-90)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-90)) => {}
+        other => panic!("status -90 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_640_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(640)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(640)) => {}
+        other => panic!("exit code 640 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_ninety_one_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-91)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-91)) => {}
+        other => panic!("status -91 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_641_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(641)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(641)) => {}
+        other => panic!("exit code 641 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_thirty_eighth_some_host_applies_on_thirty_eighth_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..38 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct ThirtyEighthSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for ThirtyEighthSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 38 {
+                Some(642)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 1;
+    vm.set_shell_host(Box::new(ThirtyEighthSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(642)) => {}
+        other => panic!("thirty-eighth subshell_end(Some(642)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_642_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(642)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(642)) => {}
+        other => panic!("exit code 642 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_halt_reset_subshell_end_nineteenth_run_applies() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let sub = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::CallBuiltin(100, 0), 1);
+        b.build()
+    };
+    let end_only = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.build()
+    };
+    let mut vm = VM::new(sub.clone());
+    vm.set_shell_host(Box::new(CountingSubshellEndHost(643)));
+    vm.register_builtin(100, builtin_request_halt);
+    let _ = vm.run();
+    vm.reset(sub);
+    let _ = vm.run();
+    for _ in 0..16 {
+        vm.reset(end_only.clone());
+        let _ = vm.run();
+    }
+    vm.reset(end_only);
+    let _ = vm.run();
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 19);
+    assert_eq!(vm.last_status, 643);
+}
+
+#[test]
+fn subshell_end_exit_code_643_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(643)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(643)) => {}
+        other => panic!("exit code 643 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_push_frame_after_subshell_end_status644() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::PushFrame, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(644)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 644);
+}
+
+#[test]
+fn subshell_end_exit_code_644_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(644)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(644)) => {}
+        other => panic!("exit code 644 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_fifteen_begins_thirteen_ends_last_end_status_wins() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    for _ in 0..15 {
+        b.emit(Op::SubshellBegin, 1);
+    }
+    for _ in 0..13 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct CountingBeginEndHost645;
+    impl ShellHost for CountingBeginEndHost645 {
+        fn subshell_begin(&mut self) {
+            SUBSHELL_BEGIN_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            SUBSHELL_END_CALLS.fetch_add(1, Ordering::SeqCst);
+            Some(645)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(CountingBeginEndHost645));
+    match vm.run() {
+        VMResult::Ok(Value::Status(645)) => {}
+        other => panic!("thirteenth subshell_end(Some(645)) MUST win, got {:?}", other),
+    }
+    assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 15);
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 13);
+}
+
+#[test]
+fn subshell_end_exit_code_645_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(645)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(645)) => {}
+        other => panic!("exit code 645 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_pop_frame_after_subshell_end_status646() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::PushFrame, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::PopFrame, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(646)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 646);
+}
+
+#[test]
+fn subshell_end_exit_code_646_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(646)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(646)) => {}
+        other => panic!("exit code 646 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_sixteen_reset_runs_same_host_same_status() {
+    let chunk = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::GetStatus, 1);
+        b.build()
+    };
+    let mut vm = VM::new(chunk.clone());
+    vm.set_shell_host(Box::new(StatusReturningHost(647)));
+    for _ in 0..16 {
+        match vm.run() {
+            VMResult::Ok(Value::Status(647)) => {}
+            other => panic!("reset run MUST return Status(647), got {:?}", other),
+        }
+        vm.reset(chunk.clone());
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_647_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(647)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(647)) => {}
+        other => panic!("exit code 647 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_return_after_subshell_end_status648() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::Return, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(648)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 648);
+}
+
+#[test]
+fn subshell_end_exit_code_648_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(648)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(648)) => {}
+        other => panic!("exit code 648 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighty_nine_end_incrementing_from_three() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..89 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 3 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(91)) => {}
+        other => panic!("eighty-ninth subshell_end(Some(91)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_649_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(649)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(649)) => {}
+        other => panic!("exit code 649 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_return_value_after_subshell_end_status650() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(42), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::ReturnValue, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(650)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 650);
+}
+
+#[test]
+fn subshell_end_exit_code_650_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(650)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(650)) => {}
+        other => panic!("exit code 650 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_negative_then_zero_host_last_zero_wins_status651() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct NegativeThenZeroHost651 {
+        calls: u32,
+    }
+    impl ShellHost for NegativeThenZeroHost651 {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Some(-92)
+            } else {
+                Some(0)
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(NegativeThenZeroHost651 { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(0)) => {}
+        other => panic!("second subshell_end(Some(0)) MUST win over -92, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_651_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(651)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(651)) => {}
+        other => panic!("exit code 651 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_thirteen_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..113 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_652_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(652)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(652)) => {}
+        other => panic!("exit code 652 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_thirty_ninth_some_host_applies_on_thirty_ninth_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..39 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct ThirtyNinthSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for ThirtyNinthSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 39 {
+                Some(653)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 9;
+    vm.set_shell_host(Box::new(ThirtyNinthSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(653)) => {}
+        other => panic!("thirty-ninth subshell_end(Some(653)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_653_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(653)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(653)) => {}
+        other => panic!("exit code 653 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_alternating_status_nineteenth_none_keeps_ninth() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..19 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(9)) => {}
+        other => panic!("AlternatingStatusHost nineteenth None MUST keep Some(9), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_654_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(654)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(654)) => {}
+        other => panic!("exit code 654 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_pipeline_begin_after_subshell_end_status655() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(655)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 655);
+}
+
+#[test]
+fn subshell_end_exit_code_655_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(655)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(655)) => {}
+        other => panic!("exit code 655 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_pipeline_stage_after_subshell_end_status656() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::PipelineStage, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(656)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 656);
+}
+
+#[test]
+fn subshell_end_exit_code_656_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(656)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(656)) => {}
+        other => panic!("exit code 656 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_end_incrementing_from_five() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..90 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 5 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(94)) => {}
+        other => panic!("ninetieth subshell_end(Some(94)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_657_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(657)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(657)) => {}
+        other => panic!("exit code 657 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_pipeline_end_after_subshell_end_status658() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::PipelineEnd, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(658)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 658);
+}
+
+#[test]
+fn subshell_end_exit_code_658_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(658)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(658)) => {}
+        other => panic!("exit code 658 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_fourteen_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..114 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_659_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(659)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(659)) => {}
+        other => panic!("exit code 659 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_fortieth_some_host_applies_on_fortieth_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..40 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct FortiethSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for FortiethSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 40 {
+                Some(660)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 2;
+    vm.set_shell_host(Box::new(FortiethSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(660)) => {}
+        other => panic!("fortieth subshell_end(Some(660)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_660_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(660)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(660)) => {}
+        other => panic!("exit code 660 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_pipeline_then_subshell_getstatus_reads_subshell_661() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::PipelineEnd, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct PipelineSubshellHost661;
+    impl ShellHost for PipelineSubshellHost661 {
+        fn pipeline_end(&mut self) -> i32 {
+            5
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            Some(661)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(PipelineSubshellHost661));
+    match vm.run() {
+        VMResult::Ok(Value::Status(661)) => {}
+        other => panic!("GetStatus after pipeline+subshell MUST read subshell 661, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_661_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(661)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(661)) => {}
+        other => panic!("exit code 661 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_662() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::PipelineEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct SubshellThenPipelineHost662;
+    impl ShellHost for SubshellThenPipelineHost662 {
+        fn subshell_end(&mut self) -> Option<i32> {
+            Some(14)
+        }
+        fn pipeline_end(&mut self) -> i32 {
+            662
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(SubshellThenPipelineHost662));
+    match vm.run() {
+        VMResult::Ok(Value::Status(662)) => {}
+        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 662, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_662_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(662)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(662)) => {}
+        other => panic!("exit code 662 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_ninety_three_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-93)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-93)) => {}
+        other => panic!("status -93 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_663_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(663)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(663)) => {}
+        other => panic!("exit code 663 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_one_end_incrementing_from_six() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..91 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 6 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(96)) => {}
+        other => panic!("ninety-first subshell_end(Some(96)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_664_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(664)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(664)) => {}
+        other => panic!("exit code 664 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_fifteen_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..115 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_665_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(665)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(665)) => {}
+        other => panic!("exit code 665 MUST propagate, got {:?}", other),
+    }
+}
+
+// ─── Pin tests batch Y (handwritten) ──────────────────────────────────────
+
+#[test]
+fn subshell_end_exit_code_666_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(666)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(666)) => {}
+        other => panic!("exit code 666 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_sixteen_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..116 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_667_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(667)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(667)) => {}
+        other => panic!("exit code 667 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_seventeen_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..117 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_668_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(668)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(668)) => {}
+        other => panic!("exit code 668 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_eighteen_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..118 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_669_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(669)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(669)) => {}
+        other => panic!("exit code 669 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_two_end_incrementing_from_seven() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..92 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 7 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(98)) => {}
+        other => panic!("ninety-second subshell_end(Some(98)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_670_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(670)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(670)) => {}
+        other => panic!("exit code 670 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_ninety_four_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-94)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-94)) => {}
+        other => panic!("status -94 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_671_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(671)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(671)) => {}
+        other => panic!("exit code 671 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_ninety_five_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-95)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-95)) => {}
+        other => panic!("status -95 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_672_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(672)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(672)) => {}
+        other => panic!("exit code 672 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_forty_first_some_host_applies_on_forty_first_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..41 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct FortyFirstSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for FortyFirstSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 41 {
+                Some(673)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 4;
+    vm.set_shell_host(Box::new(FortyFirstSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(673)) => {}
+        other => panic!("forty-first subshell_end(Some(673)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_673_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(673)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(673)) => {}
+        other => panic!("exit code 673 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_halt_reset_subshell_end_twentieth_run_applies() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let sub = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::CallBuiltin(100, 0), 1);
+        b.build()
+    };
+    let end_only = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.build()
+    };
+    let mut vm = VM::new(sub.clone());
+    vm.set_shell_host(Box::new(CountingSubshellEndHost(674)));
+    vm.register_builtin(100, builtin_request_halt);
+    let _ = vm.run();
+    vm.reset(sub);
+    let _ = vm.run();
+    for _ in 0..17 {
+        vm.reset(end_only.clone());
+        let _ = vm.run();
+    }
+    vm.reset(end_only);
+    let _ = vm.run();
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 20);
+    assert_eq!(vm.last_status, 674);
+}
+
+#[test]
+fn subshell_end_exit_code_674_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(674)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(674)) => {}
+        other => panic!("exit code 674 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_subshell_begin_after_subshell_end_status675() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(675)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 675);
+}
+
+#[test]
+fn subshell_end_exit_code_675_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(675)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(675)) => {}
+        other => panic!("exit code 675 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_sixteen_begins_fourteen_ends_last_end_status_wins() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    for _ in 0..16 {
+        b.emit(Op::SubshellBegin, 1);
+    }
+    for _ in 0..14 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct CountingBeginEndHost676;
+    impl ShellHost for CountingBeginEndHost676 {
+        fn subshell_begin(&mut self) {
+            SUBSHELL_BEGIN_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            SUBSHELL_END_CALLS.fetch_add(1, Ordering::SeqCst);
+            Some(676)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(CountingBeginEndHost676));
+    match vm.run() {
+        VMResult::Ok(Value::Status(676)) => {}
+        other => panic!("fourteenth subshell_end(Some(676)) MUST win, got {:?}", other),
+    }
+    assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 16);
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 14);
+}
+
+#[test]
+fn subshell_end_exit_code_676_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(676)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(676)) => {}
+        other => panic!("exit code 676 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_nop_after_subshell_end_status677() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::Nop, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(677)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 677);
+}
+
+#[test]
+fn subshell_end_exit_code_677_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(677)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(677)) => {}
+        other => panic!("exit code 677 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_seventeen_reset_runs_same_host_same_status() {
+    let chunk = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::GetStatus, 1);
+        b.build()
+    };
+    let mut vm = VM::new(chunk.clone());
+    vm.set_shell_host(Box::new(StatusReturningHost(678)));
+    for _ in 0..17 {
+        match vm.run() {
+            VMResult::Ok(Value::Status(678)) => {}
+            other => panic!("reset run MUST return Status(678), got {:?}", other),
+        }
+        vm.reset(chunk.clone());
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_678_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(678)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(678)) => {}
+        other => panic!("exit code 678 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_str_cmp_after_subshell_end_status679() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let a = cb.add_constant(Value::str("cat"));
+        let bidx = cb.add_constant(Value::str("dog"));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::LoadConst(a), 1);
+        cb.emit(Op::LoadConst(bidx), 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::StrCmp, 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(679)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 679);
+}
+
+#[test]
+fn subshell_end_exit_code_679_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(679)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(679)) => {}
+        other => panic!("exit code 679 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_three_end_incrementing_from_eight() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..93 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 8 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(100)) => {}
+        other => panic!("ninety-third subshell_end(Some(100)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_680_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(680)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(680)) => {}
+        other => panic!("exit code 680 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_second_getstatus_after_subshell_end_status681() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::GetStatus, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(681)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 681);
+}
+
+#[test]
+fn subshell_end_exit_code_681_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(681)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(681)) => {}
+        other => panic!("exit code 681 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_nineteen_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..119 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_682_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(682)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(682)) => {}
+        other => panic!("exit code 682 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_twenty_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..120 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_683_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(683)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(683)) => {}
+        other => panic!("exit code 683 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_alternating_status_twentieth_none_keeps_ninth() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..20 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(9)) => {}
+        other => panic!("AlternatingStatusHost twentieth None MUST keep Some(9), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_684_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(684)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(684)) => {}
+        other => panic!("exit code 684 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_none_host_nineteen_ends_leaves_initial_status() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..19 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.last_status = 685;
+    vm.set_shell_host(Box::new(NoneHost));
+    match vm.run() {
+        VMResult::Ok(Value::Status(685)) => {}
+        other => panic!("NoneHost nineteen ends MUST leave last_status 685, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_685_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(685)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(685)) => {}
+        other => panic!("exit code 685 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_first_some_then_none_host_nineteenth_none_keeps_first() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..19 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 686 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(686)) => {}
+        other => panic!("FirstSomeThenNoneHost nineteenth None MUST keep first Some(686), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_686_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(686)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(686)) => {}
+        other => panic!("exit code 686 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_ninety_six_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-96)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-96)) => {}
+        other => panic!("status -96 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_687_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(687)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(687)) => {}
+        other => panic!("exit code 687 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_four_end_incrementing_from_one() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..94 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 1 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(94)) => {}
+        other => panic!("ninety-fourth subshell_end(Some(94)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_688_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(688)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(688)) => {}
+        other => panic!("exit code 688 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_load_const_after_subshell_end_status689() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let chunk = {
+        let mut cb = ChunkBuilder::new();
+        let c = cb.add_constant(Value::Int(55));
+        cb.emit(Op::SubshellEnd, 1);
+        cb.emit(Op::CallBuiltin(100, 0), 1);
+        cb.emit(Op::LoadConst(c), 1);
+        cb.emit(Op::CallBuiltin(200, 0), 1);
+        cb.build()
+    };
+    let mut vm = VM::new(chunk);
+    vm.set_shell_host(Box::new(StatusReturningHost(689)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 689);
+}
+
+#[test]
+fn subshell_end_exit_code_689_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(689)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(689)) => {}
+        other => panic!("exit code 689 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_negative_then_zero_host_last_zero_wins_status690() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct NegativeThenZeroHost690 {
+        calls: u32,
+    }
+    impl ShellHost for NegativeThenZeroHost690 {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Some(-97)
+            } else {
+                Some(0)
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(NegativeThenZeroHost690 { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(0)) => {}
+        other => panic!("second subshell_end(Some(0)) MUST win over -97, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_690_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(690)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(690)) => {}
+        other => panic!("exit code 690 MUST propagate, got {:?}", other),
+    }
+}
+
+// ─── Pin tests batch Z (handwritten) ──────────────────────────────────────
+
+#[test]
+fn subshell_end_exit_code_691_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(691)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(691)) => {}
+        other => panic!("exit code 691 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_twenty_one_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..121 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_692_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(692)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(692)) => {}
+        other => panic!("exit code 692 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_twenty_two_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..122 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_693_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(693)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(693)) => {}
+        other => panic!("exit code 693 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_twenty_three_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..123 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_694_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(694)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(694)) => {}
+        other => panic!("exit code 694 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_five_end_incrementing_from_twelve() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..95 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 12 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(106)) => {}
+        other => panic!("ninety-fifth subshell_end(Some(106)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_695_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(695)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(695)) => {}
+        other => panic!("exit code 695 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_ninety_eight_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-98)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-98)) => {}
+        other => panic!("status -98 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_696_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(696)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(696)) => {}
+        other => panic!("exit code 696 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_ninety_nine_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-99)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-99)) => {}
+        other => panic!("status -99 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_697_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(697)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(697)) => {}
+        other => panic!("exit code 697 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_forty_second_some_host_applies_on_forty_second_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..42 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct FortySecondSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for FortySecondSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 42 {
+                Some(698)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 6;
+    vm.set_shell_host(Box::new(FortySecondSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(698)) => {}
+        other => panic!("forty-second subshell_end(Some(698)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_698_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(698)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(698)) => {}
+        other => panic!("exit code 698 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_halt_reset_subshell_end_twenty_first_run_applies() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let sub = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::CallBuiltin(100, 0), 1);
+        b.build()
+    };
+    let end_only = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.build()
+    };
+    let mut vm = VM::new(sub.clone());
+    vm.set_shell_host(Box::new(CountingSubshellEndHost(699)));
+    vm.register_builtin(100, builtin_request_halt);
+    let _ = vm.run();
+    vm.reset(sub);
+    let _ = vm.run();
+    for _ in 0..18 {
+        vm.reset(end_only.clone());
+        let _ = vm.run();
+    }
+    vm.reset(end_only);
+    let _ = vm.run();
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 21);
+    assert_eq!(vm.last_status, 699);
+}
+
+#[test]
+fn subshell_end_exit_code_699_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(699)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(699)) => {}
+        other => panic!("exit code 699 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_jump_if_true_after_subshell_end_status700() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(5), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::NumLt, 1);
+    let jmp = b.emit(Op::JumpIfTrue(0), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.patch_jump(jmp, b.current_pos());
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(700)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 700);
+}
+
+#[test]
+fn subshell_end_exit_code_700_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(700)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(700)) => {}
+        other => panic!("exit code 700 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_seventeen_begins_fifteen_ends_last_end_status_wins() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    for _ in 0..17 {
+        b.emit(Op::SubshellBegin, 1);
+    }
+    for _ in 0..15 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct CountingBeginEndHost701;
+    impl ShellHost for CountingBeginEndHost701 {
+        fn subshell_begin(&mut self) {
+            SUBSHELL_BEGIN_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            SUBSHELL_END_CALLS.fetch_add(1, Ordering::SeqCst);
+            Some(701)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(CountingBeginEndHost701));
+    match vm.run() {
+        VMResult::Ok(Value::Status(701)) => {}
+        other => panic!("fifteenth subshell_end(Some(701)) MUST win, got {:?}", other),
+    }
+    assert_eq!(SUBSHELL_BEGIN_CALLS.load(Ordering::SeqCst), 17);
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 15);
+}
+
+#[test]
+fn subshell_end_exit_code_701_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(701)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(701)) => {}
+        other => panic!("exit code 701 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_jump_if_false_after_subshell_end_status702() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(4), 1);
+    b.emit(Op::LoadInt(4), 1);
+    b.emit(Op::NumEq, 1);
+    let jmp = b.emit(Op::JumpIfFalse(0), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.patch_jump(jmp, b.current_pos());
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(702)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 702);
+}
+
+#[test]
+fn subshell_end_exit_code_702_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(702)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(702)) => {}
+        other => panic!("exit code 702 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_eighteen_reset_runs_same_host_same_status() {
+    let chunk = {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::SubshellEnd, 1);
+        b.emit(Op::GetStatus, 1);
+        b.build()
+    };
+    let mut vm = VM::new(chunk.clone());
+    vm.set_shell_host(Box::new(StatusReturningHost(703)));
+    for _ in 0..18 {
+        match vm.run() {
+            VMResult::Ok(Value::Status(703)) => {}
+            other => panic!("reset run MUST return Status(703), got {:?}", other),
+        }
+        vm.reset(chunk.clone());
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_703_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(703)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(703)) => {}
+        other => panic!("exit code 703 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_jump_if_true_keep_after_subshell_end_status704() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadFalse, 1);
+    let jmp = b.emit(Op::JumpIfTrueKeep(0), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.patch_jump(jmp, b.current_pos());
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(704)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 704);
+}
+
+#[test]
+fn subshell_end_exit_code_704_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(704)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(704)) => {}
+        other => panic!("exit code 704 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_six_end_incrementing_from_nine() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..96 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 9 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(104)) => {}
+        other => panic!("ninety-sixth subshell_end(Some(104)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_705_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(705)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(705)) => {}
+        other => panic!("exit code 705 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_jump_if_false_keep_after_subshell_end_status706() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadTrue, 1);
+    let jmp = b.emit(Op::JumpIfFalseKeep(0), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.patch_jump(jmp, b.current_pos());
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(706)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 706);
+}
+
+#[test]
+fn subshell_end_exit_code_706_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(706)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(706)) => {}
+        other => panic!("exit code 706 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_twenty_four_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..124 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_707_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(707)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(707)) => {}
+        other => panic!("exit code 707 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_forty_third_some_host_applies_on_forty_third_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..43 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct FortyThirdSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for FortyThirdSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 43 {
+                Some(708)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 3;
+    vm.set_shell_host(Box::new(FortyThirdSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(708)) => {}
+        other => panic!("forty-third subshell_end(Some(708)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_708_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(708)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(708)) => {}
+        other => panic!("exit code 708 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_alternating_status_twenty_first_none_keeps_ninth() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..21 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(AlternatingStatusHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(9)) => {}
+        other => panic!("AlternatingStatusHost twenty-first None MUST keep Some(9), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_709_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(709)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(709)) => {}
+        other => panic!("exit code 709 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_second_subshell_end_after_subshell_end_status710() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(CountingSubshellEndHost(710)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(SUBSHELL_END_CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(vm.last_status, 710);
+}
+
+#[test]
+fn subshell_end_exit_code_710_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(710)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(710)) => {}
+        other => panic!("exit code 710 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_seven_end_incrementing_from_four() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..97 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 4 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(100)) => {}
+        other => panic!("ninety-seventh subshell_end(Some(100)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_711_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(711)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(711)) => {}
+        other => panic!("exit code 711 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_stops_before_spaceship_after_subshell_end_status712() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::LoadInt(8), 1);
+    b.emit(Op::LoadInt(3), 1);
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::Spaceship, 1);
+    b.emit(Op::CallBuiltin(200, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(712)));
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(200, builtin_count_after_halt);
+    let _ = vm.run();
+    assert_eq!(AFTER_HALT_COUNT.load(Ordering::SeqCst), 0);
+    assert_eq!(vm.last_status, 712);
+}
+
+#[test]
+fn subshell_end_exit_code_712_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(712)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(712)) => {}
+        other => panic!("exit code 712 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_none_host_twenty_ends_leaves_initial_status() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..20 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.last_status = 713;
+    vm.set_shell_host(Box::new(NoneHost));
+    match vm.run() {
+        VMResult::Ok(Value::Status(713)) => {}
+        other => panic!("NoneHost twenty ends MUST leave last_status 713, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_713_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(713)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(713)) => {}
+        other => panic!("exit code 713 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_first_some_then_none_host_twentieth_none_keeps_first() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..20 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(FirstSomeThenNoneHost { calls: 0, status: 714 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(714)) => {}
+        other => panic!("FirstSomeThenNoneHost twentieth None MUST keep first Some(714), got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_714_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(714)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(714)) => {}
+        other => panic!("exit code 714 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_twenty_five_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..125 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_715_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(715)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(715)) => {}
+        other => panic!("exit code 715 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_forty_fourth_some_host_applies_on_forty_fourth_end() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..44 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    struct FortyFourthSomeHost {
+        calls: u32,
+    }
+    impl ShellHost for FortyFourthSomeHost {
+        fn subshell_end(&mut self) -> Option<i32> {
+            self.calls += 1;
+            if self.calls == 44 {
+                Some(716)
+            } else {
+                None
+            }
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.last_status = 10;
+    vm.set_shell_host(Box::new(FortyFourthSomeHost { calls: 0 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(716)) => {}
+        other => panic!("forty-fourth subshell_end(Some(716)) MUST apply, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_716_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(716)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(716)) => {}
+        other => panic!("exit code 716 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_pipeline_then_subshell_getstatus_reads_subshell_717() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::PipelineEnd, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct PipelineSubshellHost717;
+    impl ShellHost for PipelineSubshellHost717 {
+        fn pipeline_end(&mut self) -> i32 {
+            6
+        }
+        fn subshell_end(&mut self) -> Option<i32> {
+            Some(717)
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(PipelineSubshellHost717));
+    match vm.run() {
+        VMResult::Ok(Value::Status(717)) => {}
+        other => panic!("GetStatus after pipeline+subshell MUST read subshell 717, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_717_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(717)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(717)) => {}
+        other => panic!("exit code 717 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_subshell_then_pipeline_getstatus_reads_pipeline_718() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::PipelineBegin(2), 1);
+    b.emit(Op::PipelineEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    struct SubshellThenPipelineHost718;
+    impl ShellHost for SubshellThenPipelineHost718 {
+        fn subshell_end(&mut self) -> Option<i32> {
+            Some(15)
+        }
+        fn pipeline_end(&mut self) -> i32 {
+            718
+        }
+    }
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(SubshellThenPipelineHost718));
+    match vm.run() {
+        VMResult::Ok(Value::Status(718)) => {}
+        other => panic!("GetStatus after subshell+pipeline MUST read pipeline 718, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_718_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(718)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(718)) => {}
+        other => panic!("exit code 718 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_status_minus_one_hundred_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(-100)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(-100)) => {}
+        other => panic!("status -100 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_719_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(719)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(719)) => {}
+        other => panic!("exit code 719 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_ninety_eight_end_incrementing_from_two() {
+    let mut b = ChunkBuilder::new();
+    for _ in 0..98 {
+        b.emit(Op::SubshellEnd, 1);
+    }
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(IncrementingSubshellHost { next: 2 }));
+    match vm.run() {
+        VMResult::Ok(Value::Status(99)) => {}
+        other => panic!("ninety-eighth subshell_end(Some(99)) MUST win, got {:?}", other),
+    }
+}
+
+#[test]
+fn subshell_end_exit_code_720_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellBegin, 1);
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(720)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(720)) => {}
+        other => panic!("exit code 720 MUST propagate, got {:?}", other),
+    }
+}
+
+#[test]
+fn request_halt_one_hundred_twenty_six_consecutive_runs_without_reset_still_blocked() {
+    let _guard = PIN_TEST_LOCK.lock().unwrap();
+    TOUCHED.store(0, Ordering::SeqCst);
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(100, 0), 1);
+    b.emit(Op::CallBuiltin(7, 0), 1);
+    let mut vm = VM::new(b.build());
+    vm.register_builtin(100, builtin_request_halt);
+    vm.register_builtin(7, builtin_touched);
+    for _ in 0..126 {
+        let _ = vm.run();
+    }
+    assert_eq!(TOUCHED.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn subshell_end_exit_code_721_propagates() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::SubshellEnd, 1);
+    b.emit(Op::GetStatus, 1);
+    let mut vm = VM::new(b.build());
+    vm.set_shell_host(Box::new(StatusReturningHost(721)));
+    match vm.run() {
+        VMResult::Ok(Value::Status(721)) => {}
+        other => panic!("exit code 721 MUST propagate, got {:?}", other),
+    }
+}
+
 // ─── Combined ───────────────────────────────────────────────────────────
 
 #[test]
