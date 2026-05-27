@@ -122,8 +122,13 @@ pub trait ShellHost: Send {
     /// Begin subshell scope (snapshot/save state).
     fn subshell_begin(&mut self) {}
 
-    /// End subshell scope (restore state).
-    fn subshell_end(&mut self) {}
+    /// End subshell scope (restore state). Returns `Some(status)` when
+    /// the subshell terminated with a deferred exit (the host wants the
+    /// VM's `last_status` updated so the parent's `$?` sees the exit
+    /// value); returns `None` to leave `last_status` untouched.
+    fn subshell_end(&mut self) -> Option<i32> {
+        None
+    }
 
     /// Install a trap handler for signal `sig`. The handler is a sub-chunk
     /// that the host runs when the signal fires.

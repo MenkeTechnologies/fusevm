@@ -307,6 +307,13 @@ impl VM {
         self.builtin_table[idx] = Some(handler);
     }
 
+    /// Externally request the VM to halt after the current op finishes.
+    /// Used by host-side shell semantics like `set -e` post-command checks
+    /// and `exit` from inside builtins to stop dispatch at a safe point.
+    pub fn request_halt(&mut self) {
+        self.halted = true;
+    }
+
     // ── Tracing JIT integration helpers ──
 
     /// Snapshot the current frame's slots into the i64 + slot-kind buffers.
@@ -1781,7 +1788,9 @@ impl VM {
                 }
                 Op::SubshellEnd => {
                     if let Some(h) = self.host.as_mut() {
-                        h.subshell_end();
+                        if let Some(status) = h.subshell_end() {
+                            self.last_status = status;
+                        }
                     }
                 }
                 Op::Redirect(fd, op) => {
