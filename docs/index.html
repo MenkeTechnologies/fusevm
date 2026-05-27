@@ -162,8 +162,10 @@
           <div><div class="stat">20</div><div class="stat-label">op sections</div></div>
           <div><div class="stat">8</div><div class="stat-label">fused superinstructions</div></div>
           <div><div class="stat">29</div><div class="stat-label">shell ops</div></div>
-          <div><div class="stat">9,040</div><div class="stat-label">production lines</div></div>
-          <div><div class="stat">1,554</div><div class="stat-label">#[test] fns</div></div>
+          <div><div class="stat">9,561</div><div class="stat-label">production lines</div></div>
+          <!-- production lines derived from: find src -name '*.rs' | xargs wc -l | tail -1 -->
+          <div><div class="stat">7,331</div><div class="stat-label">#[test] fns</div></div>
+          <!-- test fns derived from: grep -rc '#\[test\]\|#\[tokio::test\]' --include='*.rs' . | awk -F: '{s+=$2}END{print s}' -->
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
           <div><div class="stat">3</div><div class="stat-label">language frontends</div></div>
         </div>
