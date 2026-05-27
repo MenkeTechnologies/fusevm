@@ -17,16 +17,6 @@ fn run(b: ChunkBuilder) -> Value {
     }
 }
 
-fn run_with<F: FnOnce(&mut VM)>(b: ChunkBuilder, configure: F) -> Value {
-    let mut vm = VM::new(b.build());
-    configure(&mut vm);
-    match vm.run() {
-        VMResult::Ok(v) => v,
-        VMResult::Halted => Value::Undef,
-        VMResult::Error(e) => panic!("unexpected VM error: {e}"),
-    }
-}
-
 // ── Recording host that captures host-method arguments ──
 
 #[derive(Clone, Debug)]
