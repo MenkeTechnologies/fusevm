@@ -574,4 +574,185 @@ mod tests {
             assert_eq!(op, back);
         }
     }
+
+    use std::collections::hash_map::DefaultHasher;
+
+    fn hash_of(op: &Op) -> u64 {
+        let mut h = DefaultHasher::new();
+        op.hash(&mut h);
+        h.finish()
+    }
+
+    // ─── Hash impl coverage: every variant arm must produce consistent
+    //     hashes and equal-ops-hash-equal regardless of payload class ──
+
+    #[test]
+    fn nullary_arithmetic_ops_hash_consistently() {
+        for op in [Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod, Op::Pow] {
+            assert_eq!(hash_of(&op), hash_of(&op.clone()));
+        }
+    }
+
+    #[test]
+    fn distinct_nullary_ops_hash_differently() {
+        // Discriminant alone differentiates these. Collisions are theoretically
+        // allowed by Hash but DefaultHasher is unlikely to collide on so few.
+        let h_add = hash_of(&Op::Add);
+        let h_sub = hash_of(&Op::Sub);
+        let h_mul = hash_of(&Op::Mul);
+        assert_ne!(h_add, h_sub);
+        assert_ne!(h_add, h_mul);
+        assert_ne!(h_sub, h_mul);
+    }
+
+    #[test]
+    fn same_idx_in_different_u16_arms_does_not_collide_on_discriminant() {
+        // GetVar(5) and SetVar(5) share the payload value but differ in
+        // discriminant — must hash differently.
+        let h_get = hash_of(&Op::GetVar(5));
+        let h_set = hash_of(&Op::SetVar(5));
+        assert_ne!(h_get, h_set);
+    }
+
+    #[test]
+    fn jump_targets_hash_independent_of_call_targets() {
+        // Jump(7) and Call(7, 0) share the literal value 7 but should never
+        // collide because discriminants differ.
+        let h_jump = hash_of(&Op::Jump(7));
+        let h_call = hash_of(&Op::Call(7, 0));
+        assert_ne!(h_jump, h_call);
+    }
+
+    #[test]
+    fn call_argc_changes_hash() {
+        let h_zero_arg = hash_of(&Op::Call(10, 0));
+        let h_two_args = hash_of(&Op::Call(10, 2));
+        assert_ne!(h_zero_arg, h_two_args);
+    }
+
+    #[test]
+    fn float_load_distinct_values_hash_differently() {
+        // f64 → to_bits → hash. 1.0 and 2.0 have distinct bit patterns.
+        let h_one = hash_of(&Op::LoadFloat(1.0));
+        let h_two = hash_of(&Op::LoadFloat(2.0));
+        assert_ne!(h_one, h_two);
+    }
+
+    #[test]
+    fn float_load_neg_zero_and_pos_zero_hash_differently() {
+        // 0.0 and -0.0 are == under PartialEq but have different bit patterns,
+        // so the bit-based Hash impl produces different hashes. This is consistent
+        // with serde_json roundtrip semantics for the constant pool.
+        let h_pos = hash_of(&Op::LoadFloat(0.0));
+        let h_neg = hash_of(&Op::LoadFloat(-0.0));
+        assert_ne!(h_pos, h_neg, "+0.0 and -0.0 have distinct bit patterns");
+    }
+
+    #[test]
+    fn redirect_op_uses_both_fd_and_op_in_hash() {
+        let a = Op::Redirect(0, 1);
+        let b = Op::Redirect(0, 2);
+        let c = Op::Redirect(1, 1);
+        assert_ne!(hash_of(&a), hash_of(&b), "second field changes hash");
+        assert_ne!(hash_of(&a), hash_of(&c), "first field changes hash");
+    }
+
+    #[test]
+    fn extended_uses_both_id_and_arg_in_hash() {
+        let a = Op::Extended(1, 2);
+        let b = Op::Extended(1, 3);
+        let c = Op::Extended(2, 2);
+        assert_ne!(hash_of(&a), hash_of(&b));
+        assert_ne!(hash_of(&a), hash_of(&c));
+    }
+
+    #[test]
+    fn three_field_loop_ops_use_all_fields() {
+        let base = Op::SlotLtIntJumpIfFalse(1, 10, 100);
+        let diff_slot = Op::SlotLtIntJumpIfFalse(2, 10, 100);
+        let diff_limit = Op::SlotLtIntJumpIfFalse(1, 99, 100);
+        let diff_target = Op::SlotLtIntJumpIfFalse(1, 10, 200);
+        assert_ne!(hash_of(&base), hash_of(&diff_slot));
+        assert_ne!(hash_of(&base), hash_of(&diff_limit));
+        assert_ne!(hash_of(&base), hash_of(&diff_target));
+    }
+
+    #[test]
+    fn equal_loadint_payloads_hash_equal() {
+        // Same payload → same hash, no matter how the value was constructed.
+        let a = Op::LoadInt(-42);
+        let b = Op::LoadInt(-42);
+        assert_eq!(hash_of(&a), hash_of(&b));
+    }
+
+    #[test]
+    fn pop_dup_swap_rot_are_each_unique() {
+        // Common stack ops — discriminant alone differentiates.
+        let pop = hash_of(&Op::Pop);
+        let dup = hash_of(&Op::Dup);
+        let swap = hash_of(&Op::Swap);
+        let rot = hash_of(&Op::Rot);
+        let set: std::collections::HashSet<_> = [pop, dup, swap, rot].iter().copied().collect();
+        assert_eq!(set.len(), 4, "all four nullary stack ops are distinct");
+    }
+
+    // ─── Serde round-trip extension: more payload-carrying ops ────────
+
+    #[test]
+    fn serde_roundtrip_payload_ops() {
+        let cases = vec![
+            Op::Call(100, 3),
+            Op::CallBuiltin(0, 1),
+            Op::Redirect(2, 5),
+            Op::Extended(7, 9),
+            Op::SlotLtIntJumpIfFalse(1, 10, 200),
+        ];
+        for op in cases {
+            let s = serde_json::to_string(&op).expect("serialize");
+            let back: Op = serde_json::from_str(&s).expect("deserialize");
+            assert_eq!(op, back);
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_float_special_values() {
+        // Special-case floats: NaN doesn't round-trip via PartialEq, so
+        // only check finite ones.
+        for f in [0.0, -0.0, 1.5, -1.5, f64::MIN, f64::MAX] {
+            let op = Op::LoadFloat(f);
+            let s = serde_json::to_string(&op).expect("ser");
+            let back: Op = serde_json::from_str(&s).expect("de");
+            assert_eq!(op, back, "roundtrip {f}");
+        }
+    }
+
+    // ─── tests for the `block` constants module ───────────────────────
+
+    #[test]
+    fn param_mod_constants_are_unique_and_within_u8() {
+        // Each ExpandParam modifier maps to a distinct u8 op-code; verify no
+        // collisions on the 18-value table.
+        let names = [
+            param_mod::DEFAULT,
+            param_mod::ASSIGN,
+            param_mod::ERROR,
+            param_mod::ALTERNATE,
+            param_mod::LENGTH,
+            param_mod::STRIP_SHORT,
+            param_mod::STRIP_LONG,
+            param_mod::RSTRIP_SHORT,
+            param_mod::RSTRIP_LONG,
+            param_mod::SUBST_FIRST,
+            param_mod::SUBST_ALL,
+            param_mod::UPPER,
+            param_mod::LOWER,
+            param_mod::UPPER_FIRST,
+            param_mod::LOWER_FIRST,
+            param_mod::INDIRECT,
+            param_mod::KEYS,
+            param_mod::SLICE,
+        ];
+        let set: std::collections::HashSet<_> = names.iter().copied().collect();
+        assert_eq!(set.len(), names.len(), "param_mod constants must be unique");
+    }
 }
