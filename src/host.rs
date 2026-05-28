@@ -309,4 +309,112 @@ mod tests {
         assert_eq!(h.exec(vec![]), 0);
         assert_eq!(h.exec_bg(vec![]), 0);
     }
+
+    // ─── glob default uses system glob crate ──────────────────────────
+
+    #[test]
+    fn glob_default_returns_paths_for_literal_pattern() {
+        // Default glob impl uses the `glob` crate. A literal path that exists
+        // resolves to one entry; the implementation must not panic and must
+        // return an empty Vec on no match (not error).
+        let mut h = DefaultHost;
+        // `/` always exists on Unix; on Windows `C:\` etc. — use temp_dir as a
+        // portable existing target.
+        let tmp = std::env::temp_dir();
+        let tmp_str = tmp.to_string_lossy().to_string();
+        let result = h.glob(&tmp_str, false);
+        assert_eq!(result.len(), 1, "literal existing path matches itself");
+        // Path resolution is implementation-defined; just confirm something came back.
+        assert!(!result[0].is_empty());
+    }
+
+    #[test]
+    fn glob_default_returns_empty_for_nonmatching_pattern() {
+        // No matches → empty Vec (nullglob-style default — caller decides
+        // how to handle nomatch).
+        let mut h = DefaultHost;
+        // Use a guaranteed-non-existent absolute pattern.
+        let result = h.glob(
+            "/this/path/definitely/does/not/exist/anywhere_xyz_*.tmp",
+            false,
+        );
+        assert!(result.is_empty(), "no match → empty, got: {:?}", result);
+    }
+
+    #[test]
+    fn glob_default_ignores_recursive_flag() {
+        // Default impl accepts `recursive` but ignores it (no `**` semantics).
+        // Verify the boolean does not change behavior for a simple literal.
+        let mut h = DefaultHost;
+        let tmp = std::env::temp_dir();
+        let tmp_str = tmp.to_string_lossy().to_string();
+        let r1 = h.glob(&tmp_str, false);
+        let r2 = h.glob(&tmp_str, true);
+        assert_eq!(r1, r2);
+    }
+
+    // ─── expand_param ignores its arguments by default ────────────────
+
+    #[test]
+    fn expand_param_default_ignores_modifier_and_args() {
+        // No matter the modifier byte or args, the default impl returns Value::str("").
+        // Pins the no-op contract — overriding hosts must replace this method.
+        let mut h = DefaultHost;
+        assert_eq!(h.expand_param("ANY", 0, &[]), Value::str(""));
+        assert_eq!(h.expand_param("ANY", 255, &[]), Value::str(""));
+        assert_eq!(
+            h.expand_param("ANY", 7, &[Value::Int(42), Value::str("x")]),
+            Value::str("")
+        );
+    }
+
+    // ─── word_split contract: collapses runs of whitespace ────────────
+
+    #[test]
+    fn word_split_collapses_consecutive_whitespace() {
+        // Mixed spaces and tabs between words should yield the words without
+        // empty separators — matches POSIX IFS default behavior.
+        let mut h = DefaultHost;
+        assert_eq!(
+            h.word_split("  a\t b\n\nc \t d  "),
+            vec!["a", "b", "c", "d"]
+        );
+    }
+
+    // ─── array_index returns Undef for any kind of index ──────────────
+
+    #[test]
+    fn array_index_default_returns_undef_for_any_index_type() {
+        let mut h = DefaultHost;
+        assert_eq!(h.array_index("a", &Value::Int(-1)), Value::Undef);
+        assert_eq!(h.array_index("", &Value::str("key")), Value::Undef);
+        assert_eq!(h.array_index("a", &Value::Undef), Value::Undef);
+    }
+
+    // ─── pipeline_end stays at zero across multiple beginnings ────────
+
+    #[test]
+    fn pipeline_lifecycle_does_not_drift_status_in_default_impl() {
+        // Default impl doesn't track state — repeated cycles always yield 0.
+        let mut h = DefaultHost;
+        for _ in 0..5 {
+            h.pipeline_begin(3);
+            h.pipeline_stage();
+            h.pipeline_stage();
+            assert_eq!(h.pipeline_end(), 0);
+        }
+    }
+
+    // ─── trap_set with empty signal name ──────────────────────────────
+
+    #[test]
+    fn trap_set_default_accepts_any_signal_name_without_panic() {
+        let mut h = DefaultHost;
+        let c = Chunk::new();
+        h.trap_set("", &c);
+        h.trap_set("SIGINT", &c);
+        h.trap_set("EXIT", &c);
+        h.trap_set("\0nonsense", &c);
+        // No observable state to assert — the contract is "no panic".
+    }
 }
