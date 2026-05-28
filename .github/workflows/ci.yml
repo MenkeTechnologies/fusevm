@@ -42,7 +42,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --no-fail-fast
+      # v0_12_2_apis.rs uses 5 shared `static AtomicU32` counters, so parallel
+      # test execution race-counts and intermittently fails (PIPELINE_BEGIN_CALLS
+      # observes 2 when 1 is expected). Run all tests with --test-threads=1 to
+      # serialize across files. Slower but deterministic; matrix already runs
+      # two OSes in parallel.
+      - run: cargo test --locked --no-fail-fast -- --test-threads=1
 
   doc:
     name: Doc
