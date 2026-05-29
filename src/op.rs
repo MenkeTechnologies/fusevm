@@ -65,11 +65,11 @@ pub enum Op {
     SetArray(u16),
     /// Declare a fresh array binding in the current scope.
     DeclareArray(u16),
-    /// stack: [index] → value
+    /// stack: \[index\] → value
     ArrayGet(u16),
-    /// stack: [value, index]
+    /// stack: \[value, index\]
     ArraySet(u16),
-    /// stack: [value]
+    /// stack: \[value\]
     ArrayPush(u16),
     /// → popped value
     ArrayPop(u16),
@@ -87,13 +87,13 @@ pub enum Op {
     SetHash(u16),
     /// Declare a fresh hash binding in the current scope.
     DeclareHash(u16),
-    /// stack: [key] → value
+    /// stack: \[key\] → value
     HashGet(u16),
-    /// stack: [value, key]
+    /// stack: \[value, key\]
     HashSet(u16),
-    /// stack: [key] → deleted value
+    /// stack: \[key\] → deleted value
     HashDelete(u16),
-    /// stack: [key] → bool
+    /// stack: \[key\] → bool
     HashExists(u16),
     /// → array of keys
     HashKeys(u16),
@@ -321,7 +321,7 @@ pub enum Op {
     TildeExpand,
     /// Call user-defined shell function by name pool index with N args.
     /// Falls through to host.call_function() then host.exec() if not found.
-    /// stack: [arg_N, ..., arg_1] → pushes Status
+    /// stack: \[arg_N, ..., arg_1\] → pushes Status
     CallFunction(u16, u8),
     /// Glob-pattern match: pop pattern, pop string, push Bool.
     /// Used by `[[ x = pat ]]` and `case` arm matching.
