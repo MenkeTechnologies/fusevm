@@ -572,11 +572,7 @@ mod tests {
         // Pin the separator — Perl's default `$,` is empty but the
         // common host convention is single-space; printf("%s", @a)
         // semantics rely on this.
-        let v = Value::array(vec![
-            Value::int(1),
-            Value::int(2),
-            Value::int(3),
-        ]);
+        let v = Value::array(vec![Value::int(1), Value::int(2), Value::int(3)]);
         assert_eq!(v.to_str(), "1 2 3");
     }
 
@@ -606,7 +602,7 @@ mod tests {
         // Pin `len()` as byte count for Str (Rust's String::len
         // semantic). If a refactor switches to char count, all
         // `length()` builtins drift on UTF-8 input.
-        let v = Value::str("é");  // 2 UTF-8 bytes
+        let v = Value::str("é"); // 2 UTF-8 bytes
         assert_eq!(v.len(), 2);
     }
 
