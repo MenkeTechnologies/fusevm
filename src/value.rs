@@ -477,4 +477,73 @@ mod tests {
             assert_eq!(original, restored);
         }
     }
+
+    // ─── Coercion table pins ─────────────────────────────────────────
+    //
+    // The to_int / to_float / is_truthy triples are the foundation
+    // every fusevm-hosted language depends on. Pin the cross-type
+    // matrix so a single-branch refactor can't silently change e.g.
+    // `if @arr` semantics from "non-empty" to "always true".
+
+    #[test]
+    fn to_int_string_with_non_numeric_falls_back_to_zero() {
+        assert_eq!(Value::str("nope").to_int(), 0);
+    }
+
+    #[test]
+    fn to_int_array_returns_length_not_first_element() {
+        // Perl-/awk-style numeric coercion of an array is its length.
+        let v = Value::array(vec![Value::int(99), Value::int(100), Value::int(101)]);
+        assert_eq!(v.to_int(), 3, "array's to_int must be length, not [0]");
+    }
+
+    #[test]
+    fn to_int_bool_true_is_one_false_is_zero() {
+        assert_eq!(Value::bool(true).to_int(), 1);
+        assert_eq!(Value::bool(false).to_int(), 0);
+    }
+
+    #[test]
+    fn to_int_status_preserves_exit_code() {
+        // `$?` users grep for specific exit codes; coercion must
+        // round-trip them, not collapse to 0/1.
+        for code in [0_i32, 1, 2, 42, 127, 128, 255] {
+            assert_eq!(Value::Status(code).to_int(), code as i64);
+        }
+    }
+
+    #[test]
+    fn to_int_float_truncates_toward_zero() {
+        assert_eq!(Value::Float(3.9).to_int(), 3);
+        assert_eq!(Value::Float(-3.9).to_int(), -3);
+        assert_eq!(Value::Float(0.5).to_int(), 0);
+    }
+
+    #[test]
+    fn to_float_string_non_numeric_falls_back_to_zero() {
+        assert_eq!(Value::str("nope").to_float(), 0.0);
+    }
+
+    #[test]
+    fn to_float_bool_only_true_is_one() {
+        // The to_float branch for Bool is only the `true` arm; pin
+        // that false drops through to the default 0.0.
+        assert_eq!(Value::bool(true).to_float(), 1.0);
+        assert_eq!(Value::bool(false).to_float(), 0.0);
+    }
+
+    #[test]
+    fn is_truthy_empty_collections_are_false() {
+        assert!(!Value::array(Vec::new()).is_truthy());
+        assert!(!Value::hash(HashMap::new()).is_truthy());
+        assert!(!Value::str("").is_truthy());
+        assert!(!Value::int(0).is_truthy());
+        assert!(!Value::Float(0.0).is_truthy());
+        assert!(!Value::Undef.is_truthy());
+    }
+
+    #[test]
+    fn is_truthy_single_element_array_is_true() {
+        assert!(Value::array(vec![Value::int(0)]).is_truthy());
+    }
 }
