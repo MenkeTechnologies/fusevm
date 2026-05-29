@@ -27,254 +27,393 @@
 // Core builtins (POSIX + common)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `cd` builtin.
 pub const BUILTIN_CD: u16 = 0;
+/// Dispatch ID for the shell `pwd` builtin.
 pub const BUILTIN_PWD: u16 = 1;
+/// Dispatch ID for the shell `echo` builtin.
 pub const BUILTIN_ECHO: u16 = 2;
+/// Dispatch ID for the shell `print` builtin.
 pub const BUILTIN_PRINT: u16 = 3;
+/// Dispatch ID for the shell `printf` builtin.
 pub const BUILTIN_PRINTF: u16 = 4;
+/// Dispatch ID for the shell `export` builtin.
 pub const BUILTIN_EXPORT: u16 = 5;
+/// Dispatch ID for the shell `unset` builtin.
 pub const BUILTIN_UNSET: u16 = 6;
+/// Dispatch ID for the shell `source` builtin.
 pub const BUILTIN_SOURCE: u16 = 7;
+/// Dispatch ID for the shell `exit` builtin.
 pub const BUILTIN_EXIT: u16 = 8;
+/// Dispatch ID for the shell `return` builtin.
 pub const BUILTIN_RETURN: u16 = 9;
+/// Dispatch ID for the shell `true` builtin.
 pub const BUILTIN_TRUE: u16 = 10;
+/// Dispatch ID for the shell `false` builtin.
 pub const BUILTIN_FALSE: u16 = 11;
+/// Dispatch ID for the shell `test` builtin.
 pub const BUILTIN_TEST: u16 = 12;
+/// Dispatch ID for the shell `:` builtin.
 pub const BUILTIN_COLON: u16 = 13; // :
+/// Dispatch ID for the shell `.` builtin.
 pub const BUILTIN_DOT: u16 = 14; // . (alias for source)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Variable declaration
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `local` builtin.
 pub const BUILTIN_LOCAL: u16 = 20;
+/// Dispatch ID for the shell `declare` builtin.
 pub const BUILTIN_DECLARE: u16 = 21;
+/// Dispatch ID for the shell `typeset` builtin.
 pub const BUILTIN_TYPESET: u16 = 22;
+/// Dispatch ID for the shell `readonly` builtin.
 pub const BUILTIN_READONLY: u16 = 23;
+/// Dispatch ID for the shell `integer` builtin.
 pub const BUILTIN_INTEGER: u16 = 24;
+/// Dispatch ID for the shell `float` builtin.
 pub const BUILTIN_FLOAT: u16 = 25;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // I/O
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `read` builtin.
 pub const BUILTIN_READ: u16 = 30;
+/// Dispatch ID for the shell `mapfile` builtin.
 pub const BUILTIN_MAPFILE: u16 = 31;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Control flow
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `break` builtin.
 pub const BUILTIN_BREAK: u16 = 40;
+/// Dispatch ID for the shell `continue` builtin.
 pub const BUILTIN_CONTINUE: u16 = 41;
+/// Dispatch ID for the shell `shift` builtin.
 pub const BUILTIN_SHIFT: u16 = 42;
+/// Dispatch ID for the shell `eval` builtin.
 pub const BUILTIN_EVAL: u16 = 43;
+/// Dispatch ID for the shell `exec` builtin.
 pub const BUILTIN_EXEC: u16 = 44;
+/// Dispatch ID for the shell `command` builtin.
 pub const BUILTIN_COMMAND: u16 = 45;
+/// Dispatch ID for the shell `builtin` builtin.
 pub const BUILTIN_BUILTIN: u16 = 46;
+/// Dispatch ID for the shell `let` builtin.
 pub const BUILTIN_LET: u16 = 47;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Job control
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `jobs` builtin.
 pub const BUILTIN_JOBS: u16 = 50;
+/// Dispatch ID for the shell `fg` builtin.
 pub const BUILTIN_FG: u16 = 51;
+/// Dispatch ID for the shell `bg` builtin.
 pub const BUILTIN_BG: u16 = 52;
+/// Dispatch ID for the shell `kill` builtin.
 pub const BUILTIN_KILL: u16 = 53;
+/// Dispatch ID for the shell `disown` builtin.
 pub const BUILTIN_DISOWN: u16 = 54;
+/// Dispatch ID for the shell `wait` builtin.
 pub const BUILTIN_WAIT: u16 = 55;
+/// Dispatch ID for the shell `suspend` builtin.
 pub const BUILTIN_SUSPEND: u16 = 56;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // History
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `history` builtin.
 pub const BUILTIN_HISTORY: u16 = 60;
+/// Dispatch ID for the shell `fc` builtin.
 pub const BUILTIN_FC: u16 = 61;
+/// Dispatch ID for the shell `r` builtin.
 pub const BUILTIN_R: u16 = 62;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Aliases
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `alias` builtin.
 pub const BUILTIN_ALIAS: u16 = 70;
+/// Dispatch ID for the shell `unalias` builtin.
 pub const BUILTIN_UNALIAS: u16 = 71;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Options
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `set` builtin.
 pub const BUILTIN_SET: u16 = 80;
+/// Dispatch ID for the shell `setopt` builtin.
 pub const BUILTIN_SETOPT: u16 = 81;
+/// Dispatch ID for the shell `unsetopt` builtin.
 pub const BUILTIN_UNSETOPT: u16 = 82;
+/// Dispatch ID for the shell `shopt` builtin.
 pub const BUILTIN_SHOPT: u16 = 83;
+/// Dispatch ID for the shell `emulate` builtin.
 pub const BUILTIN_EMULATE: u16 = 84;
+/// Dispatch ID for the shell `getopts` builtin.
 pub const BUILTIN_GETOPTS: u16 = 85;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Functions / Autoload
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `autoload` builtin.
 pub const BUILTIN_AUTOLOAD: u16 = 90;
+/// Dispatch ID for the shell `functions` builtin.
 pub const BUILTIN_FUNCTIONS: u16 = 91;
+/// Dispatch ID for the shell `unfunction` builtin.
 pub const BUILTIN_UNFUNCTION: u16 = 92;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Traps / Signals
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `trap` builtin.
 pub const BUILTIN_TRAP: u16 = 100;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Directory stack
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `pushd` builtin.
 pub const BUILTIN_PUSHD: u16 = 110;
+/// Dispatch ID for the shell `popd` builtin.
 pub const BUILTIN_POPD: u16 = 111;
+/// Dispatch ID for the shell `dirs` builtin.
 pub const BUILTIN_DIRS: u16 = 112;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Type / Which / Hash
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `type` builtin.
 pub const BUILTIN_TYPE: u16 = 120;
+/// Dispatch ID for the shell `whence` builtin.
 pub const BUILTIN_WHENCE: u16 = 121;
+/// Dispatch ID for the shell `where` builtin.
 pub const BUILTIN_WHERE: u16 = 122;
+/// Dispatch ID for the shell `which` builtin.
 pub const BUILTIN_WHICH: u16 = 123;
+/// Dispatch ID for the shell `hash` builtin.
 pub const BUILTIN_HASH: u16 = 124;
+/// Dispatch ID for the shell `rehash` builtin.
 pub const BUILTIN_REHASH: u16 = 125;
+/// Dispatch ID for the shell `unhash` builtin.
 pub const BUILTIN_UNHASH: u16 = 126;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Completion
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `compgen` builtin.
 pub const BUILTIN_COMPGEN: u16 = 130;
+/// Dispatch ID for the shell `complete` builtin.
 pub const BUILTIN_COMPLETE: u16 = 131;
+/// Dispatch ID for the shell `compopt` builtin.
 pub const BUILTIN_COMPOPT: u16 = 132;
+/// Dispatch ID for the shell `compadd` builtin.
 pub const BUILTIN_COMPADD: u16 = 133;
+/// Dispatch ID for the shell `compset` builtin.
 pub const BUILTIN_COMPSET: u16 = 134;
+/// Dispatch ID for the shell `compdef` builtin.
 pub const BUILTIN_COMPDEF: u16 = 135;
+/// Dispatch ID for the shell `compinit` builtin.
 pub const BUILTIN_COMPINIT: u16 = 136;
+/// Dispatch ID for the shell `cdreplay` builtin.
 pub const BUILTIN_CDREPLAY: u16 = 137;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Zsh-specific
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `zstyle` builtin.
 pub const BUILTIN_ZSTYLE: u16 = 140;
+/// Dispatch ID for the shell `zmodload` builtin.
 pub const BUILTIN_ZMODLOAD: u16 = 141;
+/// Dispatch ID for the shell `bindkey` builtin.
 pub const BUILTIN_BINDKEY: u16 = 142;
+/// Dispatch ID for the shell `zle` builtin.
 pub const BUILTIN_ZLE: u16 = 143;
+/// Dispatch ID for the shell `vared` builtin.
 pub const BUILTIN_VARED: u16 = 144;
+/// Dispatch ID for the shell `zcompile` builtin.
 pub const BUILTIN_ZCOMPILE: u16 = 145;
+/// Dispatch ID for the shell `zformat` builtin.
 pub const BUILTIN_ZFORMAT: u16 = 146;
+/// Dispatch ID for the shell `zparseopts` builtin.
 pub const BUILTIN_ZPARSEOPTS: u16 = 147;
+/// Dispatch ID for the shell `zregexparse` builtin.
 pub const BUILTIN_ZREGEXPARSE: u16 = 148;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Resource limits
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `ulimit` builtin.
 pub const BUILTIN_ULIMIT: u16 = 150;
+/// Dispatch ID for the shell `limit` builtin.
 pub const BUILTIN_LIMIT: u16 = 151;
+/// Dispatch ID for the shell `unlimit` builtin.
 pub const BUILTIN_UNLIMIT: u16 = 152;
+/// Dispatch ID for the shell `umask` builtin.
 pub const BUILTIN_UMASK: u16 = 153;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Misc
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `times` builtin.
 pub const BUILTIN_TIMES: u16 = 160;
+/// Dispatch ID for the shell `caller` builtin.
 pub const BUILTIN_CALLER: u16 = 161;
+/// Dispatch ID for the shell `help` builtin.
 pub const BUILTIN_HELP: u16 = 162;
+/// Dispatch ID for the shell `enable` builtin.
 pub const BUILTIN_ENABLE: u16 = 163;
+/// Dispatch ID for the shell `disable` builtin.
 pub const BUILTIN_DISABLE: u16 = 164;
+/// Dispatch ID for the shell `noglob` builtin.
 pub const BUILTIN_NOGLOB: u16 = 165;
+/// Dispatch ID for the shell `ttyctl` builtin.
 pub const BUILTIN_TTYCTL: u16 = 166;
+/// Dispatch ID for the shell `sync` builtin.
 pub const BUILTIN_SYNC: u16 = 167;
+/// Dispatch ID for the shell `mkdir` builtin.
 pub const BUILTIN_MKDIR: u16 = 168;
+/// Dispatch ID for the shell `strftime` builtin.
 pub const BUILTIN_STRFTIME: u16 = 169;
+/// Dispatch ID for the shell `zsleep` builtin.
 pub const BUILTIN_ZSLEEP: u16 = 170;
+/// Dispatch ID for the shell `zsystem` builtin.
 pub const BUILTIN_ZSYSTEM: u16 = 171;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PCRE
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `pcre_compile` builtin.
 pub const BUILTIN_PCRE_COMPILE: u16 = 180;
+/// Dispatch ID for the shell `pcre_match` builtin.
 pub const BUILTIN_PCRE_MATCH: u16 = 181;
+/// Dispatch ID for the shell `pcre_study` builtin.
 pub const BUILTIN_PCRE_STUDY: u16 = 182;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Database (GDBM)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `ztie` builtin.
 pub const BUILTIN_ZTIE: u16 = 190;
+/// Dispatch ID for the shell `zuntie` builtin.
 pub const BUILTIN_ZUNTIE: u16 = 191;
+/// Dispatch ID for the shell `zgdbmpath` builtin.
 pub const BUILTIN_ZGDBMPATH: u16 = 192;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Prompt
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `promptinit` builtin.
 pub const BUILTIN_PROMPTINIT: u16 = 200;
+/// Dispatch ID for the shell `prompt` builtin.
 pub const BUILTIN_PROMPT: u16 = 201;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Async / Parallel (zshrs extensions)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `async` builtin.
 pub const BUILTIN_ASYNC: u16 = 210;
+/// Dispatch ID for the shell `await` builtin.
 pub const BUILTIN_AWAIT: u16 = 211;
+/// Dispatch ID for the shell `pmap` builtin.
 pub const BUILTIN_PMAP: u16 = 212;
+/// Dispatch ID for the shell `pgrep` builtin.
 pub const BUILTIN_PGREP: u16 = 213;
+/// Dispatch ID for the shell `peach` builtin.
 pub const BUILTIN_PEACH: u16 = 214;
+/// Dispatch ID for the shell `barrier` builtin.
 pub const BUILTIN_BARRIER: u16 = 215;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Intercept (AOP)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `intercept` builtin.
 pub const BUILTIN_INTERCEPT: u16 = 220;
+/// Dispatch ID for the shell `intercept_proceed` builtin.
 pub const BUILTIN_INTERCEPT_PROCEED: u16 = 221;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Debug / Profile
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `doctor` builtin.
 pub const BUILTIN_DOCTOR: u16 = 230;
+/// Dispatch ID for the shell `dbview` builtin.
 pub const BUILTIN_DBVIEW: u16 = 231;
+/// Dispatch ID for the shell `profile` builtin.
 pub const BUILTIN_PROFILE: u16 = 232;
+/// Dispatch ID for the shell `zprof` builtin.
 pub const BUILTIN_ZPROF: u16 = 233;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Coreutils (anti-fork builtins)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Dispatch ID for the shell `cat` builtin.
 pub const BUILTIN_CAT: u16 = 240;
+/// Dispatch ID for the shell `head` builtin.
 pub const BUILTIN_HEAD: u16 = 241;
+/// Dispatch ID for the shell `tail` builtin.
 pub const BUILTIN_TAIL: u16 = 242;
+/// Dispatch ID for the shell `wc` builtin.
 pub const BUILTIN_WC: u16 = 243;
+/// Dispatch ID for the shell `basename` builtin.
 pub const BUILTIN_BASENAME: u16 = 244;
+/// Dispatch ID for the shell `dirname` builtin.
 pub const BUILTIN_DIRNAME: u16 = 245;
+/// Dispatch ID for the shell `touch` builtin.
 pub const BUILTIN_TOUCH: u16 = 246;
+/// Dispatch ID for the shell `realpath` builtin.
 pub const BUILTIN_REALPATH: u16 = 247;
+/// Dispatch ID for the shell `sort` builtin.
 pub const BUILTIN_SORT: u16 = 248;
+/// Dispatch ID for the shell `find` builtin.
 pub const BUILTIN_FIND: u16 = 249;
+/// Dispatch ID for the shell `uniq` builtin.
 pub const BUILTIN_UNIQ: u16 = 250;
+/// Dispatch ID for the shell `cut` builtin.
 pub const BUILTIN_CUT: u16 = 251;
+/// Dispatch ID for the shell `tr` builtin.
 pub const BUILTIN_TR: u16 = 252;
+/// Dispatch ID for the shell `seq` builtin.
 pub const BUILTIN_SEQ: u16 = 253;
+/// Dispatch ID for the shell `rev` builtin.
 pub const BUILTIN_REV: u16 = 254;
+/// Dispatch ID for the shell `tee` builtin.
 pub const BUILTIN_TEE: u16 = 255;
+/// Dispatch ID for the shell `sleep` builtin.
 pub const BUILTIN_SLEEP: u16 = 256;
+/// Dispatch ID for the shell `whoami` builtin.
 pub const BUILTIN_WHOAMI: u16 = 257;
+/// Dispatch ID for the shell `id` builtin.
 pub const BUILTIN_ID: u16 = 258;
+/// Dispatch ID for the shell `hostname` builtin.
 pub const BUILTIN_HOSTNAME: u16 = 259;
+/// Dispatch ID for the shell `uname` builtin.
 pub const BUILTIN_UNAME: u16 = 260;
+/// Dispatch ID for the shell `date` builtin.
 pub const BUILTIN_DATE: u16 = 261;
+/// Dispatch ID for the shell `mktemp` builtin.
 pub const BUILTIN_MKTEMP: u16 = 262;
 
 /// Maximum builtin ID (for pre-allocating the handler table)

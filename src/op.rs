@@ -13,29 +13,45 @@ use std::hash::{Hash, Hasher};
 /// Language-specific operations use `Extended` with a frontend-registered handler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Op {
+    /// No-op; consumed for cycle-counting and as a branch sentinel.
     Nop,
 
     // ── Constants ──
+    /// Push int value onto the stack.
     LoadInt(i64),
+    /// Push float value onto the stack.
     LoadFloat(f64),
-    LoadConst(u16), // index into constant pool
+    /// index into constant pool
+    LoadConst(u16),
+    /// Push true value onto the stack.
     LoadTrue,
+    /// Push false value onto the stack.
     LoadFalse,
+    /// Push undef value onto the stack.
     LoadUndef,
 
     // ── Stack ──
+    /// Discard the top of the stack.
     Pop,
+    /// Duplicate the top of the stack.
     Dup,
+    /// Duplicate the top two values on the stack.
     Dup2,
+    /// Swap the top two stack values.
     Swap,
+    /// Rotate the top three stack values (a b c → b c a).
     Rot,
 
     // ── Variables (u16 = name pool index) ──
+    /// Read var into the stack via name-pool index.
     GetVar(u16),
+    /// Pop top of stack into var via name-pool index.
     SetVar(u16),
+    /// Declare a fresh var binding in the current scope.
     DeclareVar(u16),
     /// Slot-indexed fast path (frame slot index, avoids name lookup)
     GetSlot(u16),
+    /// Pop top of stack into slot via name-pool index.
     SetSlot(u16),
     /// Slot-based array index: stack: \[index\], slot contains array → value
     SlotArrayGet(u16),
@@ -43,89 +59,153 @@ pub enum Op {
     SlotArraySet(u16),
 
     // ── Arrays ──
+    /// Read array into the stack via name-pool index.
     GetArray(u16),
+    /// Pop top of stack into array via name-pool index.
     SetArray(u16),
+    /// Declare a fresh array binding in the current scope.
     DeclareArray(u16),
-    ArrayGet(u16),   // stack: [index] → value
-    ArraySet(u16),   // stack: [value, index]
-    ArrayPush(u16),  // stack: [value]
-    ArrayPop(u16),   // → popped value
-    ArrayShift(u16), // → shifted value
-    ArrayLen(u16),   // → length
-    MakeArray(u16),  // pop N values, push as array
+    /// stack: [index] → value
+    ArrayGet(u16),
+    /// stack: [value, index]
+    ArraySet(u16),
+    /// stack: [value]
+    ArrayPush(u16),
+    /// → popped value
+    ArrayPop(u16),
+    /// → shifted value
+    ArrayShift(u16),
+    /// → length
+    ArrayLen(u16),
+    /// pop N values, push as array
+    MakeArray(u16),
 
     // ── Hashes ──
+    /// Read hash into the stack via name-pool index.
     GetHash(u16),
+    /// Pop top of stack into hash via name-pool index.
     SetHash(u16),
+    /// Declare a fresh hash binding in the current scope.
     DeclareHash(u16),
-    HashGet(u16),    // stack: [key] → value
-    HashSet(u16),    // stack: [value, key]
-    HashDelete(u16), // stack: [key] → deleted value
-    HashExists(u16), // stack: [key] → bool
-    HashKeys(u16),   // → array of keys
-    HashValues(u16), // → array of values
-    MakeHash(u16),   // pop N key-value pairs, push as hash
+    /// stack: [key] → value
+    HashGet(u16),
+    /// stack: [value, key]
+    HashSet(u16),
+    /// stack: [key] → deleted value
+    HashDelete(u16),
+    /// stack: [key] → bool
+    HashExists(u16),
+    /// → array of keys
+    HashKeys(u16),
+    /// → array of values
+    HashValues(u16),
+    /// pop N key-value pairs, push as hash
+    MakeHash(u16),
 
     // ── Arithmetic ──
+    /// Numeric `a + b` (pops 2, pushes sum).
     Add,
+    /// Numeric `a - b` (pops 2, pushes difference).
     Sub,
+    /// Numeric `a * b` (pops 2, pushes product).
     Mul,
+    /// Numeric `a / b` (pops 2, pushes quotient).
     Div,
+    /// Numeric `a % b` (pops 2, pushes remainder).
     Mod,
+    /// Numeric `a ** b` (pops 2, pushes power).
     Pow,
+    /// Numeric unary minus (`-x`).
     Negate,
+    /// In-place += 1 on top-of-stack numeric.
     Inc,
+    /// In-place -= 1 on top-of-stack numeric.
     Dec,
 
     // ── String ──
+    /// String concatenation `a . b`.
     Concat,
+    /// Repeat a string N times (`a x b` in Perl).
     StringRepeat,
+    /// Length of top-of-stack string in bytes.
     StringLen,
 
     // ── Comparison (numeric) ──
+    /// Numeric `eq` comparison.
     NumEq,
+    /// Numeric `ne` comparison.
     NumNe,
+    /// Numeric `lt` comparison.
     NumLt,
+    /// Numeric `gt` comparison.
     NumGt,
+    /// Numeric `le` comparison.
     NumLe,
+    /// Numeric `ge` comparison.
     NumGe,
-    Spaceship, // <=> → -1, 0, 1
+    /// <=> → -1, 0, 1
+    Spaceship,
 
     // ── Comparison (string) ──
+    /// String `eq` comparison.
     StrEq,
+    /// String `ne` comparison.
     StrNe,
+    /// String `lt` comparison.
     StrLt,
+    /// String `gt` comparison.
     StrGt,
+    /// String `le` comparison.
     StrLe,
+    /// String `ge` comparison.
     StrGe,
+    /// String `cmp` comparison.
     StrCmp,
 
     // ── Logical / Bitwise ──
+    /// Boolean `!` (eager, evaluates both operands for binary forms).
     LogNot,
-    LogAnd, // differs from short-circuit jumps: evaluates both
+    /// differs from short-circuit jumps: evaluates both
+    LogAnd,
+    /// Boolean `||` (eager, evaluates both operands for binary forms).
     LogOr,
+    /// Bitwise `and` operation.
     BitAnd,
+    /// Bitwise `or` operation.
     BitOr,
+    /// Bitwise `xor` operation.
     BitXor,
+    /// Bitwise `not` operation.
     BitNot,
+    /// Bit-shift left (`<<`/`>>`).
     Shl,
+    /// Bit-shift right (`<<`/`>>`).
     Shr,
 
     // ── Control flow ──
+    /// Unconditional jump to the given chunk offset.
     Jump(usize),
+    /// Jump if top-of-stack is true; pops predicate.
     JumpIfTrue(usize),
+    /// Jump if top-of-stack is false; pops predicate.
     JumpIfFalse(usize),
-    JumpIfTrueKeep(usize),  // short-circuit ||
-    JumpIfFalseKeep(usize), // short-circuit &&
+    /// short-circuit ||
+    JumpIfTrueKeep(usize),
+    /// short-circuit &&
+    JumpIfFalseKeep(usize),
 
     // ── Functions ──
     /// Call: name_index, arg_count
     Call(u16, u8),
+    /// Return from current function with no value (pushes Undef).
     Return,
+    /// Return from current function using top-of-stack as the result.
     ReturnValue,
 
     // ── Scope ──
+    /// Push a call frame on the frame stack.
     PushFrame,
+    /// Pop a call frame on the frame stack.
     PopFrame,
 
     // ── I/O ──
@@ -143,10 +223,15 @@ pub enum Op {
     RangeStep,
 
     // ── Higher-order (u16 = block index in chunk) ──
+    /// Higher-order `map` over a slot-array using the block at the given chunk index.
     MapBlock(u16),
+    /// Higher-order `grep` over a slot-array using the block at the given chunk index.
     GrepBlock(u16),
+    /// Higher-order `sort` over a slot-array using the block at the given chunk index.
     SortBlock(u16),
-    SortDefault, // sort with default string comparison
+    /// sort with default string comparison
+    SortDefault,
+    /// Higher-order `foreach` over a slot-array using the block at the given chunk index.
     ForEachBlock(u16),
 
     // ── Fused superinstructions ──
@@ -206,6 +291,7 @@ pub enum Op {
     CmdSubst(u16), // u16 = bytecode range index
     /// Subshell: isolate scope
     SubshellBegin,
+    /// Shell Ops (Registered Via Extended, But Defined Here For Type Safety) operation (`SubshellEnd`).
     SubshellEnd,
     /// Process substitution <(cmd) — push FIFO path
     ProcessSubIn(u16),
@@ -253,53 +339,92 @@ pub enum Op {
 
 /// File test opcodes for `TestFile(u8)`
 pub mod file_test {
+    /// Regular file (`-f`).
     pub const IS_FILE: u8 = 0;
+    /// Directory (`-d`).
     pub const IS_DIR: u8 = 1;
+    /// Readable to current uid (`-r`).
     pub const IS_READABLE: u8 = 2;
+    /// Writable to current uid (`-w`).
     pub const IS_WRITABLE: u8 = 3;
+    /// Executable (`-x`).
     pub const IS_EXECUTABLE: u8 = 4;
+    /// Exists (any type, `-e`).
     pub const EXISTS: u8 = 5;
+    /// Exists and size > 0 (`-s`).
     pub const IS_NONEMPTY: u8 = 6;
+    /// Symbolic link (`-L` / `-h`).
     pub const IS_SYMLINK: u8 = 7;
+    /// Unix-domain socket (`-S`).
     pub const IS_SOCKET: u8 = 8;
+    /// Named pipe / FIFO (`-p`).
     pub const IS_FIFO: u8 = 9;
+    /// Block device (`-b`).
     pub const IS_BLOCK_DEV: u8 = 10;
+    /// Character device (`-c`).
     pub const IS_CHAR_DEV: u8 = 11;
 }
 
 /// Redirect op types for `Redirect(fd, op)`
 pub mod redirect_op {
+    /// `> file` — truncate-then-write.
     pub const WRITE: u8 = 0;
+    /// `>> file` — open for append.
     pub const APPEND: u8 = 1;
+    /// `< file` — open for read.
     pub const READ: u8 = 2;
+    /// `<> file` — open for read+write.
     pub const READ_WRITE: u8 = 3;
+    /// `>| file` — forced truncate even under `noclobber`.
     pub const CLOBBER: u8 = 4;
+    /// `<& N` — duplicate input fd N.
     pub const DUP_READ: u8 = 5;
+    /// `>& N` — duplicate output fd N.
     pub const DUP_WRITE: u8 = 6;
+    /// `&> file` — redirect both stdout and stderr (truncate).
     pub const WRITE_BOTH: u8 = 7;
+    /// `&>> file` — redirect both stdout and stderr (append).
     pub const APPEND_BOTH: u8 = 8;
 }
 
 /// Parameter expansion modifier types for `ExpandParam(u8)`
 pub mod param_mod {
-    pub const DEFAULT: u8 = 0; // ${var:-default}
-    pub const ASSIGN: u8 = 1; // ${var:=default}
-    pub const ERROR: u8 = 2; // ${var:?error}
-    pub const ALTERNATE: u8 = 3; // ${var:+alternate}
-    pub const LENGTH: u8 = 4; // ${#var}
-    pub const STRIP_SHORT: u8 = 5; // ${var#pat}
-    pub const STRIP_LONG: u8 = 6; // ${var##pat}
-    pub const RSTRIP_SHORT: u8 = 7; // ${var%pat}
-    pub const RSTRIP_LONG: u8 = 8; // ${var%%pat}
-    pub const SUBST_FIRST: u8 = 9; // ${var/pat/rep}
-    pub const SUBST_ALL: u8 = 10; // ${var//pat/rep}
-    pub const UPPER: u8 = 11; // ${var^^}
-    pub const LOWER: u8 = 12; // ${var,,}
-    pub const UPPER_FIRST: u8 = 13; // ${var^}
-    pub const LOWER_FIRST: u8 = 14; // ${var,}
-    pub const INDIRECT: u8 = 15; // ${!var}
-    pub const KEYS: u8 = 16; // ${!arr[@]}
-    pub const SLICE: u8 = 17; // ${var:off:len}
+    /// `${var:-default}` — substitute default if unset/empty.
+    pub const DEFAULT: u8 = 0;
+    /// `${var:=default}` — assign default if unset/empty.
+    pub const ASSIGN: u8 = 1;
+    /// `${var:?error}` — error if unset/empty.
+    pub const ERROR: u8 = 2;
+    /// `${var:+alternate}` — substitute alternate when set.
+    pub const ALTERNATE: u8 = 3;
+    /// `${#var}` — string length.
+    pub const LENGTH: u8 = 4;
+    /// `${var#pat}` — strip shortest matching prefix.
+    pub const STRIP_SHORT: u8 = 5;
+    /// `${var##pat}` — strip longest matching prefix.
+    pub const STRIP_LONG: u8 = 6;
+    /// `${var%pat}` — strip shortest matching suffix.
+    pub const RSTRIP_SHORT: u8 = 7;
+    /// `${var%%pat}` — strip longest matching suffix.
+    pub const RSTRIP_LONG: u8 = 8;
+    /// `${var/pat/rep}` — substitute first match.
+    pub const SUBST_FIRST: u8 = 9;
+    /// `${var//pat/rep}` — substitute every match.
+    pub const SUBST_ALL: u8 = 10;
+    /// `${var^^}` — uppercase every char.
+    pub const UPPER: u8 = 11;
+    /// `${var,,}` — lowercase every char.
+    pub const LOWER: u8 = 12;
+    /// `${var^}` — uppercase first char.
+    pub const UPPER_FIRST: u8 = 13;
+    /// `${var,}` — lowercase first char.
+    pub const LOWER_FIRST: u8 = 14;
+    /// `${!var}` — indirect expand (use value of `var` as name).
+    pub const INDIRECT: u8 = 15;
+    /// `${!arr[@]}` — array key/index list.
+    pub const KEYS: u8 = 16;
+    /// `${var:off:len}` — substring slice.
+    pub const SLICE: u8 = 17;
 }
 
 impl Hash for Op {

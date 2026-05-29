@@ -64,7 +64,9 @@ pub trait JitExtension: Send + Sync {
 /// is skipped and the interpreter handles the iteration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SlotKind {
+    /// Slot holds an `i64` at trace-record time.
     Int,
+    /// Slot holds an `f64` at trace-record time.
     Float,
 }
 
@@ -82,11 +84,28 @@ pub enum SlotKind {
 /// returns the struct, `import_trace` consumes one. The user owns I/O.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TraceMetadata {
+    /// Hash of the chunk's ops + constants pool at trace-record time.
+    /// Used to detect chunk drift on import: a mismatched hash means
+    /// the bytecode has changed and the persisted trace is stale.
     pub chunk_op_hash: u64,
+    /// Bytecode IP where the trace was anchored (the backward-branch
+    /// header that crossed `TRACE_THRESHOLD`).
     pub anchor_ip: usize,
+    /// Bytecode IP the interpreter should resume at after the trace
+    /// runs to completion (one past the loop's natural exit).
     pub fallthrough_ip: usize,
+    /// The captured op sequence in record order; the trace is a
+    /// straight-line projection of these ops with side-exit guards
+    /// inserted at each branch.
     pub ops: Vec<crate::op::Op>,
+    /// Parallel array to `ops`: the original bytecode IP each recorded
+    /// op corresponds to. Used to materialise the interpreter's IP on
+    /// deopt so execution resumes at the right place.
     pub recorded_ips: Vec<usize>,
+    /// Slot type fingerprint at the entry guard. The trace's entry
+    /// stub compares each slot's runtime type against this snapshot;
+    /// mismatch → skip the trace and let the interpreter handle the
+    /// iteration.
     pub slot_kinds_at_anchor: Vec<SlotKind>,
 }
 
@@ -99,7 +118,10 @@ pub enum TraceLookup {
     /// The interpreter should arm the recorder for the next iteration.
     StartRecording,
     /// A compiled trace ran. The interpreter should resume at this IP.
-    Ran { resume_ip: usize },
+    Ran {
+        /// The bytecode IP to resume the interpreter at.
+        resume_ip: usize,
+    },
     /// A compiled trace exists but the slot type guard failed.
     /// Interpreter handles this iteration normally.
     GuardMismatch,
@@ -198,6 +220,7 @@ impl DeoptFrame {
 /// Tag for a single abstract-stack entry written to `DeoptInfo.stack_buf`.
 /// 0 = `Value::Int(i64)`, 1 = `Value::Float(f64)`. Other values reserved.
 pub const STACK_KIND_INT: u8 = 0;
+/// `STACK_KIND_FLOAT` tag — see [`STACK_KIND_INT`] doc-comment for the contract.
 pub const STACK_KIND_FLOAT: u8 = 1;
 
 /// Out-parameter the trace fn writes on every invocation.
@@ -213,11 +236,23 @@ pub const STACK_KIND_FLOAT: u8 = 1;
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct DeoptInfo {
+    /// Bytecode IP the interpreter should resume at (set on every
+    /// trace exit — normal fallthrough and side-exit alike).
     pub resume_ip: usize,
+    /// Number of materialised callee frames in `frames` (0 for
+    /// caller-frame side-exits, 1..=`MAX_DEOPT_FRAMES` for callee).
     pub frame_count: usize,
+    /// Number of abstract-stack entries in `stack_buf` to push onto
+    /// `vm.stack` after the trace returns.
     pub stack_count: usize,
+    /// Callee frame snapshots (slot vectors + return IPs) for the
+    /// VM to restore. Slots 0..`frame_count` are valid.
     pub frames: [DeoptFrame; MAX_DEOPT_FRAMES],
+    /// Raw bit pattern for each abstract-stack entry; reinterpret as
+    /// `i64` or `f64` based on `stack_kinds[i]`.
     pub stack_buf: [i64; MAX_DEOPT_STACK],
+    /// Per-entry tag for `stack_buf`: `STACK_KIND_INT` or
+    /// `STACK_KIND_FLOAT`.
     pub stack_kinds: [u8; MAX_DEOPT_STACK],
 }
 
@@ -3425,6 +3460,9 @@ pub struct JitCompiler {
 }
 
 impl JitCompiler {
+    /// Construct a fresh JIT compiler with no extensions registered.
+    /// Frontends call `register_extension` to plug in custom-op codegen
+    /// for any `Op::Extended(tag, _)` they emit.
     pub fn new() -> Self {
         Self {
             extensions: Vec::new(),
@@ -3535,24 +3573,28 @@ impl JitCompiler {
     /// Try to compile and run a chunk via the linear JIT.
     /// Returns `Some(Value)` on success, `None` if not eligible or JIT feature disabled.
     #[cfg(feature = "jit")]
+    /// Public method `try_run_linear` — see the implementing block's surrounding context for the call contract.
     pub fn try_run_linear(&self, chunk: &crate::Chunk, slots: &[i64]) -> Option<crate::Value> {
         cranelift_jit_impl::try_run_linear(chunk, slots)
     }
 
     /// Check if a chunk is eligible for linear JIT.
     #[cfg(feature = "jit")]
+    /// Public method `is_linear_eligible` — see the implementing block's surrounding context for the call contract.
     pub fn is_linear_eligible(&self, chunk: &crate::Chunk) -> bool {
         cranelift_jit_impl::is_linear_eligible(chunk)
     }
 
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `try_run_linear` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn try_run_linear(&self, _chunk: &crate::Chunk, _slots: &[i64]) -> Option<crate::Value> {
         None
     }
 
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `is_linear_eligible` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn is_linear_eligible(&self, _chunk: &crate::Chunk) -> bool {
         false
     }
@@ -3564,6 +3606,7 @@ impl JitCompiler {
     /// caller falls back to the interpreter. After the chunk crosses the
     /// hot-threshold, compiles and caches the native code.
     #[cfg(feature = "jit")]
+    /// Public method `try_run_block` — see the implementing block's surrounding context for the call contract.
     pub fn try_run_block(&self, chunk: &crate::Chunk, slots: &mut [i64]) -> Option<i64> {
         cranelift_jit_impl::try_run_block(chunk, slots)
     }
@@ -3571,12 +3614,14 @@ impl JitCompiler {
     /// Like `try_run_block` but skips the tiered policy — compiles immediately
     /// on first call. Use for tests, microbenchmarks, or AOT-style usage.
     #[cfg(feature = "jit")]
+    /// Public method `try_run_block_eager` — see the implementing block's surrounding context for the call contract.
     pub fn try_run_block_eager(&self, chunk: &crate::Chunk, slots: &mut [i64]) -> Option<i64> {
         cranelift_jit_impl::try_run_block_eager(chunk, slots)
     }
 
     /// Check if a chunk is eligible for block JIT.
     #[cfg(feature = "jit")]
+    /// Public method `is_block_eligible` — see the implementing block's surrounding context for the call contract.
     pub fn is_block_eligible(&self, chunk: &crate::Chunk) -> bool {
         cranelift_jit_impl::is_block_eligible(chunk)
     }
@@ -3586,6 +3631,7 @@ impl JitCompiler {
     /// next call will run native code, not return `None`). Lets the VM
     /// skip slot-buffer refresh when block JIT isn't ready yet.
     #[cfg(feature = "jit")]
+    /// Public method `block_jit_is_compiled` — see the implementing block's surrounding context for the call contract.
     pub fn block_jit_is_compiled(&self, chunk: &crate::Chunk) -> bool {
         cranelift_jit_impl::block_jit_is_compiled(chunk)
     }
@@ -3594,6 +3640,7 @@ impl JitCompiler {
     /// Returns `(start, end)` op indices, or None if no useful region exists.
     /// Useful for partial JIT compilation of chunks that aren't entirely eligible.
     #[cfg(feature = "jit")]
+    /// Public method `find_jit_region` — see the implementing block's surrounding context for the call contract.
     pub fn find_jit_region(&self, chunk: &crate::Chunk) -> Option<(usize, usize)> {
         cranelift_jit_impl::find_jit_region(&chunk.ops)
     }
@@ -3602,42 +3649,49 @@ impl JitCompiler {
     /// The sub-chunk can then be passed to `try_run_block_eager` to JIT-compile
     /// just that region. Use with `find_jit_region` to find an eligible range.
     #[cfg(feature = "jit")]
+    /// Public method `extract_region` — see the implementing block's surrounding context for the call contract.
     pub fn extract_region(&self, chunk: &crate::Chunk, start: usize, end: usize) -> crate::Chunk {
         cranelift_jit_impl::extract_region(chunk, start, end)
     }
 
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `find_jit_region` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn find_jit_region(&self, _chunk: &crate::Chunk) -> Option<(usize, usize)> {
         None
     }
 
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `extract_region` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn extract_region(&self, chunk: &crate::Chunk, _start: usize, _end: usize) -> crate::Chunk {
         chunk.clone()
     }
 
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `try_run_block` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn try_run_block(&self, _chunk: &crate::Chunk, _slots: &mut [i64]) -> Option<i64> {
         None
     }
 
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `try_run_block_eager` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn try_run_block_eager(&self, _chunk: &crate::Chunk, _slots: &mut [i64]) -> Option<i64> {
         None
     }
 
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `is_block_eligible` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn is_block_eligible(&self, _chunk: &crate::Chunk) -> bool {
         false
     }
 
     /// Stub when JIT feature is disabled.
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `block_jit_is_compiled` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn block_jit_is_compiled(&self, _chunk: &crate::Chunk) -> bool {
         false
     }
@@ -3656,6 +3710,7 @@ impl JitCompiler {
     ///
     /// Returns a `TraceLookup` describing what the interpreter should do next.
     #[cfg(feature = "jit")]
+    /// Public method `trace_lookup` — see the implementing block's surrounding context for the call contract.
     pub fn trace_lookup(
         &self,
         chunk: &crate::Chunk,
@@ -3681,6 +3736,7 @@ impl JitCompiler {
     /// `slot_kinds_at_anchor` is the slot type snapshot used to install the
     /// entry guard.
     #[cfg(feature = "jit")]
+    /// Public method `trace_install` — see the implementing block's surrounding context for the call contract.
     pub fn trace_install(
         &self,
         chunk: &crate::Chunk,
@@ -3703,30 +3759,35 @@ impl JitCompiler {
 
     /// Mark the trace cache entry at this anchor as aborted (recording failed).
     #[cfg(feature = "jit")]
+    /// Public method `trace_abort` — see the implementing block's surrounding context for the call contract.
     pub fn trace_abort(&self, chunk: &crate::Chunk, anchor_ip: usize) {
         cranelift_jit_impl::trace_abort(chunk, anchor_ip);
     }
 
     /// Whether a recorded sequence is eligible for trace JIT compilation.
     #[cfg(feature = "jit")]
+    /// Public method `is_trace_eligible` — see the implementing block's surrounding context for the call contract.
     pub fn is_trace_eligible(&self, ops: &[crate::Op], anchor_ip: usize) -> bool {
         cranelift_jit_impl::is_trace_eligible(ops, anchor_ip)
     }
 
     /// Whether a compiled trace exists for (chunk, anchor_ip).
     #[cfg(feature = "jit")]
+    /// Public method `trace_is_compiled` — see the implementing block's surrounding context for the call contract.
     pub fn trace_is_compiled(&self, chunk: &crate::Chunk, anchor_ip: usize) -> bool {
         cranelift_jit_impl::trace_is_compiled(chunk, anchor_ip)
     }
 
     /// Number of entry-guard deopts at runtime (slot type mismatch).
     #[cfg(feature = "jit")]
+    /// Public method `trace_deopt_count` — see the implementing block's surrounding context for the call contract.
     pub fn trace_deopt_count(&self, chunk: &crate::Chunk, anchor_ip: usize) -> u32 {
         cranelift_jit_impl::trace_deopt_count(chunk, anchor_ip)
     }
 
     /// Number of mid-trace side-exits at runtime (brif guard mismatch).
     #[cfg(feature = "jit")]
+    /// Public method `trace_side_exit_count` — see the implementing block's surrounding context for the call contract.
     pub fn trace_side_exit_count(&self, chunk: &crate::Chunk, anchor_ip: usize) -> u32 {
         cranelift_jit_impl::trace_side_exit_count(chunk, anchor_ip)
     }
@@ -3737,6 +3798,7 @@ impl JitCompiler {
     /// trace handled the deopt productively, the main trace shouldn't be
     /// penalized.
     #[cfg(feature = "jit")]
+    /// Public method `trace_bump_side_exit` — see the implementing block's surrounding context for the call contract.
     pub fn trace_bump_side_exit(&self, chunk: &crate::Chunk, anchor_ip: usize) {
         cranelift_jit_impl::trace_bump_side_exit(chunk, anchor_ip);
     }
@@ -3751,6 +3813,7 @@ impl JitCompiler {
     /// fallthrough_ip (exit). Main traces compile via the simpler
     /// `trace_install`.
     #[cfg(feature = "jit")]
+    /// Public method `trace_install_with_kind` — see the implementing block's surrounding context for the call contract.
     pub fn trace_install_with_kind(
         &self,
         chunk: &crate::Chunk,
@@ -3777,6 +3840,7 @@ impl JitCompiler {
     /// for an installed trace. Used by the VM when arming side-trace
     /// recording at a hot side-exit so the side trace closes correctly.
     #[cfg(feature = "jit")]
+    /// Public method `trace_loop_anchors` — see the implementing block's surrounding context for the call contract.
     pub fn trace_loop_anchors(
         &self,
         chunk: &crate::Chunk,
@@ -3787,6 +3851,7 @@ impl JitCompiler {
 
     /// Whether the trace was blacklisted (too many deopts).
     #[cfg(feature = "jit")]
+    /// Public method `trace_is_blacklisted` — see the implementing block's surrounding context for the call contract.
     pub fn trace_is_blacklisted(&self, chunk: &crate::Chunk, anchor_ip: usize) -> bool {
         cranelift_jit_impl::trace_is_blacklisted(chunk, anchor_ip)
     }
@@ -3795,6 +3860,7 @@ impl JitCompiler {
     /// can serialize it for persistent caching across process restarts.
     /// Returns `None` if no compiled trace exists at `(chunk, anchor_ip)`.
     #[cfg(feature = "jit")]
+    /// Public method `trace_export` — see the implementing block's surrounding context for the call contract.
     pub fn trace_export(&self, chunk: &crate::Chunk, anchor_ip: usize) -> Option<TraceMetadata> {
         cranelift_jit_impl::trace_export(chunk, anchor_ip)
     }
@@ -3804,6 +3870,7 @@ impl JitCompiler {
     /// (stale metadata, chunk has changed). On success the trace is
     /// re-compiled and ready for the next invocation through `trace_lookup`.
     #[cfg(feature = "jit")]
+    /// Public method `trace_import` — see the implementing block's surrounding context for the call contract.
     pub fn trace_import(&self, chunk: &crate::Chunk, meta: &TraceMetadata) -> bool {
         cranelift_jit_impl::trace_import(chunk, meta, &chunk.constants)
     }
@@ -3812,6 +3879,7 @@ impl JitCompiler {
     /// `chunk.op_hash`. Use to persist the full cache for this chunk to
     /// disk in a single pass.
     #[cfg(feature = "jit")]
+    /// Public method `trace_export_all` — see the implementing block's surrounding context for the call contract.
     pub fn trace_export_all(&self, chunk: &crate::Chunk) -> Vec<TraceMetadata> {
         cranelift_jit_impl::trace_export_all(chunk)
     }
@@ -3820,12 +3888,14 @@ impl JitCompiler {
     /// `chunk_op_hash` are skipped. Returns the count successfully
     /// re-installed.
     #[cfg(feature = "jit")]
+    /// Public method `trace_import_all` — see the implementing block's surrounding context for the call contract.
     pub fn trace_import_all(&self, chunk: &crate::Chunk, metas: &[TraceMetadata]) -> usize {
         cranelift_jit_impl::trace_import_all(chunk, metas, &chunk.constants)
     }
 
     /// Maximum number of ops a single trace can record.
     #[cfg(feature = "jit")]
+    /// Public method `trace_max_len` — see the implementing block's surrounding context for the call contract.
     pub fn trace_max_len(&self) -> usize {
         cranelift_jit_impl::cfg_max_trace_len()
     }
@@ -3834,18 +3904,21 @@ impl JitCompiler {
     /// subsequent recording, dispatch, and blacklist behavior. Existing
     /// compiled traces are unaffected.
     #[cfg(feature = "jit")]
+    /// Public method `set_config` — see the implementing block's surrounding context for the call contract.
     pub fn set_config(&self, cfg: TraceJitConfig) {
         cranelift_jit_impl::set_config(cfg);
     }
 
     /// Read the current thread's tracing JIT configuration.
     #[cfg(feature = "jit")]
+    /// Public method `get_config` — see the implementing block's surrounding context for the call contract.
     pub fn get_config(&self) -> TraceJitConfig {
         cranelift_jit_impl::get_config()
     }
 
     /// Maximum slot index a trace can reference.
     #[cfg(feature = "jit")]
+    /// Public method `trace_max_slot` — see the implementing block's surrounding context for the call contract.
     pub fn trace_max_slot(&self) -> u16 {
         cranelift_jit_impl::MAX_TRACE_SLOT
     }
@@ -3853,6 +3926,7 @@ impl JitCompiler {
     // ── Tracing JIT stubs (no-jit feature) ──
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_lookup` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_lookup(
         &self,
         _chunk: &crate::Chunk,
@@ -3865,6 +3939,7 @@ impl JitCompiler {
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_install` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_install(
         &self,
         _chunk: &crate::Chunk,
@@ -3878,33 +3953,40 @@ impl JitCompiler {
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_abort` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_abort(&self, _chunk: &crate::Chunk, _anchor_ip: usize) {}
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `is_trace_eligible` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn is_trace_eligible(&self, _ops: &[crate::Op], _anchor_ip: usize) -> bool {
         false
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_is_compiled` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_is_compiled(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> bool {
         false
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_deopt_count` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_deopt_count(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> u32 {
         0
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_side_exit_count` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_side_exit_count(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> u32 {
         0
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_bump_side_exit` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_bump_side_exit(&self, _chunk: &crate::Chunk, _anchor_ip: usize) {}
 
     #[cfg(not(feature = "jit"))]
     #[allow(clippy::too_many_arguments)]
+    /// Public method `trace_install_with_kind` — see the implementing block's surrounding context for the call contract.
     pub fn trace_install_with_kind(
         &self,
         _chunk: &crate::Chunk,
@@ -3919,6 +4001,7 @@ impl JitCompiler {
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_loop_anchors` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_loop_anchors(
         &self,
         _chunk: &crate::Chunk,
@@ -3928,44 +4011,53 @@ impl JitCompiler {
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_is_blacklisted` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_is_blacklisted(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> bool {
         false
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_export` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_export(&self, _chunk: &crate::Chunk, _anchor_ip: usize) -> Option<TraceMetadata> {
         None
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_import` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_import(&self, _chunk: &crate::Chunk, _meta: &TraceMetadata) -> bool {
         false
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_export_all` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_export_all(&self, _chunk: &crate::Chunk) -> Vec<TraceMetadata> {
         Vec::new()
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_import_all` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_import_all(&self, _chunk: &crate::Chunk, _metas: &[TraceMetadata]) -> usize {
         0
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_max_len` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_max_len(&self) -> usize {
         256
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_max_slot` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_max_slot(&self) -> u16 {
         64
     }
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `set_config` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn set_config(&self, _cfg: TraceJitConfig) {}
 
     #[cfg(not(feature = "jit"))]
+    /// No-op stub for `get_config` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn get_config(&self) -> TraceJitConfig {
         TraceJitConfig::defaults()
     }

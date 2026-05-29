@@ -36,6 +36,8 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    /// Construct an empty `Chunk` — alias for `Chunk::default()`. Use
+    /// `ChunkBuilder` for the incremental-build path.
     pub fn new() -> Self {
         Self::default()
     }
@@ -56,6 +58,8 @@ pub struct ChunkBuilder {
 }
 
 impl ChunkBuilder {
+    /// Construct a fresh builder with an empty chunk + an empty name
+    /// intern table.
     pub fn new() -> Self {
         Self {
             chunk: Chunk::new(),

@@ -179,6 +179,11 @@ pub enum VMResult {
 }
 
 impl VM {
+    /// Construct a fresh VM bound to the given chunk. Allocates the
+    /// per-name slot vector, seeds the call-frame stack with a root
+    /// frame, and zeros every per-thread counter (cycle / deopt /
+    /// trace stats). The chunk's `op_hash` is preserved verbatim so
+    /// subsequent JIT-cache lookups can short-circuit recompilation.
     pub fn new(chunk: Chunk) -> Self {
         let num_names = chunk.names.len();
         let mut frames = Vec::with_capacity(32);
@@ -628,16 +633,25 @@ impl VM {
 
     // ── Stack operations ──
 
+    /// Push `val` onto the value stack. Inlined for hot-path callers
+    /// (extension handlers, builtin shims) that bypass the dispatch
+    /// loop's own push.
     #[inline(always)]
     pub fn push(&mut self, val: Value) {
         self.stack.push(val);
     }
 
+    /// Pop the top of the value stack, returning `Value::Undef` if the
+    /// stack is empty. Returning Undef rather than panicking matches
+    /// Perl's "underflow is undef" semantic and lets extension/builtin
+    /// handlers stay panic-free under malformed bytecode.
     #[inline(always)]
     pub fn pop(&mut self) -> Value {
         self.stack.pop().unwrap_or(Value::Undef)
     }
 
+    /// Borrow the top of the value stack without popping. Returns a
+    /// reference to `Value::Undef` when the stack is empty.
     #[inline(always)]
     pub fn peek(&self) -> &Value {
         self.stack.last().unwrap_or(&Value::Undef)

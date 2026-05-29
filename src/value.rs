@@ -41,30 +41,40 @@ pub enum Value {
 impl Value {
     // ── Constructors ──
 
+    /// Construct an integer `Value::Int(n)`.
     pub fn int(n: i64) -> Self {
         Value::Int(n)
     }
 
+    /// Construct a float `Value::Float(f)`.
     pub fn float(f: f64) -> Self {
         Value::Float(f)
     }
 
+    /// Construct a string `Value::Str` from any type that converts to `String`.
+    /// The payload is wrapped in `Arc` so clones are cheap.
     pub fn str(s: impl Into<String>) -> Self {
         Value::Str(Arc::new(s.into()))
     }
 
+    /// Construct a boolean `Value::Bool(b)`.
     pub fn bool(b: bool) -> Self {
         Value::Bool(b)
     }
 
+    /// Construct an array `Value::Array(v)`.
     pub fn array(v: Vec<Value>) -> Self {
         Value::Array(v)
     }
 
+    /// Construct a hash `Value::Hash(m)`.
     pub fn hash(m: HashMap<String, Value>) -> Self {
         Value::Hash(m)
     }
 
+    /// Construct a `Value::Status(code)` — used for `$?` / pipeline-exit
+    /// values so a numeric exit code stays distinguishable from plain
+    /// `Value::Int(n)` in `is_truthy` / display logic.
     pub fn status(code: i32) -> Self {
         Value::Status(code)
     }
@@ -146,6 +156,7 @@ impl Value {
         }
     }
 
+    /// `len() == 0` shorthand — clippy requires this when `len` is `pub`.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
