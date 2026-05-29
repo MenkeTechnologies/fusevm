@@ -546,4 +546,89 @@ mod tests {
     fn is_truthy_single_element_array_is_true() {
         assert!(Value::array(vec![Value::int(0)]).is_truthy());
     }
+
+    // ─── as_str_cow / to_str string-rep pins ─────────────────────────
+    //
+    // The string representation is hit on every `print` / interpolation
+    // call. Drift here silently changes every script's output. Pin
+    // each non-trivial branch.
+
+    #[test]
+    fn as_str_cow_bool_renders_as_perl_compatible() {
+        // Perl convention: true → "1", false → "" (empty string).
+        // gawk and Ruby differ; if a host language frontend swaps
+        // these, downstream `length($flag)` checks break.
+        assert_eq!(Value::bool(true).to_str(), "1");
+        assert_eq!(Value::bool(false).to_str(), "");
+    }
+
+    #[test]
+    fn as_str_cow_undef_renders_as_empty_string() {
+        assert_eq!(Value::Undef.to_str(), "");
+    }
+
+    #[test]
+    fn as_str_cow_array_joins_with_single_space() {
+        // Pin the separator — Perl's default `$,` is empty but the
+        // common host convention is single-space; printf("%s", @a)
+        // semantics rely on this.
+        let v = Value::array(vec![
+            Value::int(1),
+            Value::int(2),
+            Value::int(3),
+        ]);
+        assert_eq!(v.to_str(), "1 2 3");
+    }
+
+    #[test]
+    fn as_str_cow_hash_renders_as_opaque_label() {
+        // Hashes don't have a canonical ordering, so the host
+        // chose `(hash)` as a label. Pin so a future refactor
+        // doesn't accidentally start exposing internal state.
+        let mut h = HashMap::new();
+        h.insert("x".into(), Value::int(1));
+        assert_eq!(Value::hash(h).to_str(), "(hash)");
+    }
+
+    #[test]
+    fn as_str_cow_status_renders_as_exit_code_only() {
+        // $? must stringify as the bare integer, not "exit:N" or
+        // similar — shell scripts grep for the bare code.
+        assert_eq!(Value::Status(0).to_str(), "0");
+        assert_eq!(Value::Status(127).to_str(), "127");
+        assert_eq!(Value::Status(-1).to_str(), "-1");
+    }
+
+    // ─── len() / is_empty() pins ─────────────────────────────────────
+
+    #[test]
+    fn len_of_str_is_byte_count_not_char_count() {
+        // Pin `len()` as byte count for Str (Rust's String::len
+        // semantic). If a refactor switches to char count, all
+        // `length()` builtins drift on UTF-8 input.
+        let v = Value::str("é");  // 2 UTF-8 bytes
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn len_of_array_is_element_count() {
+        let v = Value::array(vec![Value::int(1); 7]);
+        assert_eq!(v.len(), 7);
+    }
+
+    #[test]
+    fn len_of_int_falls_through_to_str_form() {
+        assert_eq!(Value::int(12345).len(), 5);
+        assert_eq!(Value::int(-99).len(), 3); // "-99"
+    }
+
+    #[test]
+    fn is_empty_matches_len_zero_full_matrix() {
+        assert!(Value::str("").is_empty());
+        assert!(Value::array(Vec::new()).is_empty());
+        assert!(Value::hash(HashMap::new()).is_empty());
+        assert!(!Value::int(0).is_empty()); // "0" has len 1
+        assert!(!Value::str("x").is_empty());
+        assert!(Value::Undef.is_empty()); // Undef stringifies to ""
+    }
 }
