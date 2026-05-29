@@ -170,7 +170,6 @@ pub struct VM {
 /// Result of VM execution
 #[derive(Debug)]
 pub enum VMResult {
-    /// Normal completion with a value
     Ok(Value),
     /// Halted (no more instructions)
     Halted,
