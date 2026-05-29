@@ -94,13 +94,13 @@
       <!-- SECTION 1: EXECUTIVE SUMMARY           -->
       <!-- ═══════════════════════════════════════ -->
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>EXECUTIVE SUMMARY</h2>
-      <p class="tutorial-subtitle">fusevm is a language-agnostic bytecode virtual machine written in Rust. Any frontend compiles to the same 134-variant <code>Op</code> enum and gets fused hot-loop dispatch, extension opcode tables, stack+slot execution, and an optional three-tier Cranelift JIT &mdash; for free. Tier&nbsp;1 is a straight-line linear JIT (compile on first call). Tier&nbsp;2 is a block-level JIT over the chunk's CFG (warmup threshold 10). Tier&nbsp;3 is a tracing JIT (loop-header threshold 50) with full side-exit machinery: cross-call inlining (depth &le;&nbsp;4), caller- and callee-frame branches, frame materialization on deopt, abstract-stack reconstruction (Int + Float), per-trace side-exit counters with auto-blacklist, persistent <code>TraceMetadata</code> export/import, and side-trace stitching from hot deopt sites. Auto-dispatched from <code>VM::run()</code> when tracing is enabled &mdash; the interpreter and the JIT are one execution path, not two. <strong>10,429 production Rust lines + 7,346 <code>#[test]</code> functions + 7,196 integration tests + 134 inline tests + 8 fused superinstructions + 29 first-class shell ops + 140 shell builtin IDs</strong> &mdash; one shared engine, three live frontends.</p>
+      <p class="tutorial-subtitle">fusevm is a language-agnostic bytecode virtual machine written in Rust. Any frontend compiles to the same 134-variant <code>Op</code> enum and gets fused hot-loop dispatch, extension opcode tables, stack+slot execution, and an optional three-tier Cranelift JIT &mdash; for free. Tier&nbsp;1 is a straight-line linear JIT (compile on first call). Tier&nbsp;2 is a block-level JIT over the chunk's CFG (warmup threshold 10). Tier&nbsp;3 is a tracing JIT (loop-header threshold 50) with full side-exit machinery: cross-call inlining (depth &le;&nbsp;4), caller- and callee-frame branches, frame materialization on deopt, abstract-stack reconstruction (Int + Float), per-trace side-exit counters with auto-blacklist, persistent <code>TraceMetadata</code> export/import, and side-trace stitching from hot deopt sites. Auto-dispatched from <code>VM::run()</code> when tracing is enabled &mdash; the interpreter and the JIT are one execution path, not two. <strong>10,429 production Rust lines + 7,363 <code>#[test]</code> functions + 7,196 integration tests + 167 inline tests + 8 fused superinstructions + 29 first-class shell ops + 140 shell builtin IDs</strong> &mdash; one shared engine, three live frontends.</p>
 
       <div class="stat-grid">
-        <div class="stat-card"><div class="stat-val">9,895</div><div class="stat-label">Production Rust</div></div>
-        <div class="stat-card"><div class="stat-val">120129</div><div class="stat-label">Test Lines</div></div>
+        <div class="stat-card"><div class="stat-val">10,429</div><div class="stat-label">Production Rust</div></div>
+        <div class="stat-card"><div class="stat-val">120,129</div><div class="stat-label">Test Lines</div></div>
         <div class="stat-card"><div class="stat-val accent">134</div><div class="stat-label">Opcodes</div></div>
-        <div class="stat-card"><div class="stat-val green">7,346</div><div class="stat-label">#[test] Functions</div></div>
+        <div class="stat-card"><div class="stat-val green">7,363</div><div class="stat-label">#[test] Functions</div></div>
         <div class="stat-card"><div class="stat-val">3</div><div class="stat-label">JIT Tiers</div></div>
         <div class="stat-card"><div class="stat-val">8</div><div class="stat-label">Fused Superinstructions</div></div>
         <div class="stat-card"><div class="stat-val">29</div><div class="stat-label">Shell Ops</div></div>
@@ -141,7 +141,7 @@
           <tr style="background:rgba(57,255,20,0.05);">
             <td style="color:var(--green);"><strong>fusevm</strong></td>
             <td>Rust</td>
-            <td class="num">9,895 (8 files)</td>
+            <td class="num">10,429 (8 files)</td>
             <td>Cranelift 0.130 (3-tier)</td>
             <td>crate (<code>cargo add fusevm</code>)</td>
             <td><strong>yes &mdash; 3 live</strong></td>
@@ -216,7 +216,7 @@
         </div>
         <div class="feature-card">
           <h4>By Test Surface</h4>
-          <p><code>7,196</code> integration tests in <code>tests/</code> + <code>134</code> inline tests in <code>src/</code> = <strong>7,346 <code>#[test]</code> functions</strong> against 10,429 production lines. <code>tests/jit_trace.rs</code> alone is 1,940 lines pinning the tracing-JIT recorder, deopt path, frame materialization, side-trace stitching, and the persistent-metadata round-trip. A separate differential-fuzz harness (<code>tests/jit_fuzz.rs</code>) generates random valid bytecode and asserts interpreter and tracing-JIT produce identical results on every chunk.</p>
+          <p><code>7,196</code> integration tests in <code>tests/</code> + <code>134</code> inline tests in <code>src/</code> = <strong>7,363 <code>#[test]</code> functions</strong> against 10,429 production lines. <code>tests/jit_trace.rs</code> alone is 1,940 lines pinning the tracing-JIT recorder, deopt path, frame materialization, side-trace stitching, and the persistent-metadata round-trip. A separate differential-fuzz harness (<code>tests/jit_fuzz.rs</code>) generates random valid bytecode and asserts interpreter and tracing-JIT produce identical results on every chunk.</p>
         </div>
         <div class="feature-card">
           <h4>Op Density</h4>
