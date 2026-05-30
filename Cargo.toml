@@ -6,6 +6,7 @@ description = "Language-agnostic bytecode VM with fused superinstructions and a 
 license = "MIT"
 authors = ["MenkeTechnologies"]
 repository = "https://github.com/MenkeTechnologies/fusevm"
+homepage = "https://menketechnologies.github.io/fusevm/"
 documentation = "https://docs.rs/fusevm"
 readme = "README.md"
 keywords = ["bytecode", "vm", "jit", "interpreter", "fusevm"]
