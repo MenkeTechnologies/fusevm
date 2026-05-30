@@ -2,7 +2,7 @@
 name = "fusevm"
 version = "0.12.4"
 edition = "2021"
-description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear, block, tracing with side-exits and frame materialization)"
+description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear/block/tracing)"
 license = "MIT"
 authors = ["MenkeTechnologies"]
 repository = "https://github.com/MenkeTechnologies/fusevm"
