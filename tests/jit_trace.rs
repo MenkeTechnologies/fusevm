@@ -1136,6 +1136,14 @@ fn loop_with_float_stack_at_branch_compiles_and_runs() {
 
 #[test]
 fn side_exit_count_observable_via_jit_compiler() {
+    // This is a trace-tier test: pin the block warmup high so the (block-
+    // eligible) chunk isn't stolen by the block JIT on its 2nd same-thread
+    // invocation, which would otherwise starve the trace and zero the
+    // side-exit counter under the low default `block_threshold`.
+    JitCompiler::new().set_config(TraceJitConfig {
+        block_threshold: u32::MAX,
+        ..TraceJitConfig::defaults()
+    });
     // First, install a trace where the recorded path has a stable branch.
     let (chunk, anchor) = build_loop_with_data_dependent_branch(120);
     {

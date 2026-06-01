@@ -157,6 +157,13 @@ pub const MAX_DEOPT_STACK: usize = 32;
 pub struct TraceJitConfig {
     /// Backedges through a loop header before recording arms.
     pub trace_threshold: u32,
+    /// Whole-chunk invocations before the block JIT compiles a chunk.
+    /// Below this, `try_run_block` returns `None` and the caller falls back
+    /// to the interpreter — avoiding compile cost for one-shot chunks.
+    /// Defaults to 1 (compile on the 2nd invocation) so re-run-heavy
+    /// workloads reach native code fast; raise it for cold-start scripts that
+    /// run once, or override per-process with `FUSEVM_JIT_BLOCK_THRESHOLD`.
+    pub block_threshold: u32,
     /// Mid-trace side-exits before the trace is auto-blacklisted.
     pub max_side_exits: u32,
     /// Maximum self-recursive levels the recorder will inline.
@@ -168,10 +175,15 @@ pub struct TraceJitConfig {
 }
 
 impl TraceJitConfig {
-    /// Defaults matching the phase-1-through-9 constants.
+    /// Defaults matching the phase-1-through-9 constants, except
+    /// `block_threshold` which defaults to 1 (compile on the 2nd invocation)
+    /// to favor re-run-heavy workloads. Per-process env overrides
+    /// (`FUSEVM_JIT_BLOCK_THRESHOLD` / `FUSEVM_JIT_TRACE_THRESHOLD`) are applied
+    /// on top of these when a thread first touches the JIT.
     pub const fn defaults() -> Self {
         Self {
             trace_threshold: 50,
+            block_threshold: 1,
             max_side_exits: 50,
             max_inline_recursion: 4,
             max_trace_chain: 4,
@@ -317,9 +329,20 @@ mod cranelift_jit_impl {
         Float(f64),
     }
 
+    /// Keeps the executable memory backing a [`CompiledLinear`] alive. The
+    /// JIT path owns a `JITModule`; the on-disk-cache path owns an mmap'd
+    /// region of relocated native code.
+    enum LinearBacking {
+        #[allow(dead_code)]
+        Jit(JITModule),
+        #[cfg(feature = "jit-disk-cache")]
+        #[allow(dead_code)]
+        Native(disk_cache::LoadedNative),
+    }
+
     pub(crate) struct CompiledLinear {
         #[allow(dead_code)]
-        module: JITModule,
+        backing: LinearBacking,
         run: LinearRun,
     }
 
@@ -1268,7 +1291,10 @@ mod cranelift_jit_impl {
                 LinearRun::SlotsF(unsafe { std::mem::transmute::<*const u8, LinearFnSlotsF>(ptr) })
             }
         };
-        Some(CompiledLinear { module, run })
+        Some(CompiledLinear {
+            backing: LinearBacking::Jit(module),
+            run,
+        })
     }
 
     // ── Linear JIT cache (per-thread, lock-free) ──
@@ -1300,6 +1326,24 @@ mod cranelift_jit_impl {
             return Some(v);
         }
 
+        // Disk-cache path (opt-in): reuse or build relocatable native code
+        // persisted across process restarts, skipping Cranelift codegen.
+        #[cfg(feature = "jit-disk-cache")]
+        {
+            if let Some(dir) = disk_cache::cache_dir() {
+                if let Some(compiled) = disk_cache::try_load_or_build(chunk, &dir) {
+                    let result = compiled.invoke(slot_ptr);
+                    let value = compiled.result_to_value(result);
+                    LINEAR_CACHE_TLS.with(|cache_cell| {
+                        cache_cell.borrow_mut().insert(key, Box::new(compiled));
+                    });
+                    return Some(value);
+                }
+                // Native caching rejected this chunk (e.g. an unsupported
+                // relocation): fall through to the in-memory JIT path.
+            }
+        }
+
         // Cache miss: compile, invoke, store
         let compiled = compile_linear(chunk)?;
         let result = compiled.invoke(slot_ptr);
@@ -1315,6 +1359,960 @@ mod cranelift_jit_impl {
     /// Check if a chunk is eligible for linear JIT compilation.
     pub(crate) fn is_linear_eligible(chunk: &Chunk) -> bool {
         validate_linear_seq(&chunk.ops, &chunk.constants)
+    }
+
+    // ── Persistent on-disk native-code cache (linear tier) ──
+    //
+    // Caches the *native machine code* produced by the linear JIT to disk so
+    // repeated processes skip Cranelift codegen. fusevm's linear functions are
+    // position-independent; the only relocations are `Abs8` absolute writes to
+    // the fixed host helpers. Loading therefore reduces to: map executable
+    // memory, copy the code, write the current address of each referenced host
+    // helper at its relocation offset, and flip the page to executable.
+    //
+    // Conservative by design: any chunk whose compiled code contains a
+    // relocation that is not an `Abs8` to a known host helper is rejected, and
+    // the caller falls back to the in-memory JIT. This keeps the loader correct
+    // even on targets whose codegen differs from the ones exercised in tests.
+    #[cfg(feature = "jit-disk-cache")]
+    pub(crate) mod disk_cache {
+        use super::*;
+        use cranelift_codegen::binemit::Reloc;
+        use cranelift_codegen::ir::{
+            ExtFuncData, ExternalName, Signature, UserExternalName,
+        };
+        use cranelift_codegen::Context;
+        use std::hash::{Hash, Hasher};
+        use std::path::{Path, PathBuf};
+        use std::sync::{OnceLock, RwLock};
+
+        // Stable host-helper identifiers — persisted in cache files and used to
+        // re-resolve the helper address at load time. Never renumber these
+        // without bumping `SCHEMA_VERSION`.
+        const H_POW_I64: u32 = 0;
+        const H_POW_F64: u32 = 1;
+        const H_FMOD_F64: u32 = 2;
+        const H_LOGNOT: u32 = 3;
+
+        // Native-blob tier discriminator. Persisted in the file and verified on
+        // load so a block blob can never be transmuted with a linear signature.
+        pub(crate) const KIND_LINEAR: u8 = 0;
+        pub(crate) const KIND_BLOCK: u8 = 1;
+        pub(crate) const KIND_TRACE: u8 = 2;
+
+        const MAGIC: &[u8; 8] = b"FJITNAT2";
+        const SCHEMA_VERSION: u32 = 2;
+
+        /// Current address of a host helper by id, or `None` if unknown.
+        fn host_addr(id: u32) -> Option<usize> {
+            Some(match id {
+                H_POW_I64 => super::fusevm_jit_pow_i64 as *const u8 as usize,
+                H_POW_F64 => super::fusevm_jit_pow_f64 as *const u8 as usize,
+                H_FMOD_F64 => super::fusevm_jit_fmod_f64 as *const u8 as usize,
+                H_LOGNOT => super::fusevm_jit_lognot_i64 as *const u8 as usize,
+                _ => return None,
+            })
+        }
+
+        /// Compile a fully-built `ctx` to raw bytes + validated host-helper
+        /// relocations. `map_index` maps each relocation's
+        /// `UserExternalName.index` to a stable host-helper id; the block/trace
+        /// native paths build their `ctx` via a `JITModule` (so the index is the
+        /// helper's module `FuncId`), while the linear path imports helpers
+        /// directly under their host id. Returns `None` (so the caller falls
+        /// back to the in-memory JIT) if any relocation is not an `Abs8` to a
+        /// known host helper.
+        fn compile_and_extract(
+            ctx: &mut Context,
+            isa: &dyn cranelift_codegen::isa::TargetIsa,
+            map_index: impl Fn(u32) -> Option<u32>,
+        ) -> Option<(Vec<u8>, Vec<(u32, u32, i64)>)> {
+            // Copy out code + relocs as owned data so the mutable borrow of
+            // `ctx` ends before we read its name table.
+            let (code, raw): (Vec<u8>, Vec<(u32, Reloc, i64, Option<ExternalName>)>) = {
+                let compiled = ctx.compile(isa, &mut Default::default()).ok()?;
+                let bytes = compiled.code_buffer().to_vec();
+                let relocs = compiled
+                    .buffer
+                    .relocs()
+                    .iter()
+                    .map(|r| {
+                        let name = match &r.target {
+                            cranelift_codegen::FinalizedRelocTarget::ExternalName(n) => {
+                                Some(n.clone())
+                            }
+                            _ => None,
+                        };
+                        (r.offset, r.kind, r.addend, name)
+                    })
+                    .collect();
+                (bytes, relocs)
+            };
+
+            let mut relocs = Vec::with_capacity(raw.len());
+            for (off, kind, addend, name) in raw {
+                if kind != Reloc::Abs8 {
+                    return None;
+                }
+                let uref = match name {
+                    Some(ExternalName::User(u)) => u,
+                    _ => return None,
+                };
+                let index = ctx.func.params.user_named_funcs()[uref].index;
+                let id = map_index(index)?;
+                host_addr(id)?;
+                if (off as usize).checked_add(8)? > code.len() {
+                    return None;
+                }
+                relocs.push((off, id, addend));
+            }
+            Some((code, relocs))
+        }
+
+        /// Map a block/trace `ctx`'s relocation index (a module `FuncId` as u32)
+        /// to a stable host-helper id, using the helper-FuncId table captured at
+        /// build time. Order: `[pow_i64, pow_f64, fmod_f64, lognot]`.
+        fn map_helper_funcid(
+            helper_ids: &[Option<cranelift_module::FuncId>; 4],
+            index: u32,
+        ) -> Option<u32> {
+            const HOST_IDS: [u32; 4] = [H_POW_I64, H_POW_F64, H_FMOD_F64, H_LOGNOT];
+            for (slot, id) in helper_ids.iter().zip(HOST_IDS.iter()) {
+                if let Some(fid) = slot {
+                    if fid.as_u32() == index {
+                        return Some(*id);
+                    }
+                }
+            }
+            None
+        }
+
+        // ── Cache directory configuration ──
+
+        fn cache_dir_slot() -> &'static RwLock<Option<PathBuf>> {
+            static SLOT: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+            SLOT.get_or_init(|| RwLock::new(None))
+        }
+
+        /// Override the cache directory programmatically. `Some(dir)` pins an
+        /// explicit directory; `None` clears the override so resolution falls
+        /// back to the `FUSEVM_JIT_CACHE_DIR` env var and then the default
+        /// (`~/.cache/fusevm-jit`).
+        pub(crate) fn set_cache_dir(dir: Option<PathBuf>) {
+            if let Ok(mut g) = cache_dir_slot().write() {
+                *g = dir;
+            }
+        }
+
+        /// Whether `val` is an explicit "disabled" sentinel for the env var.
+        fn is_disabled_value(val: &std::ffi::OsStr) -> bool {
+            let s = val.to_string_lossy();
+            let t = s.trim();
+            t.is_empty()
+                || matches!(
+                    t.to_ascii_lowercase().as_str(),
+                    "off" | "0" | "no" | "none" | "false" | "disabled"
+                )
+        }
+
+        /// The default cache directory used when nothing else is configured:
+        /// `$XDG_CACHE_HOME/fusevm-jit`, else `$HOME/.cache/fusevm-jit`, else a
+        /// temp-dir fallback. Disk caching is *on by default* — set
+        /// `FUSEVM_JIT_CACHE_DIR=off` (or call `set_jit_cache_dir`) to change it.
+        fn default_cache_dir() -> Option<PathBuf> {
+            if let Some(x) = std::env::var_os("XDG_CACHE_HOME") {
+                if !x.is_empty() {
+                    return Some(PathBuf::from(x).join("fusevm-jit"));
+                }
+            }
+            if let Some(h) = std::env::var_os("HOME") {
+                if !h.is_empty() {
+                    return Some(PathBuf::from(h).join(".cache").join("fusevm-jit"));
+                }
+            }
+            Some(std::env::temp_dir().join("fusevm-jit"))
+        }
+
+        /// The active cache directory. Resolution order:
+        /// 1. programmatic override (`set_cache_dir`),
+        /// 2. `FUSEVM_JIT_CACHE_DIR` env var (a "disabled" sentinel turns
+        ///    caching off, any other value is used as the directory),
+        /// 3. the default `~/.cache/fusevm-jit`.
+        ///
+        /// `None` means disk caching is disabled for this run.
+        pub(crate) fn cache_dir() -> Option<PathBuf> {
+            if let Ok(g) = cache_dir_slot().read() {
+                if let Some(p) = g.as_ref() {
+                    return Some(p.clone());
+                }
+            }
+            match std::env::var_os("FUSEVM_JIT_CACHE_DIR") {
+                Some(val) if is_disabled_value(&val) => None,
+                Some(val) => Some(PathBuf::from(val)),
+                None => default_cache_dir(),
+            }
+        }
+
+        /// Identifies the (target, toolchain, schema) a cache file was built
+        /// for. A mismatch on load means the file is stale and is ignored.
+        fn fingerprint() -> u64 {
+            static FP: OnceLock<u64> = OnceLock::new();
+            *FP.get_or_init(|| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                SCHEMA_VERSION.hash(&mut h);
+                env!("CARGO_PKG_VERSION").hash(&mut h);
+                if let Some(isa) = cached_owned_isa() {
+                    isa.triple().to_string().hash(&mut h);
+                    (isa.pointer_type().bytes() as u32).hash(&mut h);
+                }
+                std::mem::size_of::<usize>().hash(&mut h);
+                h.finish()
+            })
+        }
+
+        // ── Serializable native blob ──
+
+        pub(crate) struct NativeBlob {
+            kind: u8,
+            code: Vec<u8>,
+            /// `(code offset, host helper id, addend)` per Abs8 relocation.
+            relocs: Vec<(u32, u32, i64)>,
+            entry: u32,
+            ret_is_float: bool,
+            need_slots: bool,
+            /// Extra verification word: for traces this is a content hash of the
+            /// recording (recorded path + slot types + fallthrough); 0 otherwise.
+            aux: u64,
+        }
+
+        impl NativeBlob {
+            fn to_bytes(&self, op_hash: u64) -> Vec<u8> {
+                let mut b = Vec::with_capacity(72 + self.code.len() + self.relocs.len() * 16);
+                b.extend_from_slice(MAGIC);
+                b.extend_from_slice(&SCHEMA_VERSION.to_le_bytes());
+                b.extend_from_slice(&fingerprint().to_le_bytes());
+                b.extend_from_slice(&op_hash.to_le_bytes());
+                b.extend_from_slice(&self.aux.to_le_bytes());
+                b.push(self.kind);
+                let flags = (self.ret_is_float as u8) | ((self.need_slots as u8) << 1);
+                b.push(flags);
+                b.extend_from_slice(&self.entry.to_le_bytes());
+                b.extend_from_slice(&(self.code.len() as u32).to_le_bytes());
+                b.extend_from_slice(&self.code);
+                b.extend_from_slice(&(self.relocs.len() as u32).to_le_bytes());
+                for (off, id, addend) in &self.relocs {
+                    b.extend_from_slice(&off.to_le_bytes());
+                    b.extend_from_slice(&id.to_le_bytes());
+                    b.extend_from_slice(&addend.to_le_bytes());
+                }
+                b
+            }
+
+            fn from_bytes(buf: &[u8], expect_op_hash: u64, expect_aux: u64) -> Option<NativeBlob> {
+                let mut r = Reader { buf, pos: 0 };
+                if r.take(8)? != MAGIC {
+                    return None;
+                }
+                if r.u32()? != SCHEMA_VERSION || r.u64()? != fingerprint() {
+                    return None;
+                }
+                if r.u64()? != expect_op_hash {
+                    return None;
+                }
+                if r.u64()? != expect_aux {
+                    return None;
+                }
+                let kind = r.u8()?;
+                let flags = r.u8()?;
+                let entry = r.u32()?;
+                let code_len = r.u32()? as usize;
+                let code = r.take(code_len)?.to_vec();
+                let n = r.u32()? as usize;
+                let mut relocs = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let off = r.u32()?;
+                    let id = r.u32()?;
+                    let addend = r.i64()?;
+                    relocs.push((off, id, addend));
+                }
+                Some(NativeBlob {
+                    kind,
+                    code,
+                    relocs,
+                    entry,
+                    ret_is_float: flags & 1 != 0,
+                    need_slots: flags & 2 != 0,
+                    aux: expect_aux,
+                })
+            }
+        }
+
+        struct Reader<'a> {
+            buf: &'a [u8],
+            pos: usize,
+        }
+        impl<'a> Reader<'a> {
+            fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+                let end = self.pos.checked_add(n)?;
+                let s = self.buf.get(self.pos..end)?;
+                self.pos = end;
+                Some(s)
+            }
+            fn u8(&mut self) -> Option<u8> {
+                Some(self.take(1)?[0])
+            }
+            fn u32(&mut self) -> Option<u32> {
+                Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+            }
+            fn u64(&mut self) -> Option<u64> {
+                Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+            }
+            fn i64(&mut self) -> Option<i64> {
+                Some(i64::from_le_bytes(self.take(8)?.try_into().ok()?))
+            }
+        }
+
+        // ── Native compilation (no Module — raw Context) ──
+
+        /// Compile a chunk's linear sequence to relocatable native code.
+        /// Returns `None` if the chunk is ineligible or its code contains a
+        /// relocation the loader cannot handle.
+        pub(crate) fn compile_linear_native(chunk: &Chunk) -> Option<NativeBlob> {
+            let seq = &chunk.ops;
+            if !validate_linear_seq(seq, &chunk.constants) {
+                return None;
+            }
+            let ret_cell = linear_result_cell(seq, &chunk.constants)?;
+            let ret_ty = cell_to_jit_ty(ret_cell);
+            let need_slots = needs_slots(seq);
+            let isa = cached_owned_isa()?.clone();
+            let call_conv = isa.default_call_conv();
+            let ptr_ty = isa.pointer_type();
+
+            let mut sig = Signature::new(call_conv);
+            if need_slots {
+                sig.params.push(AbiParam::new(ptr_ty));
+            }
+            sig.returns.push(AbiParam::new(match ret_ty {
+                JitTy::Int => types::I64,
+                JitTy::Float => types::F64,
+            }));
+
+            let mut ctx = Context::new();
+            ctx.func.signature = sig;
+            ctx.func.name = UserFuncName::user(0, 0);
+            let mut fctx = FunctionBuilderContext::new();
+            {
+                let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                let entry = bcx.create_block();
+                bcx.append_block_params_for_function_params(entry);
+                bcx.switch_to_block(entry);
+                let slot_base = if need_slots {
+                    Some(bcx.block_params(entry)[0])
+                } else {
+                    None
+                };
+
+                let import = |bcx: &mut FunctionBuilder,
+                              id: u32,
+                              params: &[types::Type],
+                              ret: types::Type|
+                 -> cranelift_codegen::ir::FuncRef {
+                    let mut s = Signature::new(call_conv);
+                    for p in params {
+                        s.params.push(AbiParam::new(*p));
+                    }
+                    s.returns.push(AbiParam::new(ret));
+                    let sref = bcx.import_signature(s);
+                    let nref = bcx
+                        .func
+                        .declare_imported_user_function(UserExternalName::new(0, id));
+                    bcx.import_function(ExtFuncData {
+                        name: ExternalName::user(nref),
+                        signature: sref,
+                        colocated: false,
+                        patchable: false,
+                    })
+                };
+
+                let pow_i64_ref =
+                    Some(import(&mut bcx, H_POW_I64, &[types::I64, types::I64], types::I64));
+                let pow_f64_ref =
+                    Some(import(&mut bcx, H_POW_F64, &[types::F64, types::F64], types::F64));
+                let fmod_f64_ref =
+                    Some(import(&mut bcx, H_FMOD_F64, &[types::F64, types::F64], types::F64));
+                let lognot_ref = Some(import(&mut bcx, H_LOGNOT, &[types::I64], types::I64));
+
+                let mut stack: Vec<(Value, JitTy)> = Vec::with_capacity(32);
+                for op in seq {
+                    emit_data_op(
+                        &mut bcx,
+                        op,
+                        &mut stack,
+                        slot_base,
+                        pow_i64_ref,
+                        pow_f64_ref,
+                        fmod_f64_ref,
+                        lognot_ref,
+                        &chunk.constants,
+                    )?;
+                }
+                let (v, ty) = stack.pop()?;
+                let ret_v = match (ret_ty, ty) {
+                    (JitTy::Int, JitTy::Int) | (JitTy::Float, JitTy::Float) => v,
+                    (JitTy::Float, JitTy::Int) => i64_to_f64(&mut bcx, v),
+                    (JitTy::Int, JitTy::Float) => f64_to_i64_trunc(&mut bcx, v),
+                };
+                bcx.ins().return_(&[ret_v]);
+                bcx.seal_all_blocks();
+                bcx.finalize();
+            }
+
+            // Compile + extract relocations. The linear path imports helpers
+            // directly under their host id, so the relocation index *is* the
+            // host id.
+            let (code, relocs) = compile_and_extract(&mut ctx, &*isa, |index| {
+                if host_addr(index).is_some() {
+                    Some(index)
+                } else {
+                    None
+                }
+            })?;
+
+            Some(NativeBlob {
+                kind: KIND_LINEAR,
+                code,
+                relocs,
+                entry: 0,
+                ret_is_float: matches!(ret_ty, JitTy::Float),
+                need_slots,
+                aux: 0,
+            })
+        }
+
+        // ── Executable-memory loader ──
+
+        /// Owns an mmap'd region of relocated, executable native code. Unmapped
+        /// on drop. Not `Send`/`Sync`: the linear cache is per-thread.
+        pub(crate) struct LoadedNative {
+            ptr: *mut u8,
+            len: usize,
+        }
+
+        impl Drop for LoadedNative {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::munmap(self.ptr as *mut libc::c_void, self.len);
+                }
+            }
+        }
+
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        extern "C" {
+            fn pthread_jit_write_protect_np(enabled: libc::c_int);
+            fn sys_icache_invalidate(start: *mut libc::c_void, len: libc::size_t);
+        }
+
+        /// Map the blob's code into executable memory and apply its host-helper
+        /// relocations. Returns the mapped region (owning handle) and the entry
+        /// pointer, or `None` on any mapping/protection/resolution failure.
+        fn map_relocate(blob: &NativeBlob) -> Option<(LoadedNative, *const u8)> {
+            let code_len = blob.code.len();
+            if code_len == 0 {
+                return None;
+            }
+            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            if page <= 0 {
+                return None;
+            }
+            let page = page as usize;
+            let len = code_len.checked_add(page - 1)? / page * page;
+
+            unsafe {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                let (prot, flags) = (
+                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
+                );
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                let (prot, flags) = (
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANON,
+                );
+
+                let p = libc::mmap(std::ptr::null_mut(), len, prot, flags, -1, 0);
+                if p == libc::MAP_FAILED {
+                    return None;
+                }
+                let base = p as *mut u8;
+
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                pthread_jit_write_protect_np(0);
+
+                std::ptr::copy_nonoverlapping(blob.code.as_ptr(), base, code_len);
+
+                for (off, id, addend) in &blob.relocs {
+                    let addr = match host_addr(*id) {
+                        Some(a) => a as i64 + *addend,
+                        None => {
+                            libc::munmap(p, len);
+                            return None;
+                        }
+                    };
+                    if (*off as usize) + 8 > code_len {
+                        libc::munmap(p, len);
+                        return None;
+                    }
+                    let slot = base.add(*off as usize) as *mut i64;
+                    slot.write_unaligned(addr);
+                }
+
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    pthread_jit_write_protect_np(1);
+                    sys_icache_invalidate(p, len);
+                }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                {
+                    if libc::mprotect(p, len, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+                        libc::munmap(p, len);
+                        return None;
+                    }
+                }
+
+                let entry = base.add(blob.entry as usize) as *const u8;
+                Some((LoadedNative { ptr: base, len }, entry))
+            }
+        }
+
+        /// Map the blob's code into executable memory, apply relocations, and
+        /// build a [`CompiledLinear`] that calls into it. `None` on any mapping,
+        /// protection, or relocation-resolution failure.
+        pub(crate) fn load_native(blob: &NativeBlob) -> Option<CompiledLinear> {
+            if blob.kind != KIND_LINEAR {
+                return None;
+            }
+            let (loaded, entry) = map_relocate(blob)?;
+            let run = unsafe {
+                match (blob.need_slots, blob.ret_is_float) {
+                    (false, false) => {
+                        LinearRun::Nullary(std::mem::transmute::<*const u8, LinearFn0>(entry))
+                    }
+                    (false, true) => {
+                        LinearRun::NullaryF(std::mem::transmute::<*const u8, LinearFn0F>(entry))
+                    }
+                    (true, false) => {
+                        LinearRun::Slots(std::mem::transmute::<*const u8, LinearFnSlots>(entry))
+                    }
+                    (true, true) => {
+                        LinearRun::SlotsF(std::mem::transmute::<*const u8, LinearFnSlotsF>(entry))
+                    }
+                }
+            };
+            Some(CompiledLinear {
+                backing: LinearBacking::Native(loaded),
+                run,
+            })
+        }
+
+        /// Map a block blob and build a [`CompiledBlock`]. Block functions are
+        /// always `fn(*mut i64) -> i64` (the `SlotsI` variant).
+        pub(crate) fn load_native_block(blob: &NativeBlob) -> Option<CompiledBlock> {
+            if blob.kind != KIND_BLOCK {
+                return None;
+            }
+            let (loaded, entry) = map_relocate(blob)?;
+            let run = BlockRun::SlotsI(unsafe {
+                std::mem::transmute::<*const u8, BlockFnSlotsI>(entry)
+            });
+            Some(CompiledBlock {
+                backing: BlockBacking::Native(loaded),
+                run,
+            })
+        }
+
+        /// Map a trace blob and build a [`CompiledTrace`]. Trace functions are
+        /// always `fn(*mut i64, *mut DeoptInfo) -> i64`.
+        pub(crate) fn load_native_trace(blob: &NativeBlob) -> Option<CompiledTrace> {
+            if blob.kind != KIND_TRACE {
+                return None;
+            }
+            let (loaded, entry) = map_relocate(blob)?;
+            let run = unsafe { std::mem::transmute::<*const u8, TraceFn>(entry) };
+            Some(CompiledTrace {
+                backing: TraceBacking::Native(loaded),
+                run,
+            })
+        }
+
+        // ── File I/O ──
+
+        fn cache_path(dir: &Path, tag: &str, op_hash: u64, sub: u64) -> PathBuf {
+            dir.join(format!("{op_hash:016x}.{sub:016x}.{tag}.fjit"))
+        }
+
+        fn write_blob(dir: &Path, tag: &str, op_hash: u64, sub: u64, blob: &NativeBlob) {
+            let _ = std::fs::create_dir_all(dir);
+            let bytes = blob.to_bytes(op_hash);
+            // Atomic publish: write to a *unique* temp file then rename, so a
+            // reader never observes a partial file and concurrent writers (other
+            // threads or processes, even for the same key) never share a temp
+            // path and clobber each other mid-write. Uniqueness = pid + a global
+            // monotonic counter.
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = dir.join(format!(
+                "{op_hash:016x}.{sub:016x}.{tag}.{}.{seq}.tmp",
+                std::process::id()
+            ));
+            if std::fs::write(&tmp, &bytes).is_ok() {
+                if std::fs::rename(&tmp, cache_path(dir, tag, op_hash, sub)).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                } else if seq.is_multiple_of(PRUNE_INTERVAL) {
+                    // Amortized cap enforcement: scan + evict roughly once per
+                    // PRUNE_INTERVAL writes rather than on every write.
+                    let _ = prune(dir, max_bytes());
+                }
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+
+        fn read_blob(
+            dir: &Path,
+            tag: &str,
+            op_hash: u64,
+            sub: u64,
+            expect_aux: u64,
+        ) -> Option<NativeBlob> {
+            let bytes = std::fs::read(cache_path(dir, tag, op_hash, sub)).ok()?;
+            NativeBlob::from_bytes(&bytes, op_hash, expect_aux)
+        }
+
+        // ── Cache size management ──
+
+        /// Default cap on total on-disk cache size: 256 MiB. Files are tiny
+        /// (~100 bytes for linear blobs, up to a few KB for block/trace), so
+        /// this holds a very large working set; override via
+        /// `FUSEVM_JIT_CACHE_MAX_BYTES` or `set_max_bytes`.
+        const DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+        /// How often (in `write_blob` calls) to opportunistically prune, so the
+        /// directory scan cost is amortized instead of paid on every write.
+        const PRUNE_INTERVAL: u64 = 128;
+
+        fn max_bytes_slot() -> &'static RwLock<Option<u64>> {
+            static SLOT: OnceLock<RwLock<Option<u64>>> = OnceLock::new();
+            SLOT.get_or_init(|| RwLock::new(None))
+        }
+
+        /// Programmatic override for the cache size cap. `Some(0)` means
+        /// unlimited (never prune); `None` falls back to the
+        /// `FUSEVM_JIT_CACHE_MAX_BYTES` env var, then `DEFAULT_MAX_BYTES`.
+        pub(crate) fn set_max_bytes(limit: Option<u64>) {
+            if let Ok(mut g) = max_bytes_slot().write() {
+                *g = limit;
+            }
+        }
+
+        /// Resolved cap in bytes; `0` means unlimited (pruning disabled).
+        pub(crate) fn max_bytes() -> u64 {
+            if let Ok(g) = max_bytes_slot().read() {
+                if let Some(v) = *g {
+                    return v;
+                }
+            }
+            match std::env::var("FUSEVM_JIT_CACHE_MAX_BYTES") {
+                Ok(s) => parse_size(&s).unwrap_or(DEFAULT_MAX_BYTES),
+                Err(_) => DEFAULT_MAX_BYTES,
+            }
+        }
+
+        /// Parse a size string: a plain byte count, an optional binary suffix
+        /// (`k`/`m`/`g`, case-insensitive), or a disable sentinel
+        /// (`0`/`off`/`none`/`unlimited`) → `0`. Returns `None` if unparsable.
+        fn parse_size(s: &str) -> Option<u64> {
+            let lower = s.trim().to_ascii_lowercase();
+            if matches!(lower.as_str(), "0" | "off" | "none" | "unlimited") {
+                return Some(0);
+            }
+            let (num, mult) = if let Some(p) = lower.strip_suffix('g') {
+                (p, 1u64 << 30)
+            } else if let Some(p) = lower.strip_suffix('m') {
+                (p, 1u64 << 20)
+            } else if let Some(p) = lower.strip_suffix('k') {
+                (p, 1u64 << 10)
+            } else {
+                (lower.as_str(), 1u64)
+            };
+            num.trim()
+                .parse::<u64>()
+                .ok()
+                .map(|n| n.saturating_mul(mult))
+        }
+
+        /// `(path, size, mtime)` for every cache blob in `dir`.
+        fn fjit_entries(dir: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+            let mut v = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|s| s.to_str()) == Some("fjit") {
+                        if let Ok(m) = e.metadata() {
+                            let t = m.modified().unwrap_or(std::time::UNIX_EPOCH);
+                            v.push((p, m.len(), t));
+                        }
+                    }
+                }
+            }
+            v
+        }
+
+        /// Total bytes of cache blobs in `dir`.
+        pub(crate) fn cache_size_bytes(dir: &Path) -> u64 {
+            fjit_entries(dir).iter().map(|(_, s, _)| *s).sum()
+        }
+
+        /// Remove every cache blob in `dir`; returns the count removed.
+        pub(crate) fn clear(dir: &Path) -> usize {
+            let mut n = 0;
+            for (p, _, _) in fjit_entries(dir) {
+                if std::fs::remove_file(&p).is_ok() {
+                    n += 1;
+                }
+            }
+            n
+        }
+
+        /// Evict oldest-first until total size ≤ 80% of `max`. No-op when
+        /// `max == 0` (unlimited) or already under cap. Returns bytes freed.
+        pub(crate) fn prune(dir: &Path, max: u64) -> u64 {
+            if max == 0 {
+                return 0;
+            }
+            let mut entries = fjit_entries(dir);
+            let total: u64 = entries.iter().map(|(_, s, _)| *s).sum();
+            if total <= max {
+                return 0;
+            }
+            // Low-water mark avoids pruning on every subsequent write once at cap.
+            let target = max - max / 5;
+            entries.sort_by_key(|(_, _, t)| *t); // oldest first
+            let mut cur = total;
+            let mut freed = 0;
+            for (p, size, _) in entries {
+                if cur <= target {
+                    break;
+                }
+                if std::fs::remove_file(&p).is_ok() {
+                    cur = cur.saturating_sub(size);
+                    freed += size;
+                }
+            }
+            freed
+        }
+
+        #[cfg(test)]
+        mod size_tests {
+            use super::{cache_size_bytes, clear, parse_size, prune};
+            use std::path::PathBuf;
+
+            #[test]
+            fn parse_size_units_and_sentinels() {
+                assert_eq!(parse_size("1024"), Some(1024));
+                assert_eq!(parse_size(" 2k "), Some(2 * 1024));
+                assert_eq!(parse_size("3M"), Some(3 * 1024 * 1024));
+                assert_eq!(parse_size("1g"), Some(1024 * 1024 * 1024));
+                assert_eq!(parse_size("0"), Some(0));
+                assert_eq!(parse_size("off"), Some(0));
+                assert_eq!(parse_size("unlimited"), Some(0));
+                assert_eq!(parse_size("garbage"), None);
+            }
+
+            fn tmp_dir(tag: &str) -> PathBuf {
+                let d = std::env::temp_dir().join(format!(
+                    "fusevm-jit-size-test-{}-{}-{}",
+                    tag,
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&d).unwrap();
+                d
+            }
+
+            fn write_blob_file(dir: &std::path::Path, name: &str, bytes: usize) {
+                std::fs::write(dir.join(format!("{name}.fjit")), vec![0u8; bytes]).unwrap();
+                // Space out mtimes so oldest-first eviction is deterministic.
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            #[test]
+            fn prune_evicts_oldest_until_under_low_water() {
+                let dir = tmp_dir("prune");
+                // 10 blobs × 100 bytes = 1000 bytes total.
+                for i in 0..10 {
+                    write_blob_file(&dir, &format!("{i:02}"), 100);
+                }
+                assert_eq!(cache_size_bytes(&dir), 1000);
+
+                // Cap 500 → low-water 400; evict oldest until ≤ 400.
+                let freed = prune(&dir, 500);
+                let remaining = cache_size_bytes(&dir);
+                assert!(remaining <= 400, "expected ≤400 after prune, got {remaining}");
+                assert_eq!(freed, 1000 - remaining);
+
+                // The newest blob (09) must survive; the oldest (00) must not.
+                assert!(dir.join("09.fjit").exists(), "newest blob should be kept");
+                assert!(!dir.join("00.fjit").exists(), "oldest blob should be evicted");
+
+                // max == 0 is unlimited: no-op.
+                assert_eq!(prune(&dir, 0), 0);
+                std::fs::remove_dir_all(&dir).ok();
+            }
+
+            #[test]
+            fn clear_removes_all_blobs() {
+                let dir = tmp_dir("clear");
+                for i in 0..5 {
+                    write_blob_file(&dir, &format!("{i}"), 50);
+                }
+                // A non-blob file must be left untouched.
+                std::fs::write(dir.join("keep.txt"), b"x").unwrap();
+                assert_eq!(clear(&dir), 5);
+                assert_eq!(cache_size_bytes(&dir), 0);
+                assert!(dir.join("keep.txt").exists());
+                std::fs::remove_dir_all(&dir).ok();
+            }
+        }
+
+        /// Load native code for `chunk`'s linear sequence from `dir`, compiling
+        /// and persisting it first if absent. Returns `None` if the chunk cannot
+        /// be natively cached (caller should fall back to the in-memory JIT).
+        pub(crate) fn try_load_or_build(chunk: &Chunk, dir: &Path) -> Option<CompiledLinear> {
+            if let Some(blob) = read_blob(dir, "lin", chunk.op_hash, 0, 0) {
+                if let Some(compiled) = load_native(&blob) {
+                    return Some(compiled);
+                }
+            }
+            let blob = compile_linear_native(chunk)?;
+            write_blob(dir, "lin", chunk.op_hash, 0, &blob);
+            load_native(&blob)
+        }
+
+        /// Block-tier equivalent of [`try_load_or_build`]. Keyed by `op_hash`.
+        pub(crate) fn try_load_or_build_block(chunk: &Chunk, dir: &Path) -> Option<CompiledBlock> {
+            if let Some(blob) = read_blob(dir, "blk", chunk.op_hash, 0, 0) {
+                if let Some(compiled) = load_native_block(&blob) {
+                    return Some(compiled);
+                }
+            }
+            let blob = compile_block_native(chunk)?;
+            write_blob(dir, "blk", chunk.op_hash, 0, &blob);
+            load_native_block(&blob)
+        }
+
+        /// Trace-tier equivalent. Keyed by `(op_hash, record_anchor_ip)`; the
+        /// `meta_hash` (content hash of the recording) is the verification aux
+        /// word, so a stale file recorded for a different path is rejected.
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) fn try_load_or_build_trace(
+            dir: &Path,
+            op_hash: u64,
+            record_anchor_ip: usize,
+            meta_hash: u64,
+            ops: &[Op],
+            recorded_ips: &[usize],
+            fallthrough_ip: usize,
+            is_side_trace: bool,
+            slot_types: &[(u16, JitTy)],
+            constants: &[FuseValue],
+        ) -> Option<CompiledTrace> {
+            let sub = record_anchor_ip as u64;
+            if let Some(blob) = read_blob(dir, "trc", op_hash, sub, meta_hash) {
+                if let Some(compiled) = load_native_trace(&blob) {
+                    return Some(compiled);
+                }
+            }
+            let blob = compile_trace_native(
+                ops,
+                recorded_ips,
+                fallthrough_ip,
+                is_side_trace,
+                slot_types,
+                constants,
+                meta_hash,
+            )?;
+            write_blob(dir, "trc", op_hash, sub, &blob);
+            load_native_trace(&blob)
+        }
+
+        /// Compile a chunk's block JIT to relocatable native code, or `None` if
+        /// the chunk is ineligible or its code contains an unsupported
+        /// relocation.
+        pub(crate) fn compile_block_native(chunk: &Chunk) -> Option<NativeBlob> {
+            let BuiltFn {
+                module,
+                mut ctx,
+                fid: _,
+                helper_ids,
+            } = build_block_function(chunk)?;
+            let (code, relocs) = {
+                let isa = module.isa();
+                compile_and_extract(&mut ctx, isa, |index| map_helper_funcid(&helper_ids, index))?
+            };
+            Some(NativeBlob {
+                kind: KIND_BLOCK,
+                code,
+                relocs,
+                entry: 0,
+                ret_is_float: false,
+                need_slots: true,
+                aux: 0,
+            })
+        }
+
+        /// Compile a recorded trace to relocatable native code, or `None` if it
+        /// contains an unsupported relocation.
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) fn compile_trace_native(
+            ops: &[Op],
+            recorded_ips: &[usize],
+            fallthrough_ip: usize,
+            is_side_trace: bool,
+            slot_types: &[(u16, JitTy)],
+            constants: &[FuseValue],
+            meta_hash: u64,
+        ) -> Option<NativeBlob> {
+            let BuiltFn {
+                module,
+                mut ctx,
+                fid: _,
+                helper_ids,
+            } = build_trace_function(
+                ops,
+                recorded_ips,
+                fallthrough_ip,
+                is_side_trace,
+                slot_types,
+                constants,
+            )?;
+            let (code, relocs) = {
+                let isa = module.isa();
+                compile_and_extract(&mut ctx, isa, |index| map_helper_funcid(&helper_ids, index))?
+            };
+            Some(NativeBlob {
+                kind: KIND_TRACE,
+                code,
+                relocs,
+                entry: 0,
+                ret_is_float: false,
+                need_slots: true,
+                aux: meta_hash,
+            })
+        }
     }
 
     // ── Block JIT compilation ──
@@ -1336,9 +2334,20 @@ mod cranelift_jit_impl {
         NoSlotsF(BlockFnNoSlotsF),
     }
 
+    /// Keeps the executable memory backing a [`CompiledBlock`] alive — either a
+    /// `JITModule` (in-memory JIT path) or an mmap'd region of relocated native
+    /// code loaded from the on-disk cache.
+    pub(crate) enum BlockBacking {
+        #[allow(dead_code)]
+        Jit(JITModule),
+        #[cfg(feature = "jit-disk-cache")]
+        #[allow(dead_code)]
+        Native(disk_cache::LoadedNative),
+    }
+
     pub(crate) struct CompiledBlock {
         #[allow(dead_code)]
-        module: JITModule,
+        backing: BlockBacking,
         run: BlockRun,
     }
 
@@ -1608,7 +2617,21 @@ mod cranelift_jit_impl {
         }
     }
 
-    pub(crate) fn compile_block(chunk: &Chunk) -> Option<CompiledBlock> {
+    /// The product of building a tier's Cranelift function *before* emission:
+    /// the owning `JITModule`, the populated `Context`, the function id, and the
+    /// host-helper FuncIds (order `[pow_i64, pow_f64, fmod_f64, lognot]`) used to
+    /// map relocations back to stable host-helper ids when caching native code.
+    /// Consumed either by the in-memory JIT path (define + finalize) or the
+    /// disk-cache native path (raw `ctx.compile` + relocation extraction).
+    pub(crate) struct BuiltFn {
+        module: JITModule,
+        ctx: cranelift_codegen::Context,
+        fid: cranelift_module::FuncId,
+        #[allow(dead_code)]
+        helper_ids: [Option<cranelift_module::FuncId>; 4],
+    }
+
+    pub(crate) fn build_block_function(chunk: &Chunk) -> Option<BuiltFn> {
         let ops = &chunk.ops;
         if !is_block_eligible(chunk) {
             return None;
@@ -1949,6 +2972,23 @@ mod cranelift_jit_impl {
             bcx.finalize();
         }
 
+        Some(BuiltFn {
+            module,
+            ctx,
+            fid,
+            helper_ids: [pow_i64_id, pow_f64_id, fmod_f64_id, lognot_id],
+        })
+    }
+
+    /// In-memory block JIT: build the function and finalize it through the
+    /// `JITModule`. Block functions are always `fn(*mut i64) -> i64`.
+    pub(crate) fn compile_block(chunk: &Chunk) -> Option<CompiledBlock> {
+        let BuiltFn {
+            mut module,
+            mut ctx,
+            fid,
+            helper_ids: _,
+        } = build_block_function(chunk)?;
         module.define_function(fid, &mut ctx).ok()?;
         module.clear_context(&mut ctx);
         module.finalize_definitions().ok()?;
@@ -1957,7 +2997,10 @@ mod cranelift_jit_impl {
         // Future specialization: detect no-slots chunks → NoSlotsI;
         // detect float-returning chunks → SlotsF/NoSlotsF.
         let run = BlockRun::SlotsI(unsafe { std::mem::transmute::<*const u8, BlockFnSlotsI>(ptr) });
-        Some(CompiledBlock { module, run })
+        Some(CompiledBlock {
+            backing: BlockBacking::Jit(module),
+            run,
+        })
     }
 
     // ── Block JIT cache (per-thread, lock-free) ──
@@ -1980,15 +3023,16 @@ mod cranelift_jit_impl {
             RefCell::new(HashMap::new());
     }
 
-    /// Tiered compilation threshold — JIT after N interpreter runs.
-    /// Below this, `try_run_block` returns None so the caller falls back
-    /// to the interpreter. This avoids paying compile cost for one-shot chunks.
-    const HOT_THRESHOLD: u32 = 10;
-
     /// Try to JIT-compile and run a chunk via the block JIT.
     /// Returns `Some(result_i64)` on success, `None` if ineligible OR not yet hot.
+    ///
+    /// The warmup threshold (whole-chunk invocations before compiling) is read
+    /// from the per-thread [`TraceJitConfig::block_threshold`] (default 10), so
+    /// callers can tune it for their workload via `JitCompiler::set_config`.
+    /// Below the threshold this returns `None` and the caller falls back to the
+    /// interpreter — avoiding compile cost for one-shot chunks.
     pub(crate) fn try_run_block(chunk: &Chunk, slots: &mut [i64]) -> Option<i64> {
-        try_run_block_inner(chunk, slots, HOT_THRESHOLD)
+        try_run_block_inner(chunk, slots, cfg_block_threshold())
     }
 
     /// Like `try_run_block` but compiles immediately (no warmup). For tests
@@ -2014,6 +3058,20 @@ mod cranelift_jit_impl {
             entry.hot_count = entry.hot_count.saturating_add(1);
             if entry.hot_count <= threshold {
                 return None; // not hot yet — caller falls back to interpreter
+            }
+
+            // Disk-cache path (on by default): reuse or build relocatable native
+            // code persisted across process restarts, skipping Cranelift codegen.
+            #[cfg(feature = "jit-disk-cache")]
+            {
+                if let Some(dir) = disk_cache::cache_dir() {
+                    if let Some(compiled) = disk_cache::try_load_or_build_block(chunk, &dir) {
+                        let result = compiled.invoke(slots);
+                        entry.compiled = Some(Box::new(compiled));
+                        return Some(result);
+                    }
+                    // Native caching rejected this chunk: fall through to JIT.
+                }
             }
 
             // Compile on threshold cross
@@ -2062,10 +3120,21 @@ mod cranelift_jit_impl {
     /// - returns: the resume IP (also written to `*deopt_info`).
     type TraceFn = unsafe extern "C" fn(*mut i64, *mut super::DeoptInfo) -> i64;
 
+    /// Keeps the executable memory backing a [`CompiledTrace`] alive — either a
+    /// `JITModule` (in-memory JIT path) or an mmap'd region of relocated native
+    /// code loaded from the on-disk cache.
+    pub(crate) enum TraceBacking {
+        #[allow(dead_code)]
+        Jit(JITModule),
+        #[cfg(feature = "jit-disk-cache")]
+        #[allow(dead_code)]
+        Native(disk_cache::LoadedNative),
+    }
+
     /// A compiled trace.
     pub(crate) struct CompiledTrace {
         #[allow(dead_code)]
-        module: JITModule,
+        backing: TraceBacking,
         run: TraceFn,
     }
 
@@ -2119,9 +3188,65 @@ mod cranelift_jit_impl {
 
     thread_local! {
         /// Per-thread tunable thresholds for the tracing JIT. Callers
-        /// override via `JitCompiler::set_config`.
+        /// override via `JitCompiler::set_config`. Initialized from the
+        /// compiled defaults, with optional process-wide env overrides
+        /// (`FUSEVM_JIT_BLOCK_THRESHOLD` / `FUSEVM_JIT_TRACE_THRESHOLD`) so
+        /// re-run-heavy workloads can dial in warmup without recompiling.
         static TRACE_CONFIG: RefCell<super::TraceJitConfig> =
-            RefCell::new(super::TraceJitConfig::defaults());
+            RefCell::new(config_from_env());
+    }
+
+    /// Build the starting `TraceJitConfig` for a thread: the compiled defaults
+    /// with any `FUSEVM_JIT_*_THRESHOLD` env overrides applied. Unset or
+    /// unparsable vars leave the corresponding default untouched.
+    fn config_from_env() -> super::TraceJitConfig {
+        apply_threshold_overrides(
+            super::TraceJitConfig::defaults(),
+            std::env::var("FUSEVM_JIT_BLOCK_THRESHOLD").ok(),
+            std::env::var("FUSEVM_JIT_TRACE_THRESHOLD").ok(),
+        )
+    }
+
+    /// Pure override logic split out from `config_from_env` for testability:
+    /// applies parsed block/trace threshold strings onto `cfg`, ignoring
+    /// missing or unparsable values.
+    fn apply_threshold_overrides(
+        mut cfg: super::TraceJitConfig,
+        block: Option<String>,
+        trace: Option<String>,
+    ) -> super::TraceJitConfig {
+        if let Some(n) = block.and_then(|v| v.trim().parse::<u32>().ok()) {
+            cfg.block_threshold = n;
+        }
+        if let Some(n) = trace.and_then(|v| v.trim().parse::<u32>().ok()) {
+            cfg.trace_threshold = n;
+        }
+        cfg
+    }
+
+    #[cfg(test)]
+    mod env_override_tests {
+        use super::apply_threshold_overrides;
+        use crate::TraceJitConfig;
+
+        #[test]
+        fn overrides_parse_and_apply() {
+            let cfg = apply_threshold_overrides(
+                TraceJitConfig::defaults(),
+                Some("0".to_string()),
+                Some(" 8 ".to_string()),
+            );
+            assert_eq!(cfg.block_threshold, 0);
+            assert_eq!(cfg.trace_threshold, 8);
+        }
+
+        #[test]
+        fn missing_or_garbage_leaves_defaults() {
+            let d = TraceJitConfig::defaults();
+            let cfg = apply_threshold_overrides(d, None, Some("not-a-number".to_string()));
+            assert_eq!(cfg.block_threshold, d.block_threshold);
+            assert_eq!(cfg.trace_threshold, d.trace_threshold);
+        }
     }
 
     // Field readers used internally by trace_lookup / is_trace_eligible /
@@ -2131,6 +3256,10 @@ mod cranelift_jit_impl {
     #[inline(always)]
     fn cfg_trace_threshold() -> u32 {
         TRACE_CONFIG.with(|c| c.borrow().trace_threshold)
+    }
+    #[inline(always)]
+    fn cfg_block_threshold() -> u32 {
+        TRACE_CONFIG.with(|c| c.borrow().block_threshold)
     }
     #[inline(always)]
     fn cfg_max_side_exits() -> u32 {
@@ -2314,20 +3443,56 @@ mod cranelift_jit_impl {
         }
 
         let key = (chunk.op_hash, record_anchor_ip);
-        let compiled = match compile_trace_kinded(
-            ops,
-            recorded_ips,
-            close_anchor_ip,
-            fallthrough_ip,
-            is_side_trace,
-            &slot_types,
-            constants,
-        ) {
-            Some(c) => c,
-            None => {
-                trace_abort(chunk, record_anchor_ip);
-                return false;
+
+        // Disk-cache path (on by default): reuse or build relocatable native
+        // trace code persisted across process restarts. The trace is keyed by
+        // (op_hash, record_anchor_ip); a content hash of the recording guards
+        // against a stale file recorded for a different path.
+        #[cfg_attr(not(feature = "jit-disk-cache"), allow(unused_mut))]
+        let mut compiled: Option<CompiledTrace> = None;
+        #[cfg(feature = "jit-disk-cache")]
+        {
+            if let Some(dir) = disk_cache::cache_dir() {
+                let meta_hash = trace_meta_hash(
+                    ops,
+                    recorded_ips,
+                    fallthrough_ip,
+                    is_side_trace,
+                    &slot_types,
+                    constants,
+                );
+                compiled = disk_cache::try_load_or_build_trace(
+                    &dir,
+                    chunk.op_hash,
+                    record_anchor_ip,
+                    meta_hash,
+                    ops,
+                    recorded_ips,
+                    fallthrough_ip,
+                    is_side_trace,
+                    &slot_types,
+                    constants,
+                );
             }
+        }
+
+        let compiled = match compiled {
+            Some(c) => c,
+            None => match compile_trace_kinded(
+                ops,
+                recorded_ips,
+                close_anchor_ip,
+                fallthrough_ip,
+                is_side_trace,
+                &slot_types,
+                constants,
+            ) {
+                Some(c) => c,
+                None => {
+                    trace_abort(chunk, record_anchor_ip);
+                    return false;
+                }
+            },
         };
         TRACE_CACHE_TLS.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
@@ -2799,14 +3964,41 @@ mod cranelift_jit_impl {
         )
     }
 
-    fn compile_trace_inner(
+    /// Content hash of everything that determines a trace's native code, used
+    /// as the disk-cache verification word so a cache file recorded for a
+    /// different path/types is rejected even when the `(op_hash, anchor)` key
+    /// collides. Stable across processes of the same build.
+    #[cfg(feature = "jit-disk-cache")]
+    fn trace_meta_hash(
         ops: &[Op],
         recorded_ips: &[usize],
         fallthrough_ip: usize,
         is_side_trace: bool,
         slot_types: &[(u16, JitTy)],
         constants: &[FuseValue],
-    ) -> Option<CompiledTrace> {
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{ops:?}").hash(&mut h);
+        recorded_ips.hash(&mut h);
+        fallthrough_ip.hash(&mut h);
+        is_side_trace.hash(&mut h);
+        for (slot, ty) in slot_types {
+            slot.hash(&mut h);
+            (matches!(ty, JitTy::Float) as u8).hash(&mut h);
+        }
+        format!("{constants:?}").hash(&mut h);
+        h.finish()
+    }
+
+    fn build_trace_function(
+        ops: &[Op],
+        recorded_ips: &[usize],
+        fallthrough_ip: usize,
+        is_side_trace: bool,
+        slot_types: &[(u16, JitTy)],
+        constants: &[FuseValue],
+    ) -> Option<BuiltFn> {
         // Quick lookup: slot index → its kind (Int / Float).
         let slot_kind_of: HashMap<u16, JitTy> = slot_types.iter().copied().collect();
         // Defensive: catch struct-layout drift between Rust types and the
@@ -3319,16 +4511,49 @@ mod cranelift_jit_impl {
             bcx.finalize();
         }
 
+        Some(BuiltFn {
+            module,
+            ctx,
+            fid,
+            helper_ids: [pow_i64_id, pow_f64_id, fmod_f64_id, lognot_id],
+        })
+    }
+
+    fn compile_trace_inner(
+        ops: &[Op],
+        recorded_ips: &[usize],
+        fallthrough_ip: usize,
+        is_side_trace: bool,
+        slot_types: &[(u16, JitTy)],
+        constants: &[FuseValue],
+    ) -> Option<CompiledTrace> {
+        let BuiltFn {
+            mut module,
+            mut ctx,
+            fid,
+            helper_ids: _,
+        } = build_trace_function(
+            ops,
+            recorded_ips,
+            fallthrough_ip,
+            is_side_trace,
+            slot_types,
+            constants,
+        )?;
         module.define_function(fid, &mut ctx).ok()?;
         module.clear_context(&mut ctx);
         module.finalize_definitions().ok()?;
         let ptr = module.get_finalized_function(fid);
         let run = unsafe { std::mem::transmute::<*const u8, TraceFn>(ptr) };
-        Some(CompiledTrace { module, run })
+        Some(CompiledTrace {
+            backing: TraceBacking::Jit(module),
+            run,
+        })
     }
 
     /// Test-only: clear the trace cache. Public for tests within this crate.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn trace_cache_clear() {
         TRACE_CACHE_TLS.with(|c| c.borrow_mut().clear());
     }
@@ -3597,6 +4822,100 @@ impl JitCompiler {
     /// No-op stub for `is_linear_eligible` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn is_linear_eligible(&self, _chunk: &crate::Chunk) -> bool {
         false
+    }
+
+    /// Set the directory used to persist native linear-JIT code across
+    /// processes (the on-disk JIT cache). Pass `None` to clear the override so
+    /// resolution falls back to the `FUSEVM_JIT_CACHE_DIR` environment variable
+    /// and then the default (`~/.cache/fusevm-jit`).
+    ///
+    /// Disk caching is **on by default** when the `jit-disk-cache` feature is
+    /// enabled; set `FUSEVM_JIT_CACHE_DIR=off` to disable it. Without the
+    /// feature this is a no-op.
+    #[cfg(feature = "jit-disk-cache")]
+    pub fn set_jit_cache_dir(&self, dir: Option<std::path::PathBuf>) {
+        cranelift_jit_impl::disk_cache::set_cache_dir(dir);
+    }
+
+    /// The active on-disk JIT cache directory, or `None` if caching is
+    /// disabled (`FUSEVM_JIT_CACHE_DIR=off`). Defaults to `~/.cache/fusevm-jit`.
+    #[cfg(feature = "jit-disk-cache")]
+    pub fn jit_cache_dir(&self) -> Option<std::path::PathBuf> {
+        cranelift_jit_impl::disk_cache::cache_dir()
+    }
+
+    /// Total size in bytes of the on-disk JIT cache, or `None` if caching is
+    /// disabled. Counts only `*.fjit` blobs (ignores in-flight temp files).
+    #[cfg(feature = "jit-disk-cache")]
+    pub fn jit_cache_size_bytes(&self) -> Option<u64> {
+        cranelift_jit_impl::disk_cache::cache_dir()
+            .map(|d| cranelift_jit_impl::disk_cache::cache_size_bytes(&d))
+    }
+
+    /// Set the cap on total on-disk cache size. `Some(0)` means unlimited
+    /// (never evict); `None` restores the default resolution
+    /// (`FUSEVM_JIT_CACHE_MAX_BYTES` env var, then 256 MiB). When the cache
+    /// exceeds the cap, the oldest blobs are evicted (down to 80% of the cap)
+    /// opportunistically as new entries are written.
+    #[cfg(feature = "jit-disk-cache")]
+    pub fn set_jit_cache_max_bytes(&self, limit: Option<u64>) {
+        cranelift_jit_impl::disk_cache::set_max_bytes(limit);
+    }
+
+    /// Force an immediate eviction pass against the current cap. Returns the
+    /// number of bytes freed (0 if caching is disabled, the cap is unlimited,
+    /// or the cache is already under the cap).
+    #[cfg(feature = "jit-disk-cache")]
+    pub fn prune_jit_cache(&self) -> u64 {
+        match cranelift_jit_impl::disk_cache::cache_dir() {
+            Some(d) => {
+                cranelift_jit_impl::disk_cache::prune(&d, cranelift_jit_impl::disk_cache::max_bytes())
+            }
+            None => 0,
+        }
+    }
+
+    /// Delete every blob in the on-disk JIT cache. Returns the number of files
+    /// removed (0 if caching is disabled). The cache repopulates lazily on the
+    /// next run.
+    #[cfg(feature = "jit-disk-cache")]
+    pub fn clear_jit_cache(&self) -> usize {
+        match cranelift_jit_impl::disk_cache::cache_dir() {
+            Some(d) => cranelift_jit_impl::disk_cache::clear(&d),
+            None => 0,
+        }
+    }
+
+    /// No-op stub when the `jit-disk-cache` feature is disabled.
+    #[cfg(not(feature = "jit-disk-cache"))]
+    pub fn set_jit_cache_dir(&self, _dir: Option<std::path::PathBuf>) {}
+
+    /// Always `None` when the `jit-disk-cache` feature is disabled.
+    #[cfg(not(feature = "jit-disk-cache"))]
+    pub fn jit_cache_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Always `None` when the `jit-disk-cache` feature is disabled.
+    #[cfg(not(feature = "jit-disk-cache"))]
+    pub fn jit_cache_size_bytes(&self) -> Option<u64> {
+        None
+    }
+
+    /// No-op stub when the `jit-disk-cache` feature is disabled.
+    #[cfg(not(feature = "jit-disk-cache"))]
+    pub fn set_jit_cache_max_bytes(&self, _limit: Option<u64>) {}
+
+    /// Always `0` when the `jit-disk-cache` feature is disabled.
+    #[cfg(not(feature = "jit-disk-cache"))]
+    pub fn prune_jit_cache(&self) -> u64 {
+        0
+    }
+
+    /// Always `0` when the `jit-disk-cache` feature is disabled.
+    #[cfg(not(feature = "jit-disk-cache"))]
+    pub fn clear_jit_cache(&self) -> usize {
+        0
     }
 
     /// Try to compile and run a chunk via the block JIT (handles loops/branches).

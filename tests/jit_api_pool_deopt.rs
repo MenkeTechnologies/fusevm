@@ -249,6 +249,7 @@ fn trace_jit_config_default_trait_uses_defaults() {
 fn trace_jit_config_can_be_customized() {
     let c = TraceJitConfig {
         trace_threshold: 10,
+        block_threshold: 5,
         max_side_exits: 5,
         max_inline_recursion: 2,
         max_trace_chain: 2,

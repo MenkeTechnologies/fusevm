@@ -85,6 +85,13 @@ cargo add fusevm
 git clone https://github.com/MenkeTechnologies/fusevm && cd fusevm && cargo build
 ```
 
+**Cargo features:**
+
+| Feature | Effect |
+|---------|--------|
+| `jit` | Cranelift-backed native JIT (linear, block, and tracing tiers). |
+| `jit-disk-cache` | Persists compiled native code to `~/.cache/fusevm-jit` so codegen is skipped across process restarts. Implies `jit`; on by default once enabled (see [JIT Compilation](#0x07-jit-compilation)). |
+
 ---
 
 ## [0x02] USAGE
@@ -258,8 +265,25 @@ fusevm runs three JIT tiers in increasing order of optimization power and compil
 | Tier | Trigger | Coverage | Speculation |
 |------|---------|----------|-------------|
 | **Linear** | `is_linear_eligible` + first call | Straight-line expression chunks; returns `Value` (int or float) | None — IR matches bytecode exactly |
-| **Block** | `is_block_eligible` + 10 invocations | Whole-chunk CFG (loops, branches, fused backedges) | None — slot ops assume i64 |
+| **Block** | `is_block_eligible` + 1 invocation | Whole-chunk CFG (loops, branches, fused backedges) | None — slot ops assume i64 |
 | **Tracing** | 50 backedges through any loop header | Hot path through anything; recorded loop body compiled with type-specialized IR | Slot-type entry guard; deopt to interpreter on guard miss |
+
+#### Tuning warmup for re-run-heavy workloads
+
+The block (default **1**) and tracing (default **50**) warmup thresholds are how many times a chunk must run before that tier compiles it. They are tunable two ways:
+
+- **Per process, no recompile** — set environment variables (great for a shell rc when you re-run the same scripts constantly):
+
+  ```sh
+  export FUSEVM_JIT_BLOCK_THRESHOLD=0   # block-JIT the whole chunk on its FIRST run (max eager)
+  export FUSEVM_JIT_TRACE_THRESHOLD=10  # arm hot-loop traces sooner
+  ```
+
+  These are read once per thread when the JIT is first touched, applied on top of the compiled defaults.
+
+- **Per thread, programmatically** — via `TraceJitConfig` (`block_threshold` / `trace_threshold`) and `JitCompiler::set_config`.
+
+For workloads that run the same scripts over and over, combine a low warmup with the **`jit-disk-cache`** feature (on by default): the warmup decides *when* a tier engages, and the disk cache makes the resulting native code free to reload on the next run — so you get AOT-like speed without explicitly AOT-compiling. Setting `FUSEVM_JIT_BLOCK_THRESHOLD=0` is the most aggressive: every block-eligible chunk is compiled to native on its first invocation and reloaded from `~/.cache/fusevm-jit` on subsequent runs. The trade-off is a one-time codegen cost the very first time a chunk is ever seen (paid once, then cached), so raise the thresholds again for scripts that genuinely run only once.
 
 Tracing JIT is opt-in per VM (`vm.enable_tracing_jit()`). The recorder anchors at backward branches, captures the executed op sequence on the next iteration through the header, and installs a compiled trace that runs the loop body in native code until the loop's exit condition becomes false. Slot type changes between invocations cause the entry guard to refuse the trace; after 5 such guard mismatches the trace is blacklisted and never retried.
 
@@ -277,9 +301,22 @@ Tracing JIT is opt-in per VM (`vm.enable_tracing_jit()`). The recorder anchors a
 
 **Bounded recursion inlining (phase 8).** The recorder's hard-no on self-recursive calls is relaxed to a depth cap (`MAX_INLINE_RECURSION` = 4 levels). A self-call up to that depth is inlined like any other Call; deeper recursion aborts the trace and the interpreter handles it. Combined with phase 4's frame materialization, this enables tracing of tail-recursive helpers up to the cap.
 
-**Side-trace stitching (phase 9).** When a main trace's side-exit fires repeatedly at the same IP, the recorder rearms at that IP and records a *side trace*: the bytecode path from the side-exit forward to the loop's backward branch. `TraceRecorder` splits its anchor into `record_anchor_ip` (cache key — the side-exit IP) and `close_anchor_ip` (the enclosing loop's header where the closing branch lands). Side traces compile via `trace_install_with_kind` and don't loop in their own IR — both directions of the closing branch exit, returning either the close target (so the main trace runs the next iteration) or the loop's fallthrough IP (loop done). The VM's chained-dispatch path runs after each main-trace deopt: if a side trace is registered at the resume IP, dispatch it; otherwise bump the main trace's `side_exit_count` toward auto-blacklist. Chains are bounded by `MAX_TRACE_CHAIN` (4) per backward-branch hop. Phase 6's blacklist counter is reserved for cases where no side trace is helping — productive deopts don't penalize the main trace.
+**Side-trace stitching (phase 9).** When a main trace's side-exit fires repeatedly at the same IP, the recorder rearms at that IP and records a *side trace*: the bytecode path from the side-exit forward to the loop's backward branch. `TraceRecorder` splits its anchor into `record_anchor_ip` (cache key — the side-exit IP) and `close_anchor_ip` (the enclosing loop's header where the closing branch lands). Side traces compile via `trace_install_with_kind` and don't loop in their own IR — both directions of the closing branch exit, returning either the close target (so the main trace runs the next iteration) or the loop's fallthrough IP (loop done). The VM's chained-dispatch path runs after each main-trace deopt: if a side trace is registered at the resume IP, dispatch it; otherwise bump the main trace's `side_exit_count` toward auto-blacklist. Chains are bounded by `MAX_TRACE_CHAIN` (4) per backward-branch hop. Phase 6's blacklist counter is reserved for cases where no side trace is helping — productive deopts don't penalize the main trace. Side traces use the same eligibility rules as main traces and don't recursively spawn further side traces from their own deopts (their side-exits still bump the main trace's blacklist counter).
 
-**Deferred refinement.** A built-in disk-backed cache implementation is out of scope; the `TraceMetadata` API gives users a clean integration point. Phase 9 ships a working stitching path with the conservative restriction that side traces use the same eligibility rules as main traces and don't recursively spawn further side traces from their own deopts (their side-exits still bump main trace's blacklist counter).
+**Persistent native-code disk cache (`jit-disk-cache`).** Enable with `cargo add fusevm --features jit-disk-cache` to cache compiled **native code** to disk, skipping Cranelift codegen across process restarts — a big win for workloads that re-launch the VM repeatedly (e.g. running a large test suite over and over). The cache covers **all three tiers** (linear, block, tracing) and is **on by default once the feature is enabled**, writing to `~/.cache/fusevm-jit`. Override the directory with the `FUSEVM_JIT_CACHE_DIR` env var or `JitCompiler::set_jit_cache_dir(Some(dir))`; disable at runtime with `FUSEVM_JIT_CACHE_DIR=off` or `set_jit_cache_dir(None)`.
+
+Cache files are tier-tagged (`.lin.` / `.blk.` / `.trc.`) and keyed by the chunk's op-hash (the tracing tier additionally keys on the record-anchor IP and verifies a content hash over the recorded ops, IPs, slot types, and constants, so divergent recorded paths never collide). Blobs store the native code plus a small relocation table re-patched on load; loading mmaps the code with W^X handling (`pthread_jit_write_protect_np` + icache invalidation on Apple Silicon, `mprotect` elsewhere). Writes publish via a unique temp file + atomic rename, so the cache is safe under many concurrent processes. The loader is **conservative**: any chunk whose code carries a relocation other than a known host-helper call falls back to the in-memory JIT, so an untested target degrades to "no caching" rather than miscompiling. The cache is **behavior-transparent** — it only eliminates Cranelift codegen time; tier selection, warmup thresholds, and results are identical to an uncached run. Benchmark (`cargo bench --features jit-disk-cache --bench jit_disk_cache`): a cached block load is ~35µs versus ~152µs for cold codegen.
+
+**Size control.** Each blob is small — roughly 100 bytes for a linear chunk, up to a few KB for block/trace — and the cache writes one blob per unique JITable segment per script version, so it grows slowly but is never *automatically* trimmed by op-hash (an edited script produces new hashes; the old blobs linger). To keep it bounded there's a **total-size cap, default 256 MiB**, enforced by **oldest-first (mtime) eviction** down to 80% of the cap, applied opportunistically as new blobs are written (so no scan cost on most writes). Controls:
+
+| Knob | Effect |
+|------|--------|
+| `FUSEVM_JIT_CACHE_MAX_BYTES` | Cap as bytes or with a `k`/`m`/`g` suffix (e.g. `512m`, `2g`). `0`/`off`/`unlimited` disables eviction. Overridden by the programmatic setter. |
+| `JitCompiler::set_jit_cache_max_bytes(Some(n))` | Same cap programmatically; `Some(0)` = unlimited, `None` = restore env/default resolution. |
+| `JitCompiler::jit_cache_size_bytes()` | Current total cache size in bytes (`None` if disabled). |
+| `JitCompiler::prune_jit_cache()` | Force an immediate eviction pass against the cap; returns bytes freed. |
+| `JitCompiler::clear_jit_cache()` | Delete every blob (repopulates lazily next run); returns files removed. |
+| `rm -rf ~/.cache/fusevm-jit` | Manual nuke. |
 
 ---
 

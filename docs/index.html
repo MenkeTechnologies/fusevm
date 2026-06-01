@@ -466,9 +466,15 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         <table class="arch-table">
           <tr><th>Tier</th><th>Trigger</th><th>Coverage</th><th>Speculation</th></tr>
           <tr><td><code>Linear</code></td><td>first call</td><td>Straight-line expression chunks; returns <code>Value</code> (int or float)</td><td>None — IR matches bytecode exactly</td></tr>
-          <tr><td><code>Block</code></td><td>≥ 10 invocations</td><td>Whole-chunk CFG (loops, branches, fused backedges)</td><td>None — slot ops assume i64</td></tr>
+          <tr><td><code>Block</code></td><td>≥ 1 invocation (default)</td><td>Whole-chunk CFG (loops, branches, fused backedges)</td><td>None — slot ops assume i64</td></tr>
           <tr><td><code>Tracing</code></td><td>≥ 50 backedges through any loop header</td><td>Hot path through anything; recorded loop body compiled with type-specialized IR</td><td>Slot-type entry guard + per-branch <code>brif</code> guards; deopts to interpreter on guard miss</td></tr>
         </table>
+
+        <p>
+          The block (default <strong>1</strong>) and tracing (default <strong>50</strong>) warmup thresholds — how many runs before a tier compiles a chunk — are tunable per process via the
+          <code>FUSEVM_JIT_BLOCK_THRESHOLD</code> and <code>FUSEVM_JIT_TRACE_THRESHOLD</code> environment variables (read once per thread when the JIT is first touched), or per thread via
+          <code>TraceJitConfig</code> + <code>JitCompiler::set_config</code>. For workloads that re-run the same scripts repeatedly, pair a low warmup with the on-by-default <code>jit-disk-cache</code> feature: the warmup picks <em>when</em> a tier engages and the disk cache makes the native code free to reload next run — AOT-like speed without explicit AOT. Setting <code>FUSEVM_JIT_BLOCK_THRESHOLD=0</code> is the most aggressive (block-compile every eligible chunk on its first run, then reload from cache); raise the thresholds again for scripts that genuinely run only once.
+        </p>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         Tracing JIT is opt-in per <code>VM</code> via <code>vm.enable_tracing_jit()</code>. When enabled,
@@ -493,6 +499,33 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
           <tr><td>Side-trace stitching from hot deopt sites</td><td>9</td><td>Recorder splits <code>record_anchor_ip</code> (cache key) from <code>close_anchor_ip</code> (loop header); side traces compile via <code>trace_install_with_kind</code> and don't loop in their own IR; chained dispatch up to <code>MAX_TRACE_CHAIN</code> hops</td></tr>
           <tr><td>Synergistic three-tier auto-dispatch</td><td>10</td><td><code>VM::run()</code> consults block JIT first, then tracing JIT, then interpreter — block-eligible chunks short-circuit before any recording happens</td></tr>
           <tr><td>Configurable thresholds + float slots + bulk persist</td><td>tune</td><td><code>TraceJitConfig</code> for per-thread tuning; <code>SlotKind::Float</code> slots stored as i64 bit-patterns and bit-cast through; <code>trace_export_all</code> / <code>trace_import_all</code> for batch I/O</td></tr>
+        </table>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Persistent native-code disk cache</h3>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Enable the <code>jit-disk-cache</code> feature (<code>cargo add fusevm --features jit-disk-cache</code>)
+        to cache compiled <strong>native code</strong> to disk, skipping Cranelift codegen across process
+        restarts — a big win for workloads that re-launch the VM repeatedly (e.g. running a large test
+        suite over and over). It covers <strong>all three tiers</strong> (linear, block, tracing) and is
+        <strong>on by default once the feature is enabled</strong>, writing to <code>~/.cache/fusevm-jit</code>.
+        Override the directory with the <code>FUSEVM_JIT_CACHE_DIR</code> env var or
+        <code>JitCompiler::set_jit_cache_dir(Some(dir))</code>; disable at runtime with
+        <code>FUSEVM_JIT_CACHE_DIR=off</code> or <code>set_jit_cache_dir(None)</code>. This is distinct from
+        the caller-owned <code>TraceMetadata</code> export below: the disk cache persists the finished
+        machine code, while <code>TraceMetadata</code> persists the recorder's decisions (and still pays
+        codegen on restore).</p>
+
+        <table class="arch-table">
+          <tr><th>Property</th><th>Detail</th></tr>
+          <tr><td>Tiers cached</td><td>Linear, block, and tracing — files tier-tagged <code>.lin.</code> / <code>.blk.</code> / <code>.trc.</code></td></tr>
+          <tr><td>Keying</td><td>Chunk op-hash; tracing tier also keys on record-anchor IP + a content hash over recorded ops, IPs, slot types, and constants so divergent paths never collide</td></tr>
+          <tr><td>Loading</td><td>mmaps native code + re-patches a small relocation table; W^X handled via <code>pthread_jit_write_protect_np</code> + icache invalidation on Apple Silicon, <code>mprotect</code> elsewhere</td></tr>
+          <tr><td>Concurrency</td><td>Writes publish via unique temp file + atomic rename — safe for the many-processes-spawning-VMs workload</td></tr>
+          <tr><td>Size control</td><td>Total-size cap (default <strong>256&nbsp;MiB</strong>) with oldest-first (mtime) eviction down to 80% of the cap, applied opportunistically on write. Tune via <code>FUSEVM_JIT_CACHE_MAX_BYTES</code> (accepts <code>k</code>/<code>m</code>/<code>g</code> suffixes; <code>0</code>/<code>off</code>/<code>unlimited</code> disables eviction) or <code>set_jit_cache_max_bytes</code>; inspect with <code>jit_cache_size_bytes</code>, force a pass with <code>prune_jit_cache</code>, wipe with <code>clear_jit_cache</code></td></tr>
+          <tr><td>Transparency</td><td>Only eliminates Cranelift codegen time — tier selection, warmup thresholds, and results are identical to an uncached run</td></tr>
+          <tr><td>Safety</td><td>Conservative: any chunk whose code carries a relocation other than a known host-helper call falls back to the in-memory JIT, so an untested target degrades to "no caching" rather than miscompiling</td></tr>
+          <tr><td>Benchmark</td><td>Cached block load ~35&nbsp;µs vs ~152&nbsp;µs cold codegen (<code>cargo bench --features jit-disk-cache --bench jit_disk_cache</code>)</td></tr>
         </table>
 
         <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Speedup over interpreter</h3>
@@ -542,12 +575,13 @@ vm.enable_tracing_jit();
 <span class="keyword">let</span> jit = JitCompiler::new();
 jit.set_config(TraceJitConfig {
     trace_threshold: 20,        <span class="comment">// arm earlier on hot loops</span>
+    block_threshold: 0,         <span class="comment">// block-JIT the whole chunk on its first run (default is 1)</span>
     max_side_exits: 100,        <span class="comment">// be more patient with mismatches</span>
     ..TraceJitConfig::defaults()
 });
 
-<span class="comment">// Persistent cache: bulk export every trace for this chunk, write to</span>
-<span class="comment">// disk in your format of choice, restore on next process start.</span>
+<span class="comment">// Caller-owned persistence of recorder decisions (still re-runs codegen on</span>
+<span class="comment">// restore). For zero-codegen restarts, prefer the jit-disk-cache feature above.</span>
 <span class="keyword">let</span> metas = jit.trace_export_all(&amp;chunk);
 std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&amp;metas)?)?;
 
@@ -560,7 +594,7 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
           <tr><th>Type</th><th>Role</th></tr>
           <tr><td><code>JitCompiler</code></td><td>Stateless handle over the thread-local trace + block caches; entry point for all tier APIs</td></tr>
           <tr><td><code>JitExtension</code></td><td>Frontend-provided trait registering language-specific extended op JIT support</td></tr>
-          <tr><td><code>TraceJitConfig</code></td><td>Per-thread tunable thresholds (<code>trace_threshold</code>, <code>max_side_exits</code>, <code>max_inline_recursion</code>, <code>max_trace_chain</code>, <code>max_trace_len</code>)</td></tr>
+          <tr><td><code>TraceJitConfig</code></td><td>Per-thread tunable thresholds (<code>trace_threshold</code>, <code>block_threshold</code>, <code>max_side_exits</code>, <code>max_inline_recursion</code>, <code>max_trace_chain</code>, <code>max_trace_len</code>)</td></tr>
           <tr><td><code>SlotKind</code></td><td>Slot type tag (Int / Float) for the tracing JIT's entry guard. Float slots stored as i64 bit-patterns and bit-cast through</td></tr>
           <tr><td><code>TraceLookup</code></td><td>Dispatch outcome at a backward branch (<code>NotHot</code> / <code>StartRecording</code> / <code>Ran</code> / <code>GuardMismatch</code> / <code>Skip</code>)</td></tr>
           <tr><td><code>DeoptInfo</code> / <code>DeoptFrame</code></td><td><code>#[repr(C)]</code> out-params trace fns populate to materialize inlined frames + value-stack on side-exit</td></tr>

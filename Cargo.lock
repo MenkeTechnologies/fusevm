@@ -395,7 +395,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fusevm"
-version = "0.12.4"
+version = "0.13.0"
 dependencies = [
  "bincode",
  "cranelift-codegen",
@@ -405,6 +405,7 @@ dependencies = [
  "cranelift-native",
  "criterion",
  "glob",
+ "libc",
  "serde",
  "serde_json",
  "tracing",

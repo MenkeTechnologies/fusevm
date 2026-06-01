@@ -1,6 +1,6 @@
 [package]
 name = "fusevm"
-version = "0.12.4"
+version = "0.13.0"
 edition = "2021"
 description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear/block/tracing)"
 license = "MIT"
@@ -21,10 +21,16 @@ cranelift-codegen = { version = "0.130", optional = true }
 cranelift-frontend = { version = "0.130", optional = true }
 cranelift-native = { version = "0.130", optional = true }
 cranelift-module = { version = "0.130", optional = true }
+libc = { version = "0.2", optional = true }
 
 [features]
 default = []
 jit = ["cranelift-jit", "cranelift-codegen", "cranelift-frontend", "cranelift-native", "cranelift-module"]
+# Persistent on-disk cache of native JIT code. Skips Cranelift codegen across
+# process restarts. On by default once enabled — caches to ~/.cache/fusevm-jit
+# (override with FUSEVM_JIT_CACHE_DIR or JitCompiler::set_jit_cache_dir, disable
+# with FUSEVM_JIT_CACHE_DIR=off). Pulls in `libc` for executable memory mapping.
+jit-disk-cache = ["jit", "dep:libc"]
 
 [dev-dependencies]
 serde_json = "1"
@@ -53,3 +59,8 @@ required-features = ["jit"]
 name = "jit_trace"
 harness = false
 required-features = ["jit"]
+
+[[bench]]
+name = "jit_disk_cache"
+harness = false
+required-features = ["jit-disk-cache"]

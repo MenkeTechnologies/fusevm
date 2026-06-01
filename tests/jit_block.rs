@@ -238,3 +238,61 @@ fn block_jit_slots_written_back() {
     assert_eq!(slots[0], 45); // sum 0..10
     assert_eq!(slots[1], 10); // i after loop
 }
+
+/// A unique block-eligible sum loop (limit picks the op_hash so the per-thread
+/// block cache entry doesn't collide with other tests on the same thread).
+fn unique_sum_loop(limit: i32) -> fusevm::Chunk {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::PushFrame, 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::PreIncSlotVoid(1), 1);
+    b.emit(Op::SlotLtIntJumpIfFalse(1, limit, 12), 1);
+    b.emit(Op::Jump(5), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.build()
+}
+
+#[test]
+fn block_threshold_is_configurable() {
+    use fusevm::TraceJitConfig;
+    let jit = JitCompiler::new();
+
+    // Lower the block warmup to 1: the chunk must stay interpreted (None) on
+    // the first call and compile (Some) on the second.
+    jit.set_config(TraceJitConfig {
+        block_threshold: 1,
+        ..TraceJitConfig::defaults()
+    });
+    let chunk = unique_sum_loop(37);
+    let mut slots = vec![0i64; 4];
+    assert_eq!(
+        jit.try_run_block(&chunk, &mut slots),
+        None,
+        "first call is below threshold 1"
+    );
+    assert_eq!(
+        jit.try_run_block(&chunk, &mut slots),
+        Some(666),
+        "second call should compile and run with block_threshold=1"
+    );
+
+    // With an explicitly higher threshold, a different chunk must still be None
+    // on its second call — proving the knob (not the compiled default) drives
+    // tier selection. Uses an explicit value so the test is independent of
+    // whatever the shipped default `block_threshold` happens to be.
+    jit.set_config(TraceJitConfig {
+        block_threshold: 5,
+        ..TraceJitConfig::defaults()
+    });
+    let chunk2 = unique_sum_loop(38);
+    let mut slots2 = vec![0i64; 4];
+    assert_eq!(jit.try_run_block(&chunk2, &mut slots2), None);
+    assert_eq!(jit.try_run_block(&chunk2, &mut slots2), None);
+}
