@@ -1,6 +1,6 @@
 [package]
 name = "fusevm"
-version = "0.13.0"
+version = "0.13.2"
 edition = "2021"
 description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear/block/tracing)"
 license = "MIT"
@@ -16,6 +16,7 @@ categories = ["compilers"]
 serde = { version = "1", features = ["derive", "rc"] }
 tracing = "0.1"
 glob = "0.3"
+chrono = "0.4"
 cranelift-jit = { version = "0.130", optional = true }
 cranelift-codegen = { version = "0.130", optional = true }
 cranelift-frontend = { version = "0.130", optional = true }

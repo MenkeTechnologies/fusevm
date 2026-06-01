@@ -254,6 +254,12 @@ pub enum Op {
     AddAssignSlotVoid(u16, u16),
     /// Void-context pre-increment: `++$slot` (no stack push)
     PreIncSlotVoid(u16),
+    /// Slot-indexed pre-decrement: `--$slot`, pushes the new value
+    PreDecSlot(u16),
+    /// Slot-indexed post-increment: `$slot++`, pushes the old value
+    PostIncSlot(u16),
+    /// Slot-indexed post-decrement: `$slot--`, pushes the old value
+    PostDecSlot(u16),
 
     // ── Builtins ──
     /// Call a registered builtin by ID: (builtin_id, arg_count)
@@ -335,6 +341,122 @@ pub enum Op {
     WithRedirectsBegin(u8),
     /// End scoped redirection block — restore fd state.
     WithRedirectsEnd,
+
+    // ── AWK ops (first-class, like the shell ops above) ──
+    // AWK semantics — field access, record I/O, `print`/`printf` with
+    // `OFS`/`ORS`/`OFMT`, `getline`, the string builtins, and `SUBSEP`
+    // associative arrays — are a coherent universal vocabulary, so they are
+    // defined here as named variants for type safety and visible IR rather
+    // than opaque `ExtendedWide` magic numbers. They are still *dispatched*
+    // through the frontend-registered [`crate::awk_host::AwkHost`] (AWK values
+    // carry POSIX numeric-string duality the core `Value` can't represent), and
+    // each variant maps 1:1 onto a `crate::awk_builtins::AWK_*` op id. The VM
+    // routes them to the same `dispatch_awk` path as the reserved
+    // `ExtendedWide` AWK range, so behavior is identical; these just give
+    // frontends a typed, self-documenting alternative to hand-rolled ids.
+
+    /// `$i` — read field `i`; index popped from stack, pushes the field value.
+    AwkFieldGet,
+    /// `$i = v` — assign field `i`. Stack `[value, index]`; rebuilds `$0`/`NF`.
+    AwkFieldSet,
+    /// `NF` — push the current field count.
+    AwkNf,
+    /// `$0 = v` — replace the whole record (resplit). Stack `[value]`.
+    AwkSetRecord,
+    /// Read a special AWK variable by name-pool index (`FS`/`NR`/`OFS`/...).
+    AwkSpecialGet(u16),
+    /// Assign a special AWK variable by name-pool index. Stack `[value]`.
+    AwkSpecialSet(u16),
+    /// `print a, b, ...` — pops `u8` args, joins with `OFS`, ends with `ORS`.
+    AwkPrint(u8),
+    /// `printf fmt, ...` — pops `u8` args (last popped is the format).
+    AwkPrintf(u8),
+    /// `sprintf(fmt, ...)` — like `AwkPrintf` but pushes the formatted string.
+    AwkSprintf(u8),
+    /// `getline` family. `u8` encodes the source kind (see
+    /// `crate::awk_builtins::getline_source`); pushes status (1/0/-1).
+    AwkGetline(u8),
+    /// `length` / `length(x)` — pops `u8` args (0 ⇒ `length($0)`).
+    AwkLength(u8),
+    /// `substr(s, m [, n])` — pops `u8` args (2 or 3).
+    AwkSubstr(u8),
+    /// `index(s, t)` — stack `[s, t]`; pushes 1-based position or 0.
+    AwkIndex,
+    /// `split(s, arr [, fs])` — pops `u8` args; pushes field count.
+    AwkSplit(u8),
+    /// `sub(re, repl [, target])` — pops `u8` args; pushes substitution count.
+    AwkSub(u8),
+    /// `gsub(re, repl [, target])` — pops `u8` args; pushes substitution count.
+    AwkGsub(u8),
+    /// `match(s, re)` — stack `[s, re]`; sets `RSTART`/`RLENGTH`, pushes `RSTART`.
+    AwkMatch,
+    /// `tolower(s)` — stack `[s]`.
+    AwkToLower,
+    /// `toupper(s)` — stack `[s]`.
+    AwkToUpper,
+    /// `int(x)` — truncate toward zero. Stack `[x]`. Host-independent.
+    AwkInt,
+    /// `sqrt(x)` — square root. Stack `[x]`. Host-independent.
+    AwkSqrt,
+    /// `sin(x)` — sine (radians). Stack `[x]`. Host-independent.
+    AwkSin,
+    /// `cos(x)` — cosine (radians). Stack `[x]`. Host-independent.
+    AwkCos,
+    /// `exp(x)` — e^x. Stack `[x]`. Host-independent.
+    AwkExp,
+    /// `log(x)` — natural log. Stack `[x]`. Host-independent.
+    AwkLog,
+    /// `atan2(y, x)` — arctangent of `y/x`. Stack `[y, x]`. Host-independent.
+    AwkAtan2,
+    /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
+    /// `u16` = name-pool index of the array variable.
+    AwkArrayGet(u16),
+    /// `arr[k] = v` — stack `[value, key]`. `u16` = array name-pool index.
+    AwkArraySet(u16),
+    /// `(k in arr)` — stack `[key]`; pushes Bool. `u16` = array name-pool index.
+    AwkArrayExists(u16),
+    /// `delete arr[k]` — stack `[key]`. `u16` = array name-pool index.
+    AwkArrayDelete(u16),
+    /// `delete arr` — clear the whole array. `u16` = array name-pool index.
+    AwkArrayClear(u16),
+    /// `length(arr)` — push the element count. `u16` = array name-pool index.
+    AwkArrayLen(u16),
+    /// `and(v1, v2, ...)` — bitwise AND; pops `u8` args (≥2). Host-independent.
+    AwkAnd(u8),
+    /// `or(v1, v2, ...)` — bitwise OR; pops `u8` args (≥2). Host-independent.
+    AwkOr(u8),
+    /// `xor(v1, v2, ...)` — bitwise XOR; pops `u8` args (≥2). Host-independent.
+    AwkXor(u8),
+    /// `compl(v)` — bitwise complement. Stack `[v]`. Host-independent.
+    AwkCompl,
+    /// `lshift(v, n)` — left shift. Stack `[v, n]`. Host-independent.
+    AwkLshift,
+    /// `rshift(v, n)` — right shift. Stack `[v, n]`. Host-independent.
+    AwkRshift,
+    /// `strtonum(s)` — parse hex/octal/decimal string to number. Stack `[s]`. Host-independent.
+    AwkStrtonum,
+    /// `systime()` — seconds since the Unix epoch. Nullary; pushes a number. Host-independent.
+    AwkSystime,
+    /// `rand()` — next PRNG value in `[0, 1)`. Nullary; pushes a number. VM-owned seed.
+    AwkRand,
+    /// `srand([x])` — reseed PRNG, push previous seed. Payload = argc (0 or 1). VM-owned seed.
+    AwkSrand(u8),
+    /// `strftime([fmt[, ts[, utc]]])` — format timestamp. Payload = argc (0..=3). Host-independent.
+    AwkStrftime(u8),
+    /// `mktime(datespec[, utc])` — datespec → epoch seconds (or -1). Payload = argc (1..=2). Host-independent.
+    AwkMktime(u8),
+    /// `ord(s)` — Unicode scalar of first char (0 if empty). Host-independent.
+    AwkOrd,
+    /// `chr(n)` — single-char string for codepoint `n` (empty if invalid). Host-independent.
+    AwkChr,
+    /// `mkbool(x)` — `1` if truthy else `0`. Host-independent.
+    AwkMkbool,
+    /// `intdiv(a, b)` — truncating integer quotient (Undef on divide-by-zero). Host-independent.
+    AwkIntdiv,
+    /// `intdiv0(a, b)` — truncating integer quotient (0 on divide-by-zero; never errors). Host-independent.
+    AwkIntdiv0,
+    /// `gensub(re, repl, how [, target])` — pops `u8` args; pushes the result string. Host-bound (IGNORECASE, `$0`).
+    AwkGensub(u8),
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -463,6 +585,9 @@ impl Hash for Op {
             | Op::MakeHash(idx)
             | Op::PreIncSlot(idx)
             | Op::PreIncSlotVoid(idx)
+            | Op::PreDecSlot(idx)
+            | Op::PostIncSlot(idx)
+            | Op::PostDecSlot(idx)
             | Op::HereDoc(idx)
             | Op::CmdSubst(idx)
             | Op::ProcessSubIn(idx)
@@ -471,7 +596,15 @@ impl Hash for Op {
             | Op::MapBlock(idx)
             | Op::GrepBlock(idx)
             | Op::SortBlock(idx)
-            | Op::ForEachBlock(idx) => idx.hash(state),
+            | Op::ForEachBlock(idx)
+            | Op::AwkSpecialGet(idx)
+            | Op::AwkSpecialSet(idx)
+            | Op::AwkArrayGet(idx)
+            | Op::AwkArraySet(idx)
+            | Op::AwkArrayExists(idx)
+            | Op::AwkArrayDelete(idx)
+            | Op::AwkArrayClear(idx)
+            | Op::AwkArrayLen(idx) => idx.hash(state),
             Op::Jump(t)
             | Op::JumpIfTrue(t)
             | Op::JumpIfFalse(t)
@@ -506,6 +639,23 @@ impl Hash for Op {
                 op.hash(state);
             }
             Op::TestFile(t) | Op::ExpandParam(t) => t.hash(state),
+            // AWK ops with a u8 payload (argc / getline source kind).
+            Op::AwkPrint(n)
+            | Op::AwkPrintf(n)
+            | Op::AwkSprintf(n)
+            | Op::AwkGetline(n)
+            | Op::AwkLength(n)
+            | Op::AwkSubstr(n)
+            | Op::AwkSplit(n)
+            | Op::AwkSub(n)
+            | Op::AwkGsub(n)
+            | Op::AwkAnd(n)
+            | Op::AwkOr(n)
+            | Op::AwkXor(n)
+            | Op::AwkSrand(n)
+            | Op::AwkStrftime(n)
+            | Op::AwkMktime(n)
+            | Op::AwkGensub(n) => n.hash(state),
             Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
                 slot.hash(state);
                 limit.hash(state);
@@ -604,7 +754,33 @@ impl Hash for Op {
             | Op::TildeExpand
             | Op::StrMatch
             | Op::RegexMatch
-            | Op::WithRedirectsEnd => {}
+            | Op::WithRedirectsEnd
+            | Op::AwkFieldGet
+            | Op::AwkFieldSet
+            | Op::AwkNf
+            | Op::AwkSetRecord
+            | Op::AwkIndex
+            | Op::AwkMatch
+            | Op::AwkToLower
+            | Op::AwkToUpper
+            | Op::AwkInt
+            | Op::AwkSqrt
+            | Op::AwkSin
+            | Op::AwkCos
+            | Op::AwkExp
+            | Op::AwkLog
+            | Op::AwkAtan2
+            | Op::AwkCompl
+            | Op::AwkLshift
+            | Op::AwkRshift
+            | Op::AwkStrtonum
+            | Op::AwkSystime
+            | Op::AwkRand
+            | Op::AwkOrd
+            | Op::AwkChr
+            | Op::AwkMkbool
+            | Op::AwkIntdiv
+            | Op::AwkIntdiv0 => {}
         }
     }
 }

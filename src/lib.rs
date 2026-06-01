@@ -49,6 +49,8 @@
 //! }
 //! ```
 
+pub mod awk_builtins;
+pub mod awk_host;
 pub mod chunk;
 pub mod host;
 pub mod jit;
@@ -57,6 +59,7 @@ pub mod shell_builtins;
 pub mod value;
 pub mod vm;
 
+pub use awk_host::{AwkHost, AwkLvalue, DefaultAwkHost};
 pub use chunk::{Chunk, ChunkBuilder};
 pub use host::{DefaultHost, ShellHost};
 pub use jit::{

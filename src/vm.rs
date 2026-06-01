@@ -25,6 +25,7 @@
 
 use crate::chunk::Chunk;
 use crate::host::ShellHost;
+use crate::awk_host::AwkHost;
 #[cfg(feature = "jit")]
 use crate::jit::{DeoptInfo, JitCompiler, SlotKind, TraceLookup};
 use crate::op::Op;
@@ -132,6 +133,16 @@ pub struct VM {
     /// Frontend-supplied shell host (glob/expand/redirect/pipeline/etc).
     /// When `None`, shell ops fall back to minimal stub behavior.
     pub host: Option<Box<dyn ShellHost>>,
+    /// Frontend-supplied AWK host (fields/record/print/getline/string builtins).
+    /// The VM routes the reserved AWK op range (`Op::ExtendedWide` with
+    /// `id >= awk_builtins::AWK_OP_BASE`) here. When `None`, AWK ops are inert
+    /// stubs and the universal ops still execute normally.
+    pub awk_host: Option<Box<dyn AwkHost>>,
+    /// AWK PRNG seed for native `rand`/`srand` (glibc LCG, gawk-compatible).
+    /// Execution-intrinsic VM state (like a register), not part of AWK's data
+    /// model, so it lives here and is handled VM-side in both dispatch paths.
+    /// Initialized to 1 to match awkrs's default seed sequence.
+    awk_rand_seed: u64,
     /// Halted flag
     halted: bool,
     /// Tracing JIT enabled. When true, backward branches consult the trace
@@ -202,6 +213,8 @@ impl VM {
             ext_wide_handler: None,
             builtin_table: Vec::new(),
             host: None,
+            awk_host: None,
+            awk_rand_seed: 1,
             halted: false,
             #[cfg(feature = "jit")]
             tracing_jit: false,
@@ -275,6 +288,7 @@ impl VM {
         self.ip = 0;
         self.last_status = 0;
         self.halted = false;
+        self.awk_rand_seed = 1;
         self.chunk = chunk;
         #[cfg(feature = "jit")]
         {
@@ -289,6 +303,12 @@ impl VM {
     /// Register the frontend shell host. Replaces any prior host.
     pub fn set_shell_host(&mut self, host: Box<dyn ShellHost>) {
         self.host = Some(host);
+    }
+
+    /// Register the frontend AWK host. Replaces any prior host. The VM then
+    /// routes the reserved AWK op range to it (see [`crate::awk_host::AwkHost`]).
+    pub fn set_awk_host(&mut self, host: Box<dyn AwkHost>) {
+        self.awk_host = Some(host);
     }
 
     /// Register a handler for `Op::Extended(id, arg)` opcodes.
@@ -716,6 +736,7 @@ impl VM {
     /// compete on the same chunk: block-eligible chunks short-circuit
     /// before tracing JIT records anything.
     pub fn run(&mut self) -> VMResult {
+        use crate::awk_builtins as ab;
         // Phase 10: try block JIT first for fully-eligible chunks. The
         // block-JIT cache has its own threshold (10 invocations); the
         // call returns None until it warms up, at which point the whole
@@ -820,6 +841,58 @@ impl VM {
                                 }
                             }
                             Op::CallBuiltin(_, _) => rec.aborted = true,
+                            // AWK ops are host calls (like CallBuiltin) and
+                            // can't appear in a compiled trace — abort.
+                            Op::AwkFieldGet
+                            | Op::AwkFieldSet
+                            | Op::AwkNf
+                            | Op::AwkSetRecord
+                            | Op::AwkSpecialGet(_)
+                            | Op::AwkSpecialSet(_)
+                            | Op::AwkPrint(_)
+                            | Op::AwkPrintf(_)
+                            | Op::AwkSprintf(_)
+                            | Op::AwkGetline(_)
+                            | Op::AwkLength(_)
+                            | Op::AwkSubstr(_)
+                            | Op::AwkIndex
+                            | Op::AwkSplit(_)
+                            | Op::AwkSub(_)
+                            | Op::AwkGsub(_)
+                            | Op::AwkGensub(_)
+                            | Op::AwkMatch
+                            | Op::AwkToLower
+                            | Op::AwkToUpper
+                            | Op::AwkInt
+                            | Op::AwkSqrt
+                            | Op::AwkSin
+                            | Op::AwkCos
+                            | Op::AwkExp
+                            | Op::AwkLog
+                            | Op::AwkAtan2
+                            | Op::AwkAnd(_)
+                            | Op::AwkOr(_)
+                            | Op::AwkXor(_)
+                            | Op::AwkCompl
+                            | Op::AwkLshift
+                            | Op::AwkRshift
+                            | Op::AwkStrtonum
+                            | Op::AwkSystime
+                            | Op::AwkRand
+                            | Op::AwkSrand(_)
+                            | Op::AwkStrftime(_)
+                            | Op::AwkMktime(_)
+                            | Op::AwkOrd
+                            | Op::AwkChr
+                            | Op::AwkMkbool
+                            | Op::AwkIntdiv
+                            | Op::AwkIntdiv0
+                            | Op::AwkArrayGet(_)
+                            | Op::AwkArraySet(_)
+                            | Op::AwkArrayExists(_)
+                            | Op::AwkArrayDelete(_)
+                            | Op::AwkArrayClear(_)
+                            | Op::AwkArrayLen(_) => rec.aborted = true,
                             _ => {}
                         }
                     }
@@ -1298,6 +1371,21 @@ impl VM {
                     let sum = self.get_slot(*a).to_int() + self.get_slot(*b).to_int();
                     self.set_slot(*a, Value::Int(sum));
                 }
+                Op::PreDecSlot(slot) => {
+                    let val = self.get_slot(*slot).to_int() - 1;
+                    self.set_slot(*slot, Value::Int(val));
+                    self.push(Value::Int(val));
+                }
+                Op::PostIncSlot(slot) => {
+                    let old = self.get_slot(*slot).to_int();
+                    self.set_slot(*slot, Value::Int(old + 1));
+                    self.push(Value::Int(old));
+                }
+                Op::PostDecSlot(slot) => {
+                    let old = self.get_slot(*slot).to_int();
+                    self.set_slot(*slot, Value::Int(old - 1));
+                    self.push(Value::Int(old));
+                }
 
                 // ── Status ──
                 Op::SetStatus => {
@@ -1317,7 +1405,9 @@ impl VM {
                 }
                 Op::ExtendedWide(id, payload) => {
                     let (id, payload) = (*id, *payload);
-                    if let Some(mut handler) = self.ext_wide_handler.take() {
+                    if crate::awk_builtins::is_awk_op(id) {
+                        self.dispatch_awk(id, payload);
+                    } else if let Some(mut handler) = self.ext_wide_handler.take() {
                         handler(self, id, payload);
                         self.ext_wide_handler = Some(handler);
                     }
@@ -2116,6 +2206,59 @@ impl VM {
                         self.push(result);
                     }
                 }
+
+                // ── AWK ops (first-class; dispatched to the AwkHost, same path
+                //    as the reserved ExtendedWide AWK range) ──
+                Op::AwkFieldGet => self.dispatch_awk(ab::AWK_FIELD_GET, 0),
+                Op::AwkFieldSet => self.dispatch_awk(ab::AWK_FIELD_SET, 0),
+                Op::AwkNf => self.dispatch_awk(ab::AWK_NF, 0),
+                Op::AwkSetRecord => self.dispatch_awk(ab::AWK_SET_RECORD, 0),
+                Op::AwkSpecialGet(n) => self.dispatch_awk(ab::AWK_SPECIAL_GET, *n as usize),
+                Op::AwkSpecialSet(n) => self.dispatch_awk(ab::AWK_SPECIAL_SET, *n as usize),
+                Op::AwkPrint(argc) => self.dispatch_awk(ab::AWK_PRINT, *argc as usize),
+                Op::AwkPrintf(argc) => self.dispatch_awk(ab::AWK_PRINTF, *argc as usize),
+                Op::AwkSprintf(argc) => self.dispatch_awk(ab::AWK_SPRINTF, *argc as usize),
+                Op::AwkGetline(src) => self.dispatch_awk(ab::AWK_GETLINE, *src as usize),
+                Op::AwkLength(argc) => self.dispatch_awk(ab::AWK_LENGTH, *argc as usize),
+                Op::AwkSubstr(argc) => self.dispatch_awk(ab::AWK_SUBSTR, *argc as usize),
+                Op::AwkIndex => self.dispatch_awk(ab::AWK_INDEX, 0),
+                Op::AwkSplit(argc) => self.dispatch_awk(ab::AWK_SPLIT, *argc as usize),
+                Op::AwkSub(argc) => self.dispatch_awk(ab::AWK_SUB, *argc as usize),
+                Op::AwkGsub(argc) => self.dispatch_awk(ab::AWK_GSUB, *argc as usize),
+                Op::AwkMatch => self.dispatch_awk(ab::AWK_MATCH, 0),
+                Op::AwkToLower => self.dispatch_awk(ab::AWK_TOLOWER, 0),
+                Op::AwkToUpper => self.dispatch_awk(ab::AWK_TOUPPER, 0),
+                Op::AwkInt => self.dispatch_awk(ab::AWK_INT, 0),
+                Op::AwkSqrt => self.dispatch_awk(ab::AWK_SQRT, 0),
+                Op::AwkSin => self.dispatch_awk(ab::AWK_SIN, 0),
+                Op::AwkCos => self.dispatch_awk(ab::AWK_COS, 0),
+                Op::AwkExp => self.dispatch_awk(ab::AWK_EXP, 0),
+                Op::AwkLog => self.dispatch_awk(ab::AWK_LOG, 0),
+                Op::AwkAtan2 => self.dispatch_awk(ab::AWK_ATAN2, 0),
+                Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
+                Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
+                Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),
+                Op::AwkArrayDelete(n) => self.dispatch_awk(ab::AWK_ARRAY_DELETE, *n as usize),
+                Op::AwkArrayClear(n) => self.dispatch_awk(ab::AWK_ARRAY_CLEAR, *n as usize),
+                Op::AwkArrayLen(n) => self.dispatch_awk(ab::AWK_ARRAY_LEN, *n as usize),
+                Op::AwkAnd(argc) => self.dispatch_awk(ab::AWK_AND, *argc as usize),
+                Op::AwkOr(argc) => self.dispatch_awk(ab::AWK_OR, *argc as usize),
+                Op::AwkXor(argc) => self.dispatch_awk(ab::AWK_XOR, *argc as usize),
+                Op::AwkCompl => self.dispatch_awk(ab::AWK_COMPL, 0),
+                Op::AwkLshift => self.dispatch_awk(ab::AWK_LSHIFT, 0),
+                Op::AwkRshift => self.dispatch_awk(ab::AWK_RSHIFT, 0),
+                Op::AwkStrtonum => self.dispatch_awk(ab::AWK_STRTONUM, 0),
+                Op::AwkSystime => self.dispatch_awk(ab::AWK_SYSTIME, 0),
+                Op::AwkRand => self.dispatch_awk(ab::AWK_RAND, 0),
+                Op::AwkSrand(argc) => self.dispatch_awk(ab::AWK_SRAND, *argc as usize),
+                Op::AwkStrftime(argc) => self.dispatch_awk(ab::AWK_STRFTIME, *argc as usize),
+                Op::AwkMktime(argc) => self.dispatch_awk(ab::AWK_MKTIME, *argc as usize),
+                Op::AwkOrd => self.dispatch_awk(ab::AWK_ORD, 1),
+                Op::AwkChr => self.dispatch_awk(ab::AWK_CHR, 1),
+                Op::AwkMkbool => self.dispatch_awk(ab::AWK_MKBOOL, 1),
+                Op::AwkIntdiv => self.dispatch_awk(ab::AWK_INTDIV, 2),
+                Op::AwkIntdiv0 => self.dispatch_awk(ab::AWK_INTDIV0, 2),
+                Op::AwkGensub(argc) => self.dispatch_awk(ab::AWK_GENSUB, *argc as usize),
             }
 
             // Tracing JIT: finalize an active recording on either:
@@ -2164,6 +2307,583 @@ impl VM {
 
     // ── Helpers ──
 
+    /// Dispatch one AWK op (`Op::ExtendedWide(id, payload)` with `id` in the
+    /// reserved AWK range) through the registered [`AwkHost`]. Value operands
+    /// come from the stack (pushed in source order); `payload` carries the
+    /// inline integer operand (field index / argument count / name-pool index).
+    ///
+    /// When no AWK host is registered, AWK ops are inert: ops that yield a value
+    /// push a neutral default so the stack stays balanced, statement-form ops
+    /// (`print`/`delete`/field-set) simply drop their operands.
+    ///
+    /// [`AwkHost`]: crate::awk_host::AwkHost
+    fn dispatch_awk(&mut self, id: u16, payload: usize) {
+        use crate::awk_builtins as ab;
+        use crate::awk_host::AwkLvalue;
+
+        // Take the host out to satisfy the borrow checker (handlers reach back
+        // into `self` via the stack); restore it afterwards. Mirrors the
+        // `ext_handler` take/restore pattern used for `Op::Extended`.
+        let mut host = match self.awk_host.take() {
+            Some(h) => h,
+            None => {
+                self.dispatch_awk_stub(id, payload);
+                return;
+            }
+        };
+
+        // Pop `n` value operands, returned in source (pushed) order.
+        macro_rules! pop_n {
+            ($n:expr) => {{
+                let n = $n;
+                let mut v: Vec<Value> = (0..n).map(|_| self.pop()).collect();
+                v.reverse();
+                v
+            }};
+        }
+        let name_at = |vm: &Self, idx: usize| -> String {
+            vm.chunk.names.get(idx).cloned().unwrap_or_default()
+        };
+
+        match id {
+            ab::AWK_FIELD_GET => {
+                let i = self.pop().to_int();
+                let v = host.field_get(i);
+                self.push(v);
+            }
+            ab::AWK_FIELD_SET => {
+                let i = self.pop().to_int();
+                let v = self.pop();
+                host.field_set(i, v);
+            }
+            ab::AWK_NF => {
+                let n = host.nf();
+                self.push(Value::Int(n));
+            }
+            ab::AWK_SET_RECORD => {
+                let v = self.pop();
+                host.set_record(v);
+            }
+            ab::AWK_SPECIAL_GET => {
+                let name = name_at(self, payload);
+                let v = host.special_get(&name);
+                self.push(v);
+            }
+            ab::AWK_SPECIAL_SET => {
+                let name = name_at(self, payload);
+                let v = self.pop();
+                host.special_set(&name, v);
+            }
+            ab::AWK_PRINT => {
+                let args = pop_n!(payload);
+                host.print(&args);
+            }
+            ab::AWK_PRINTF => {
+                let mut args = pop_n!(payload);
+                let fmt = if args.is_empty() {
+                    String::new()
+                } else {
+                    args.remove(0).to_str()
+                };
+                host.printf(&fmt, &args);
+            }
+            ab::AWK_SPRINTF => {
+                let mut args = pop_n!(payload);
+                let fmt = if args.is_empty() {
+                    String::new()
+                } else {
+                    args.remove(0).to_str()
+                };
+                let v = host.sprintf(&fmt, &args);
+                self.push(v);
+            }
+            ab::AWK_GETLINE => {
+                // For file/command sources the operand string is on the stack.
+                let operand = match payload {
+                    ab::getline_source::FILE
+                    | ab::getline_source::FILE_VAR
+                    | ab::getline_source::CMD
+                    | ab::getline_source::CMD_VAR => Some(self.pop().to_str()),
+                    _ => None,
+                };
+                let status = host.getline(payload, operand.as_deref(), None);
+                self.push(Value::Int(status));
+            }
+            ab::AWK_LENGTH => {
+                let arg = if payload == 0 { None } else { Some(self.pop()) };
+                let n = host.length(arg.as_ref());
+                self.push(Value::Int(n));
+            }
+            ab::AWK_SUBSTR => {
+                let args = pop_n!(payload);
+                let s = args.first().cloned().unwrap_or(Value::str(""));
+                let m = args.get(1).map(|v| v.to_int()).unwrap_or(1);
+                let n = args.get(2).map(|v| v.to_int());
+                let v = host.substr(&s, m, n);
+                self.push(v);
+            }
+            ab::AWK_INDEX => {
+                let t = self.pop();
+                let s = self.pop();
+                let r = host.index(&s, &t);
+                self.push(Value::Int(r));
+            }
+            ab::AWK_SPLIT => {
+                let args = pop_n!(payload);
+                let s = args.first().cloned().unwrap_or(Value::str(""));
+                let arr = args.get(1).map(|v| v.to_str()).unwrap_or_default();
+                let fs = args.get(2);
+                let n = host.split(&s, &arr, fs);
+                self.push(Value::Int(n));
+            }
+            ab::AWK_SUB | ab::AWK_GSUB => {
+                // Stack: [re, repl, target_name]. The target name string lets
+                // the host write back to the right lvalue (a var here; field /
+                // array targets use their own dedicated emission).
+                let args = pop_n!(payload);
+                let re = args.first().cloned().unwrap_or(Value::str(""));
+                let repl = args.get(1).cloned().unwrap_or(Value::str(""));
+                let target = args
+                    .get(2)
+                    .map(|v| AwkLvalue::Var(v.to_str()))
+                    .unwrap_or(AwkLvalue::Field(0));
+                let n = if id == ab::AWK_SUB {
+                    host.sub(&re, &repl, &target)
+                } else {
+                    host.gsub(&re, &repl, &target)
+                };
+                self.push(Value::Int(n));
+            }
+            ab::AWK_MATCH => {
+                let re = self.pop();
+                let s = self.pop();
+                let r = host.match_re(&s, &re);
+                self.push(Value::Int(r));
+            }
+            ab::AWK_GENSUB => {
+                // Stack: [re, repl, how, target?] (payload = argc, 3..=4).
+                let args = pop_n!(payload);
+                let re = args.first().cloned().unwrap_or(Value::str(""));
+                let repl = args.get(1).cloned().unwrap_or(Value::str(""));
+                let how = args.get(2).cloned().unwrap_or(Value::str("g"));
+                let target = args.get(3);
+                let v = host.gensub(&re, &repl, &how, target);
+                self.push(v);
+            }
+            ab::AWK_TOLOWER => {
+                let s = self.pop();
+                let v = host.tolower(&s);
+                self.push(v);
+            }
+            ab::AWK_TOUPPER => {
+                let s = self.pop();
+                let v = host.toupper(&s);
+                self.push(v);
+            }
+            ab::AWK_INT => {
+                let x = self.pop();
+                let v = host.int(&x);
+                self.push(v);
+            }
+            ab::AWK_SQRT => {
+                let x = self.pop();
+                let v = host.sqrt(&x);
+                self.push(v);
+            }
+            ab::AWK_SIN => {
+                let x = self.pop();
+                let v = host.sin(&x);
+                self.push(v);
+            }
+            ab::AWK_COS => {
+                let x = self.pop();
+                let v = host.cos(&x);
+                self.push(v);
+            }
+            ab::AWK_EXP => {
+                let x = self.pop();
+                let v = host.exp(&x);
+                self.push(v);
+            }
+            ab::AWK_LOG => {
+                let x = self.pop();
+                let v = host.log(&x);
+                self.push(v);
+            }
+            ab::AWK_ATAN2 => {
+                let x = self.pop();
+                let y = self.pop();
+                let v = host.atan2(&y, &x);
+                self.push(v);
+            }
+            ab::AWK_AND => {
+                let args = pop_n!(payload);
+                let v = host.and(&args);
+                self.push(v);
+            }
+            ab::AWK_OR => {
+                let args = pop_n!(payload);
+                let v = host.or(&args);
+                self.push(v);
+            }
+            ab::AWK_XOR => {
+                let args = pop_n!(payload);
+                let v = host.xor(&args);
+                self.push(v);
+            }
+            ab::AWK_COMPL => {
+                let v = self.pop();
+                let r = host.compl(&v);
+                self.push(r);
+            }
+            ab::AWK_LSHIFT => {
+                let n = self.pop();
+                let v = self.pop();
+                let r = host.lshift(&v, &n);
+                self.push(r);
+            }
+            ab::AWK_RSHIFT => {
+                let n = self.pop();
+                let v = self.pop();
+                let r = host.rshift(&v, &n);
+                self.push(r);
+            }
+            ab::AWK_STRTONUM => {
+                let s = self.pop();
+                let r = host.strtonum(&s);
+                self.push(r);
+            }
+            ab::AWK_SYSTIME => {
+                let r = host.systime();
+                self.push(r);
+            }
+            ab::AWK_RAND => {
+                let r = crate::awk_host::awk_rand(&mut self.awk_rand_seed);
+                self.push(Value::Float(r));
+            }
+            ab::AWK_SRAND => {
+                let n = if payload >= 1 {
+                    Some(self.pop().to_float() as u32 as u64)
+                } else {
+                    None
+                };
+                let r = crate::awk_host::awk_srand(&mut self.awk_rand_seed, n);
+                self.push(Value::Float(r));
+            }
+            ab::AWK_STRFTIME => {
+                let args = pop_n!(payload);
+                let r = host.strftime(&args);
+                self.push(r);
+            }
+            ab::AWK_MKTIME => {
+                let args = pop_n!(payload);
+                let r = host.mktime(&args);
+                self.push(r);
+            }
+            ab::AWK_ORD => {
+                let a = self.pop();
+                let r = host.ord(&a);
+                self.push(r);
+            }
+            ab::AWK_CHR => {
+                let a = self.pop();
+                let r = host.chr(&a);
+                self.push(r);
+            }
+            ab::AWK_MKBOOL => {
+                let a = self.pop();
+                let r = host.mkbool(&a);
+                self.push(r);
+            }
+            ab::AWK_INTDIV => {
+                let b = self.pop();
+                let a = self.pop();
+                let r = host.intdiv(&a, &b);
+                self.push(r);
+            }
+            ab::AWK_INTDIV0 => {
+                let b = self.pop();
+                let a = self.pop();
+                let r = host.intdiv0(&a, &b);
+                self.push(r);
+            }
+            ab::AWK_ARRAY_GET => {
+                let name = name_at(self, payload);
+                let key = self.pop();
+                let v = host.array_get(&name, &key);
+                self.push(v);
+            }
+            ab::AWK_ARRAY_SET => {
+                let name = name_at(self, payload);
+                let key = self.pop();
+                let v = self.pop();
+                host.array_set(&name, &key, v);
+            }
+            ab::AWK_ARRAY_EXISTS => {
+                let name = name_at(self, payload);
+                let key = self.pop();
+                let b = host.array_exists(&name, &key);
+                self.push(Value::Bool(b));
+            }
+            ab::AWK_ARRAY_DELETE => {
+                let name = name_at(self, payload);
+                let key = self.pop();
+                host.array_delete(&name, &key);
+            }
+            ab::AWK_ARRAY_CLEAR => {
+                let name = name_at(self, payload);
+                host.array_clear(&name);
+            }
+            ab::AWK_ARRAY_LEN => {
+                let name = name_at(self, payload);
+                let n = host.array_len(&name);
+                self.push(Value::Int(n));
+            }
+            // Unknown AWK op id: drop nothing, push Undef to keep callers that
+            // expect a value from glitching. (Reserved range, forward-compat.)
+            _ => self.push(Value::Undef),
+        }
+
+        self.awk_host = Some(host);
+    }
+
+    /// Inert fallback for AWK ops when no [`AwkHost`] is registered. Keeps the
+    /// stack balanced: value-producing ops push a neutral default; statement
+    /// ops drop their operands.
+    fn dispatch_awk_stub(&mut self, id: u16, payload: usize) {
+        use crate::awk_builtins as ab;
+        use crate::awk_host::{
+            awk_chr, awk_compl, awk_fold_and, awk_fold_or, awk_fold_xor, awk_index, awk_int,
+            awk_intdiv, awk_intdiv0, awk_length, awk_lshift, awk_mkbool, awk_mktime, awk_ord,
+            awk_rand, awk_rshift, awk_srand, awk_strftime, awk_strtonum, awk_substr, awk_systime,
+            awk_tolower, awk_toupper,
+        };
+        match id {
+            // value-producing: pop declared operands, push neutral default
+            ab::AWK_FIELD_GET => {
+                self.pop();
+                self.push(Value::str(""));
+            }
+            // `length(s)` (scalar form, payload>0) is host-independent — compute
+            // it natively. `length($0)` (payload==0) and `length(arr)` need the
+            // host, so they still yield 0 here.
+            ab::AWK_LENGTH if payload > 0 => {
+                let s = self.pop();
+                self.push(Value::Int(awk_length(Some(&s))));
+            }
+            ab::AWK_NF | ab::AWK_LENGTH | ab::AWK_ARRAY_LEN => {
+                self.push(Value::Int(0));
+            }
+            ab::AWK_SPECIAL_GET => self.push(Value::Undef),
+            ab::AWK_SPRINTF => {
+                for _ in 0..payload {
+                    self.pop();
+                }
+                self.push(Value::str(""));
+            }
+            // Host-independent string builtins: compute the real result so these
+            // AWK ops execute natively even with no registered host. Operand pop
+            // order mirrors the host path in `dispatch_awk`.
+            ab::AWK_SUBSTR => {
+                let mut args: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
+                args.reverse();
+                let s = args.first().cloned().unwrap_or(Value::str(""));
+                let m = args.get(1).map(|v| v.to_int()).unwrap_or(1);
+                let n = args.get(2).map(|v| v.to_int());
+                self.push(awk_substr(&s, m, n));
+            }
+            ab::AWK_TOLOWER => {
+                let s = self.pop();
+                self.push(awk_tolower(&s));
+            }
+            ab::AWK_TOUPPER => {
+                let s = self.pop();
+                self.push(awk_toupper(&s));
+            }
+            // Host-independent numeric builtins: pure f64 math, computed
+            // natively even with no registered host.
+            ab::AWK_INT => {
+                let x = self.pop();
+                self.push(awk_int(&x));
+            }
+            ab::AWK_SQRT => {
+                let x = self.pop();
+                self.push(Value::Float(x.to_float().sqrt()));
+            }
+            ab::AWK_SIN => {
+                let x = self.pop();
+                self.push(Value::Float(x.to_float().sin()));
+            }
+            ab::AWK_COS => {
+                let x = self.pop();
+                self.push(Value::Float(x.to_float().cos()));
+            }
+            ab::AWK_EXP => {
+                let x = self.pop();
+                self.push(Value::Float(x.to_float().exp()));
+            }
+            ab::AWK_LOG => {
+                let x = self.pop();
+                self.push(Value::Float(x.to_float().ln()));
+            }
+            ab::AWK_ATAN2 => {
+                let x = self.pop();
+                let y = self.pop();
+                self.push(Value::Float(y.to_float().atan2(x.to_float())));
+            }
+            // Host-independent bitwise builtins (gawk): pure integer math.
+            ab::AWK_AND => {
+                let args: Vec<Value> = {
+                    let mut v: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
+                    v.reverse();
+                    v
+                };
+                self.push(Value::Int(awk_fold_and(&args)));
+            }
+            ab::AWK_OR => {
+                let args: Vec<Value> = {
+                    let mut v: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
+                    v.reverse();
+                    v
+                };
+                self.push(Value::Int(awk_fold_or(&args)));
+            }
+            ab::AWK_XOR => {
+                let args: Vec<Value> = {
+                    let mut v: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
+                    v.reverse();
+                    v
+                };
+                self.push(Value::Int(awk_fold_xor(&args)));
+            }
+            ab::AWK_COMPL => {
+                let v = self.pop();
+                self.push(Value::Int(awk_compl(&v)));
+            }
+            ab::AWK_LSHIFT => {
+                let n = self.pop();
+                let v = self.pop();
+                self.push(Value::Int(awk_lshift(&v, &n)));
+            }
+            ab::AWK_RSHIFT => {
+                let n = self.pop();
+                let v = self.pop();
+                self.push(Value::Int(awk_rshift(&v, &n)));
+            }
+            ab::AWK_STRTONUM => {
+                let s = self.pop();
+                self.push(Value::Float(awk_strtonum(&s.to_str())));
+            }
+            ab::AWK_SYSTIME => {
+                self.push(Value::Float(awk_systime()));
+            }
+            ab::AWK_RAND => {
+                let r = awk_rand(&mut self.awk_rand_seed);
+                self.push(Value::Float(r));
+            }
+            ab::AWK_SRAND => {
+                let n = if payload >= 1 {
+                    Some(self.pop().to_float() as u32 as u64)
+                } else {
+                    None
+                };
+                let r = awk_srand(&mut self.awk_rand_seed, n);
+                self.push(Value::Float(r));
+            }
+            ab::AWK_STRFTIME => {
+                let mut args: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
+                args.reverse();
+                self.push(awk_strftime(&args));
+            }
+            ab::AWK_MKTIME => {
+                let mut args: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
+                args.reverse();
+                self.push(awk_mktime(&args));
+            }
+            ab::AWK_ORD => {
+                let a = self.pop();
+                self.push(awk_ord(&a));
+            }
+            ab::AWK_CHR => {
+                let a = self.pop();
+                self.push(awk_chr(&a));
+            }
+            ab::AWK_MKBOOL => {
+                let a = self.pop();
+                self.push(awk_mkbool(&a));
+            }
+            ab::AWK_INTDIV => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(awk_intdiv(&a, &b));
+            }
+            ab::AWK_INTDIV0 => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(awk_intdiv0(&a, &b));
+            }
+            ab::AWK_INDEX => {
+                let t = self.pop();
+                let s = self.pop();
+                self.push(Value::Int(awk_index(&s, &t)));
+            }
+            ab::AWK_MATCH => {
+                self.pop();
+                self.pop();
+                self.push(Value::Int(0));
+            }
+            ab::AWK_SPLIT | ab::AWK_SUB | ab::AWK_GSUB => {
+                for _ in 0..payload {
+                    self.pop();
+                }
+                self.push(Value::Int(0));
+            }
+            ab::AWK_GENSUB => {
+                for _ in 0..payload {
+                    self.pop();
+                }
+                self.push(Value::str(""));
+            }
+            ab::AWK_GETLINE => {
+                if matches!(
+                    payload,
+                    ab::getline_source::FILE
+                        | ab::getline_source::FILE_VAR
+                        | ab::getline_source::CMD
+                        | ab::getline_source::CMD_VAR
+                ) {
+                    self.pop();
+                }
+                self.push(Value::Int(0));
+            }
+            ab::AWK_ARRAY_GET => {
+                self.pop();
+                self.push(Value::str(""));
+            }
+            ab::AWK_ARRAY_EXISTS => {
+                self.pop();
+                self.push(Value::Bool(false));
+            }
+            // statement-form ops: drop operands, push nothing
+            ab::AWK_FIELD_SET | ab::AWK_ARRAY_SET => {
+                self.pop();
+                self.pop();
+            }
+            ab::AWK_SET_RECORD
+            | ab::AWK_SPECIAL_SET
+            | ab::AWK_ARRAY_DELETE => {
+                self.pop();
+            }
+            ab::AWK_PRINT | ab::AWK_PRINTF => {
+                for _ in 0..payload {
+                    self.pop();
+                }
+            }
+            ab::AWK_ARRAY_CLEAR => {}
+            _ => {}
+        }
+    }
+
     fn get_var(&self, idx: u16) -> Value {
         self.globals
             .get(idx as usize)
@@ -2179,7 +2899,13 @@ impl VM {
         self.globals[idx] = val;
     }
 
-    fn get_slot(&self, slot: u16) -> Value {
+    /// Read a slot from the current (top) call frame.
+    ///
+    /// Returns `Value::Undef` when there is no active frame or the slot
+    /// index is out of range. Public so frontend extension handlers
+    /// (`set_extension_handler`) can read slot operands without reaching
+    /// into `frames` directly.
+    pub fn get_slot(&self, slot: u16) -> Value {
         self.frames
             .last()
             .and_then(|f| f.slots.get(slot as usize))
@@ -2187,7 +2913,12 @@ impl VM {
             .unwrap_or(Value::Undef)
     }
 
-    fn set_slot(&mut self, slot: u16, val: Value) {
+    /// Write a slot in the current (top) call frame, growing the frame's
+    /// slot vector as needed. No-op when there is no active frame.
+    ///
+    /// Public so frontend extension handlers can write slot results back
+    /// without reaching into `frames` directly.
+    pub fn set_slot(&mut self, slot: u16, val: Value) {
         if let Some(frame) = self.frames.last_mut() {
             let idx = slot as usize;
             if idx >= frame.slots.len() {
@@ -2820,5 +3551,882 @@ mod tests {
         });
         assert_eq!(result, 15);
         assert_eq!(pool.len(), 1, "VM should be returned to pool after with()");
+    }
+
+    // ── AWK host dispatch ──────────────────────────────────────────────────
+
+    /// Recording AWK host: captures every routed call so tests can assert the
+    /// VM popped/pushed the right operands and dispatched to the right method.
+    #[derive(Default)]
+    struct RecordingAwkHost {
+        record: String,
+        fields: Vec<String>,
+        printed: Vec<Vec<String>>,
+        field_sets: Vec<(i64, String)>,
+        special_sets: Vec<(String, String)>,
+        array: std::collections::HashMap<String, String>,
+    }
+
+    impl crate::awk_host::AwkHost for RecordingAwkHost {
+        fn field_get(&mut self, i: i64) -> Value {
+            Value::str(self.fields.get(i as usize).cloned().unwrap_or_default())
+        }
+        fn field_set(&mut self, i: i64, v: Value) {
+            self.field_sets.push((i, v.to_str()));
+        }
+        fn nf(&mut self) -> i64 {
+            self.fields.len() as i64
+        }
+        fn set_record(&mut self, v: Value) {
+            self.record = v.to_str();
+            self.fields = self.record.split(' ').map(|s| s.to_string()).collect();
+        }
+        fn special_get(&mut self, name: &str) -> Value {
+            match name {
+                "NR" => Value::Int(7),
+                _ => Value::str(""),
+            }
+        }
+        fn special_set(&mut self, name: &str, v: Value) {
+            self.special_sets.push((name.to_string(), v.to_str()));
+        }
+        fn print(&mut self, args: &[Value]) {
+            self.printed.push(args.iter().map(|v| v.to_str()).collect());
+        }
+        fn array_get(&mut self, _arr: &str, key: &Value) -> Value {
+            Value::str(self.array.get(&key.to_str()).cloned().unwrap_or_default())
+        }
+        fn array_set(&mut self, _arr: &str, key: &Value, v: Value) {
+            self.array.insert(key.to_str(), v.to_str());
+        }
+    }
+
+    fn awk_op(b: &mut ChunkBuilder, id: u16, payload: usize) {
+        b.emit(Op::ExtendedWide(id, payload), 1);
+    }
+
+    #[test]
+    fn awk_field_get_routes_to_host() {
+        use crate::awk_builtins::*;
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(2), 1); // $2
+            awk_op(&mut b, AWK_FIELD_GET, 0);
+            b.build()
+        };
+        let mut vm = VM::new(chunk);
+        let mut host = RecordingAwkHost::default();
+        host.fields = vec!["a".into(), "b".into(), "c".into()];
+        vm.set_awk_host(Box::new(host));
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_str(), "c"),
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn awk_print_pops_args_in_source_order() {
+        use crate::awk_builtins::*;
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let x = b.add_constant(Value::str("x"));
+            let y = b.add_constant(Value::str("y"));
+            b.emit(Op::LoadConst(x), 1);
+            b.emit(Op::LoadConst(y), 1);
+            awk_op(&mut b, AWK_PRINT, 2);
+            b.build()
+        };
+        let mut vm = VM::new(chunk);
+        // Use a shared host we can inspect after the run.
+        struct H(std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+        impl crate::awk_host::AwkHost for H {
+            fn print(&mut self, args: &[Value]) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(args.iter().map(|v| v.to_str()).collect());
+            }
+        }
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        vm.set_awk_host(Box::new(H(sink.clone())));
+        let _ = vm.run();
+        assert_eq!(sink.lock().unwrap().as_slice(), &[vec!["x".to_string(), "y".to_string()]]);
+    }
+
+    #[test]
+    fn awk_field_set_pops_value_and_index() {
+        use crate::awk_builtins::*;
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let v = b.add_constant(Value::str("Z"));
+            b.emit(Op::LoadConst(v), 1); // value
+            b.emit(Op::LoadInt(3), 1); // index
+            awk_op(&mut b, AWK_FIELD_SET, 0);
+            b.build()
+        };
+        struct H(std::sync::Arc<std::sync::Mutex<Vec<(i64, String)>>>);
+        impl crate::awk_host::AwkHost for H {
+            fn field_set(&mut self, i: i64, v: Value) {
+                self.0.lock().unwrap().push((i, v.to_str()));
+            }
+        }
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut vm = VM::new(chunk);
+        vm.set_awk_host(Box::new(H(sink.clone())));
+        let _ = vm.run();
+        assert_eq!(sink.lock().unwrap().as_slice(), &[(3i64, "Z".to_string())]);
+    }
+
+    #[test]
+    fn awk_special_get_and_array_roundtrip() {
+        use crate::awk_builtins::*;
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let arr = b.add_name("counts");
+            let k = b.add_constant(Value::str("k"));
+            let val = b.add_constant(Value::str("42"));
+            // counts["k"] = "42"
+            b.emit(Op::LoadConst(val), 1);
+            b.emit(Op::LoadConst(k), 1);
+            awk_op(&mut b, AWK_ARRAY_SET, arr as usize);
+            // push counts["k"] then NR
+            b.emit(Op::LoadConst(k), 1);
+            awk_op(&mut b, AWK_ARRAY_GET, arr as usize);
+            b.build()
+        };
+        let mut vm = VM::new(chunk);
+        vm.set_awk_host(Box::new(RecordingAwkHost::default()));
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_str(), "42"),
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn awk_ops_are_inert_without_host_but_keep_stack_balanced() {
+        use crate::awk_builtins::*;
+        // $1 with no host → pushes "" (stack stays balanced, run returns it).
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(1), 1);
+            awk_op(&mut b, AWK_FIELD_GET, 0);
+            b.build()
+        };
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_str(), ""),
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    // ── First-class AWK ops (Op::Awk*) ──
+    // These mirror the shell-ops design: named Op variants dispatched to the
+    // same AwkHost path as the reserved ExtendedWide AWK range. The tests below
+    // prove each first-class variant routes to the host identically to its
+    // `ExtendedWide(AWK_*)` form.
+
+    #[test]
+    fn first_class_awk_field_get_routes_to_host() {
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(2), 1); // $2
+            b.emit(Op::AwkFieldGet, 1);
+            b.build()
+        };
+        let mut vm = VM::new(chunk);
+        let mut host = RecordingAwkHost::default();
+        host.fields = vec!["a".into(), "b".into(), "c".into()];
+        vm.set_awk_host(Box::new(host));
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_str(), "c"),
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn first_class_awk_print_pops_args_in_source_order() {
+        struct H(std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+        impl crate::awk_host::AwkHost for H {
+            fn print(&mut self, args: &[Value]) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(args.iter().map(|v| v.to_str()).collect());
+            }
+        }
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let x = b.add_constant(Value::str("x"));
+            let y = b.add_constant(Value::str("y"));
+            b.emit(Op::LoadConst(x), 1);
+            b.emit(Op::LoadConst(y), 1);
+            b.emit(Op::AwkPrint(2), 1);
+            b.build()
+        };
+        let mut vm = VM::new(chunk);
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        vm.set_awk_host(Box::new(H(sink.clone())));
+        let _ = vm.run();
+        assert_eq!(
+            sink.lock().unwrap().as_slice(),
+            &[vec!["x".to_string(), "y".to_string()]]
+        );
+    }
+
+    #[test]
+    fn first_class_awk_array_roundtrip_matches_extendedwide() {
+        // counts["k"]="42"; counts["k"] — once via Op::AwkArray*, once via the
+        // ExtendedWide form; both must yield the same value.
+        fn run_variant(first_class: bool) -> String {
+            use crate::awk_builtins::*;
+            let mut b = ChunkBuilder::new();
+            let arr = b.add_name("counts");
+            let k = b.add_constant(Value::str("k"));
+            let val = b.add_constant(Value::str("42"));
+            b.emit(Op::LoadConst(val), 1);
+            b.emit(Op::LoadConst(k), 1);
+            if first_class {
+                b.emit(Op::AwkArraySet(arr), 1);
+            } else {
+                b.emit(Op::ExtendedWide(AWK_ARRAY_SET, arr as usize), 1);
+            }
+            b.emit(Op::LoadConst(k), 1);
+            if first_class {
+                b.emit(Op::AwkArrayGet(arr), 1);
+            } else {
+                b.emit(Op::ExtendedWide(AWK_ARRAY_GET, arr as usize), 1);
+            }
+            let mut vm = VM::new(b.build());
+            vm.set_awk_host(Box::new(RecordingAwkHost::default()));
+            match vm.run() {
+                VMResult::Ok(v) => v.to_str(),
+                other => panic!("got {:?}", other),
+            }
+        }
+        assert_eq!(run_variant(true), "42");
+        assert_eq!(run_variant(true), run_variant(false));
+    }
+
+    #[test]
+    fn first_class_awk_ops_inert_without_host() {
+        // $1 (Op::AwkFieldGet) with no host → pushes "" and stays balanced.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(1), 1);
+            b.emit(Op::AwkFieldGet, 1);
+            b.build()
+        };
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_str(), ""),
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    // ── Host-independent AWK string builtins execute natively (no host) ──
+    // `substr`/`tolower`/`toupper`/`index`/`length(s)` need none of AWK's
+    // host-side runtime state, so they compute real results even when no
+    // `AwkHost` is registered (unlike field/array/print ops, which stay inert).
+
+    fn run_native(chunk: crate::chunk::Chunk) -> Value {
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => v,
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn awk_substr_executes_natively_without_host() {
+        // substr("hello", 2, 3) → "ell"
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("hello"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::LoadInt(2), 1);
+            b.emit(Op::LoadInt(3), 1);
+            b.emit(Op::AwkSubstr(3), 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_str(), "ell");
+    }
+
+    #[test]
+    fn awk_substr_two_arg_to_end_without_host() {
+        // substr("hello", 2) → "ello"
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("hello"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::LoadInt(2), 1);
+            b.emit(Op::AwkSubstr(2), 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_str(), "ello");
+    }
+
+    #[test]
+    fn awk_tolower_toupper_execute_natively_without_host() {
+        let lower = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("MiXeD"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkToLower, 1);
+            b.build()
+        };
+        assert_eq!(run_native(lower).to_str(), "mixed");
+        let upper = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("MiXeD"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkToUpper, 1);
+            b.build()
+        };
+        assert_eq!(run_native(upper).to_str(), "MIXED");
+    }
+
+    #[test]
+    fn awk_index_executes_natively_without_host() {
+        // index("hello", "ll") → 3
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("hello"));
+            let t = b.add_constant(Value::str("ll"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::LoadConst(t), 1);
+            b.emit(Op::AwkIndex, 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_int(), 3);
+    }
+
+    #[test]
+    fn awk_length_scalar_executes_natively_without_host() {
+        // length("héllo") → 5 chars (not bytes)
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("héllo"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkLength(1), 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_int(), 5);
+    }
+
+    #[test]
+    fn awk_native_string_ops_match_host_path() {
+        // The no-host native result must equal the DefaultAwkHost result.
+        use crate::awk_host::{awk_index, awk_substr, awk_tolower};
+        assert_eq!(
+            awk_substr(&Value::str("hello"), 2, Some(3)).to_str(),
+            "ell"
+        );
+        assert_eq!(awk_index(&Value::str("hello"), &Value::str("z")), 0);
+        assert_eq!(awk_tolower(&Value::str("ABC")).to_str(), "abc");
+    }
+
+    // ── Host-independent AWK numeric builtins execute natively (no host) ──
+    // int/sqrt/sin/cos/exp/log/atan2 are pure f64 math with no AWK runtime
+    // state, so they compute real results with no `AwkHost` registered.
+
+    #[test]
+    fn awk_int_truncates_toward_zero_without_host() {
+        for (input, want) in [(3.7_f64, 3_i64), (-3.7, -3), (0.0, 0)] {
+            let chunk = {
+                let mut b = ChunkBuilder::new();
+                let x = b.add_constant(Value::Float(input));
+                b.emit(Op::LoadConst(x), 1);
+                b.emit(Op::AwkInt, 1);
+                b.build()
+            };
+            assert_eq!(run_native(chunk).to_int(), want, "int({input})");
+        }
+    }
+
+    #[test]
+    fn awk_sqrt_exp_log_execute_natively_without_host() {
+        let sqrt = {
+            let mut b = ChunkBuilder::new();
+            let x = b.add_constant(Value::Float(16.0));
+            b.emit(Op::LoadConst(x), 1);
+            b.emit(Op::AwkSqrt, 1);
+            b.build()
+        };
+        assert_eq!(run_native(sqrt).to_float(), 4.0);
+        let log = {
+            let mut b = ChunkBuilder::new();
+            let x = b.add_constant(Value::Float(std::f64::consts::E));
+            b.emit(Op::LoadConst(x), 1);
+            b.emit(Op::AwkLog, 1);
+            b.build()
+        };
+        assert!((run_native(log).to_float() - 1.0).abs() < 1e-12);
+        let exp = {
+            let mut b = ChunkBuilder::new();
+            let x = b.add_constant(Value::Float(0.0));
+            b.emit(Op::LoadConst(x), 1);
+            b.emit(Op::AwkExp, 1);
+            b.build()
+        };
+        assert_eq!(run_native(exp).to_float(), 1.0);
+    }
+
+    #[test]
+    fn awk_sin_cos_execute_natively_without_host() {
+        let sin = {
+            let mut b = ChunkBuilder::new();
+            let x = b.add_constant(Value::Float(0.0));
+            b.emit(Op::LoadConst(x), 1);
+            b.emit(Op::AwkSin, 1);
+            b.build()
+        };
+        assert_eq!(run_native(sin).to_float(), 0.0);
+        let cos = {
+            let mut b = ChunkBuilder::new();
+            let x = b.add_constant(Value::Float(0.0));
+            b.emit(Op::LoadConst(x), 1);
+            b.emit(Op::AwkCos, 1);
+            b.build()
+        };
+        assert_eq!(run_native(cos).to_float(), 1.0);
+    }
+
+    #[test]
+    fn awk_atan2_pops_y_then_x_without_host() {
+        // atan2(1, 1) == π/4. Stack order is [y, x] (y pushed first).
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let y = b.add_constant(Value::Float(1.0));
+            let x = b.add_constant(Value::Float(1.0));
+            b.emit(Op::LoadConst(y), 1);
+            b.emit(Op::LoadConst(x), 1);
+            b.emit(Op::AwkAtan2, 1);
+            b.build()
+        };
+        assert!((run_native(chunk).to_float() - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
+    }
+
+    // ── Host-independent AWK bitwise builtins execute natively (no host) ──
+    // gawk and/or/xor/compl/lshift/rshift are pure integer math (operands
+    // truncated to u64), ported faithfully from awkrs's f64 path.
+
+    fn run_native_int(chunk: crate::chunk::Chunk) -> i64 {
+        run_native(chunk).to_int()
+    }
+
+    #[test]
+    fn awk_and_or_xor_execute_natively_without_host() {
+        // and(12,10)=8, or(12,10)=14, xor(12,10)=6
+        let mk = |op: Op| {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(12), 1);
+            b.emit(Op::LoadInt(10), 1);
+            b.emit(op, 1);
+            b.build()
+        };
+        assert_eq!(run_native_int(mk(Op::AwkAnd(2))), 8);
+        assert_eq!(run_native_int(mk(Op::AwkOr(2))), 14);
+        assert_eq!(run_native_int(mk(Op::AwkXor(2))), 6);
+    }
+
+    #[test]
+    fn awk_and_is_variadic_without_host() {
+        // and(15, 9, 5) → 15&9=9, 9&5=1
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(15), 1);
+            b.emit(Op::LoadInt(9), 1);
+            b.emit(Op::LoadInt(5), 1);
+            b.emit(Op::AwkAnd(3), 1);
+            b.build()
+        };
+        assert_eq!(run_native_int(chunk), 1);
+    }
+
+    #[test]
+    fn awk_compl_matches_awkrs_i64_wrap_without_host() {
+        // awkrs f64 path: compl(0) = (!0u64) as i64 = -1.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(0), 1);
+            b.emit(Op::AwkCompl, 1);
+            b.build()
+        };
+        assert_eq!(run_native_int(chunk), -1);
+    }
+
+    #[test]
+    fn awk_lshift_rshift_execute_natively_without_host() {
+        // lshift(1,4)=16; rshift(256,4)=16. Stack order is [v, n].
+        let lshift = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(1), 1);
+            b.emit(Op::LoadInt(4), 1);
+            b.emit(Op::AwkLshift, 1);
+            b.build()
+        };
+        assert_eq!(run_native_int(lshift), 16);
+        let rshift = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(256), 1);
+            b.emit(Op::LoadInt(4), 1);
+            b.emit(Op::AwkRshift, 1);
+            b.build()
+        };
+        assert_eq!(run_native_int(rshift), 16);
+    }
+
+    #[test]
+    fn awk_bitwise_free_fns_match_gawk_semantics() {
+        use crate::awk_host::{awk_compl, awk_fold_and, awk_fold_or, awk_fold_xor, awk_lshift};
+        assert_eq!(awk_fold_and(&[Value::Int(12), Value::Int(10)]), 8);
+        assert_eq!(awk_fold_or(&[Value::Int(12), Value::Int(10)]), 14);
+        assert_eq!(awk_fold_xor(&[Value::Int(12), Value::Int(10)]), 6);
+        assert_eq!(awk_compl(&Value::Int(0)), -1);
+        // shift count is masked to low 6 bits (n & 0x3f)
+        assert_eq!(awk_lshift(&Value::Int(1), &Value::Int(64)), 1);
+    }
+
+    #[test]
+    fn awk_mktime_utc_executes_natively_without_host() {
+        // mktime("2020 01 01 00 00 00", 1) in UTC = 1577836800 epoch seconds.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("2020 01 01 00 00 00"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::LoadInt(1), 1); // utc = true
+            b.emit(Op::AwkMktime(2), 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_float(), 1_577_836_800.0);
+    }
+
+    #[test]
+    fn awk_mktime_bad_datespec_returns_minus_one_without_host() {
+        // Fewer than 6 fields → -1.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("2020 01 01"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkMktime(1), 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_float(), -1.0);
+    }
+
+    #[test]
+    fn awk_strftime_utc_executes_natively_without_host() {
+        // strftime("%Y-%m-%d", 0, 1) in UTC = "1970-01-01".
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let fmt = b.add_constant(Value::str("%Y-%m-%d"));
+            b.emit(Op::LoadConst(fmt), 1);
+            b.emit(Op::LoadInt(0), 1); // ts = epoch
+            b.emit(Op::LoadInt(1), 1); // utc = true
+            b.emit(Op::AwkStrftime(3), 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_str(), "1970-01-01");
+    }
+
+    #[test]
+    fn awk_strftime_mktime_free_fns_match_awkrs() {
+        use crate::awk_host::{awk_mktime, awk_strftime};
+        // UTC round trip and -1 sentinel.
+        assert_eq!(
+            awk_mktime(&[Value::str("2020 01 01 00 00 00"), Value::Int(1)]).to_float(),
+            1_577_836_800.0
+        );
+        assert_eq!(awk_mktime(&[Value::str("garbage")]).to_float(), -1.0);
+        assert_eq!(
+            awk_strftime(&[Value::str("%H:%M:%S"), Value::Int(0), Value::Int(1)]).to_str(),
+            "00:00:00"
+        );
+    }
+
+    #[test]
+    fn awk_ord_executes_natively_without_host() {
+        // ord("A") = 65; ord("") = 0.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("ABC"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkOrd, 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_float(), 65.0);
+
+        let empty = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str(""));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkOrd, 1);
+            b.build()
+        };
+        assert_eq!(run_native(empty).to_float(), 0.0);
+    }
+
+    #[test]
+    fn awk_chr_executes_natively_without_host() {
+        // chr(65) = "A"; chr of an invalid scalar (surrogate) = "".
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(65), 1);
+            b.emit(Op::AwkChr, 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_str(), "A");
+
+        let bad = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(0xD800), 1); // lone surrogate → invalid
+            b.emit(Op::AwkChr, 1);
+            b.build()
+        };
+        assert_eq!(run_native(bad).to_str(), "");
+    }
+
+    #[test]
+    fn awk_mkbool_executes_natively_without_host() {
+        // mkbool(7) = 1; mkbool(0) = 0; mkbool("") = 0.
+        let truthy = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(7), 1);
+            b.emit(Op::AwkMkbool, 1);
+            b.build()
+        };
+        assert_eq!(run_native(truthy).to_float(), 1.0);
+
+        let zero = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(0), 1);
+            b.emit(Op::AwkMkbool, 1);
+            b.build()
+        };
+        assert_eq!(run_native(zero).to_float(), 0.0);
+    }
+
+    #[test]
+    fn awk_intdiv_executes_natively_without_host() {
+        // intdiv(17, 5) = 3 (truncating); intdiv(x, 0) = Undef.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(17), 1);
+            b.emit(Op::LoadInt(5), 1);
+            b.emit(Op::AwkIntdiv, 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_float(), 3.0);
+
+        let div0 = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(17), 1);
+            b.emit(Op::LoadInt(0), 1);
+            b.emit(Op::AwkIntdiv, 1);
+            b.build()
+        };
+        assert!(matches!(run_native(div0), Value::Undef));
+    }
+
+    #[test]
+    fn awk_intdiv0_executes_natively_without_host() {
+        // intdiv0(17, 5) = 3; intdiv0(x, 0) = 0 (safe variant, never errors).
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(17), 1);
+            b.emit(Op::LoadInt(5), 1);
+            b.emit(Op::AwkIntdiv0, 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_float(), 3.0);
+
+        let div0 = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(17), 1);
+            b.emit(Op::LoadInt(0), 1);
+            b.emit(Op::AwkIntdiv0, 1);
+            b.build()
+        };
+        assert_eq!(run_native(div0).to_float(), 0.0);
+    }
+
+    #[test]
+    fn awk_gensub_stub_is_stack_balanced_without_host() {
+        // Host-bound op: with no AwkHost the stub pops all argc operands and
+        // pushes a neutral empty string, keeping the stack balanced.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let re = b.add_constant(Value::str("x"));
+            let repl = b.add_constant(Value::str("y"));
+            let how = b.add_constant(Value::str("g"));
+            let target = b.add_constant(Value::str("xax"));
+            b.emit(Op::LoadConst(re), 1);
+            b.emit(Op::LoadConst(repl), 1);
+            b.emit(Op::LoadConst(how), 1);
+            b.emit(Op::LoadConst(target), 1);
+            b.emit(Op::AwkGensub(4), 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_str(), "");
+    }
+
+    #[test]
+    fn awk_char_scalar_free_fns_match_awkrs() {
+        use crate::awk_host::{awk_chr, awk_intdiv, awk_intdiv0, awk_mkbool, awk_ord};
+        assert_eq!(awk_ord(&Value::str("z")).to_float(), 122.0);
+        assert_eq!(awk_chr(&Value::Int(0x1F600)).to_str(), "😀");
+        assert_eq!(awk_mkbool(&Value::str("0")).to_float(), 0.0);
+        assert_eq!(awk_mkbool(&Value::str("x")).to_float(), 1.0);
+        assert_eq!(awk_intdiv(&Value::Int(-7), &Value::Int(2)).to_float(), -3.0);
+        assert!(matches!(
+            awk_intdiv(&Value::Int(1), &Value::Int(0)),
+            Value::Undef
+        ));
+        assert_eq!(awk_intdiv0(&Value::Int(-7), &Value::Int(2)).to_float(), -3.0);
+        assert_eq!(awk_intdiv0(&Value::Int(1), &Value::Int(0)).to_float(), 0.0);
+    }
+
+    #[test]
+    fn awk_rand_executes_natively_without_host() {
+        // Fresh VM seeds rand_seed=1; first rand() is deterministic.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::AwkRand, 1);
+            b.build()
+        };
+        let v = run_native(chunk).to_float();
+        assert!((0.0..1.0).contains(&v), "rand() = {v} out of [0,1)");
+        assert_eq!(v, 0.51385498046875, "first rand() from seed=1 must be stable");
+    }
+
+    #[test]
+    fn awk_srand_reseeds_and_returns_prev_seed_without_host() {
+        // srand(42) on a fresh VM (seed=1) returns previous seed 1.0, then the
+        // next rand() follows the seed-42 sequence.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(42), 1);
+            b.emit(Op::AwkSrand(1), 1); // pushes prev seed (1.0)
+            b.emit(Op::Pop, 1);
+            b.emit(Op::AwkRand, 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_float(), 0.582305908203125);
+    }
+
+    #[test]
+    fn awk_srand_no_arg_returns_prev_seed_without_host() {
+        // srand() with no arg reseeds from the clock but still returns prev seed
+        // (1.0 on a fresh VM).
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::AwkSrand(0), 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_float(), 1.0);
+    }
+
+    #[test]
+    fn awk_rand_srand_free_fns_match_awkrs_lcg() {
+        use crate::awk_host::{awk_rand, awk_srand};
+        let mut seed: u64 = 1;
+        assert_eq!(awk_rand(&mut seed), 0.51385498046875);
+        // srand(Some(42)) returns prev seed low-32 bits and reseeds to 42
+        let prev = awk_srand(&mut seed, Some(42));
+        assert_eq!(prev, 1103527590.0);
+        assert_eq!(awk_rand(&mut seed), 0.582305908203125);
+    }
+
+    #[test]
+    fn awk_systime_executes_natively_without_host() {
+        // systime() pushes seconds since the Unix epoch; must be a large positive
+        // number (well past 2020-01-01 = 1577836800) with no host registered.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::AwkSystime, 1);
+            b.build()
+        };
+        let v = run_native(chunk).to_float();
+        assert!(v > 1_577_836_800.0, "systime() = {v} should be past 2020");
+    }
+
+    #[test]
+    fn awk_systime_free_fn_is_positive() {
+        use crate::awk_host::awk_systime;
+        assert!(awk_systime() > 1_577_836_800.0);
+    }
+
+    #[test]
+    fn awk_strtonum_executes_natively_without_host() {
+        // strtonum("0x10") → 16 (hex), no host registered.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("0x10"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkStrtonum, 1);
+            b.build()
+        };
+        assert_eq!(run_native(chunk).to_float(), 16.0);
+    }
+
+    #[test]
+    fn awk_strtonum_octal_and_decimal_prefix_without_host() {
+        // strtonum("010") → 8 (octal); strtonum("42abc") → 42 (longest prefix).
+        let octal = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("010"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkStrtonum, 1);
+            b.build()
+        };
+        assert_eq!(run_native(octal).to_float(), 8.0);
+        let prefix = {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("42abc"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(Op::AwkStrtonum, 1);
+            b.build()
+        };
+        assert_eq!(run_native(prefix).to_float(), 42.0);
+    }
+
+    #[test]
+    fn awk_strtonum_free_fn_matches_awkrs_semantics() {
+        use crate::awk_host::awk_strtonum;
+        assert_eq!(awk_strtonum(""), 0.0);
+        assert_eq!(awk_strtonum("   "), 0.0);
+        assert_eq!(awk_strtonum("0x10"), 16.0);
+        assert_eq!(awk_strtonum("0Xff"), 255.0);
+        assert_eq!(awk_strtonum("010"), 8.0);
+        assert_eq!(awk_strtonum("3.5"), 3.5);
+        // invalid hex → 0
+        assert_eq!(awk_strtonum("0x"), 0.0);
+        assert_eq!(awk_strtonum("0xzz"), 0.0);
+        // signed disqualifies hex/octal form: "+0x10" parses leading "+0" → 0
+        assert_eq!(awk_strtonum("+0x10"), 0.0);
+        // bare nan/inf without sign → 0 (gawk number scan rejects)
+        assert_eq!(awk_strtonum("nan"), 0.0);
+        assert_eq!(awk_strtonum("inf"), 0.0);
+    }
+
+    #[test]
+    fn awk_builtin_substr_default_impl_is_posix() {
+        use crate::awk_host::{AwkHost, DefaultAwkHost};
+        let mut h = DefaultAwkHost;
+        assert_eq!(h.substr(&Value::str("hello"), 2, Some(3)).to_str(), "ell");
+        assert_eq!(h.substr(&Value::str("hello"), 2, None).to_str(), "ello");
+        assert_eq!(h.substr(&Value::str("hello"), 0, Some(3)).to_str(), "he");
+        assert_eq!(h.index(&Value::str("hello"), &Value::str("ll")), 3);
+        assert_eq!(h.index(&Value::str("hello"), &Value::str("z")), 0);
+    }
+
+    #[test]
+    fn awk_op_range_is_disjoint_from_generic_extended_wide() {
+        use crate::awk_builtins::*;
+        assert!(!is_awk_op(0));
+        assert!(!is_awk_op(AWK_OP_BASE - 1));
+        assert!(is_awk_op(AWK_FIELD_GET));
+        assert!(is_awk_op(AWK_ARRAY_LEN));
+        assert!(!is_awk_op(AWK_OP_END));
     }
 }

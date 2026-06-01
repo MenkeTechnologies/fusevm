@@ -641,6 +641,7 @@ mod cranelift_jit_impl {
             }
             Op::PreIncSlot(_) => stack.push(Cell::Dyn),
             Op::PreIncSlotVoid(_) => {}
+            Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_) => stack.push(Cell::Dyn),
             Op::SlotLtIntJumpIfFalse(_, _, _) => {} // control flow, handled at block level
             Op::SlotIncLtIntJumpBack(_, _, _) => {} // control flow, handled at block level
             Op::AccumSumLoop(_, _, _) => {}         // self-contained fused op
@@ -688,6 +689,9 @@ mod cranelift_jit_impl {
                     | Op::SetSlot(_)
                     | Op::PreIncSlot(_)
                     | Op::PreIncSlotVoid(_)
+                    | Op::PreDecSlot(_)
+                    | Op::PostIncSlot(_)
+                    | Op::PostDecSlot(_)
                     | Op::SlotLtIntJumpIfFalse(_, _, _)
                     | Op::SlotIncLtIntJumpBack(_, _, _)
                     | Op::AccumSumLoop(_, _, _)
@@ -1127,6 +1131,33 @@ mod cranelift_jit_impl {
                 let one = bcx.ins().iconst(types::I64, 1);
                 let new = bcx.ins().iadd(old, one);
                 bcx.ins().store(MemFlags::trusted(), new, base, off);
+            }
+            Op::PreDecSlot(slot) => {
+                let base = slot_base?;
+                let off = (*slot as i32) * 8;
+                let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
+                let one = bcx.ins().iconst(types::I64, 1);
+                let new = bcx.ins().isub(old, one);
+                bcx.ins().store(MemFlags::trusted(), new, base, off);
+                stack.push((new, JitTy::Int));
+            }
+            Op::PostIncSlot(slot) => {
+                let base = slot_base?;
+                let off = (*slot as i32) * 8;
+                let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
+                let one = bcx.ins().iconst(types::I64, 1);
+                let new = bcx.ins().iadd(old, one);
+                bcx.ins().store(MemFlags::trusted(), new, base, off);
+                stack.push((old, JitTy::Int));
+            }
+            Op::PostDecSlot(slot) => {
+                let base = slot_base?;
+                let off = (*slot as i32) * 8;
+                let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
+                let one = bcx.ins().iconst(types::I64, 1);
+                let new = bcx.ins().isub(old, one);
+                bcx.ins().store(MemFlags::trusted(), new, base, off);
+                stack.push((old, JitTy::Int));
             }
             Op::AddAssignSlotVoid(a_slot, b_slot) => {
                 let base = slot_base?;
@@ -2445,6 +2476,9 @@ mod cranelift_jit_impl {
                 | Op::SetSlot(_)
                 | Op::PreIncSlot(_)
                 | Op::PreIncSlotVoid(_)
+                | Op::PreDecSlot(_)
+                | Op::PostIncSlot(_)
+                | Op::PostDecSlot(_)
                 | Op::AddAssignSlotVoid(_, _)
                 | Op::Jump(_)
                 | Op::JumpIfTrue(_)
@@ -2589,6 +2623,9 @@ mod cranelift_jit_impl {
                 | Op::SetSlot(s)
                 | Op::PreIncSlot(s)
                 | Op::PreIncSlotVoid(s)
+                | Op::PreDecSlot(s)
+                | Op::PostIncSlot(s)
+                | Op::PostDecSlot(s)
                 | Op::SlotLtIntJumpIfFalse(s, _, _)
                 | Op::SlotIncLtIntJumpBack(s, _, _) => {
                     slots.insert(*s);
@@ -2832,6 +2869,30 @@ mod cranelift_jit_impl {
                             let one = bcx.ins().iconst(types::I64, 1);
                             let new = bcx.ins().iadd(old, one);
                             bcx.def_var(var, new);
+                        }
+                        Op::PreDecSlot(slot) => {
+                            let var = *slot_vars.get(slot)?;
+                            let old = bcx.use_var(var);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let new = bcx.ins().isub(old, one);
+                            bcx.def_var(var, new);
+                            stack.push((new, JitTy::Int));
+                        }
+                        Op::PostIncSlot(slot) => {
+                            let var = *slot_vars.get(slot)?;
+                            let old = bcx.use_var(var);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let new = bcx.ins().iadd(old, one);
+                            bcx.def_var(var, new);
+                            stack.push((old, JitTy::Int));
+                        }
+                        Op::PostDecSlot(slot) => {
+                            let var = *slot_vars.get(slot)?;
+                            let old = bcx.use_var(var);
+                            let one = bcx.ins().iconst(types::I64, 1);
+                            let new = bcx.ins().isub(old, one);
+                            bcx.def_var(var, new);
+                            stack.push((old, JitTy::Int));
                         }
                         Op::AddAssignSlotVoid(a_slot, b_slot) => {
                             let a_var = *slot_vars.get(a_slot)?;
@@ -3545,6 +3606,10 @@ mod cranelift_jit_impl {
             Op::SlotLtIntJumpIfFalse(_, _, _)
             | Op::SlotIncLtIntJumpBack(_, _, _)
             | Op::AccumSumLoop(_, _, _) => false,
+            // Post/pre-dec slot ops are emitted by the bytecode optimizer for
+            // counter loops and are handled by the block JIT (whole-chunk);
+            // the trace tier has no codegen for them, so reject to fall back.
+            Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_) => false,
             _ => is_block_eligible_op(op),
         }
     }

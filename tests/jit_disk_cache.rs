@@ -436,3 +436,64 @@ fn cache_size_clear_and_max_bytes_api() {
     jit.set_jit_cache_dir(None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// New slot ops (PreDecSlot / PostIncSlot / PostDecSlot): block JIT must match
+/// the interpreter. Builds a counted loop that exercises each op and compares
+/// the native (eager block JIT) result against a pure-interpreter run.
+#[test]
+fn new_slot_ops_block_jit_matches_interp() {
+    use fusevm::Op::*;
+    // slots: 0=i (counter), 1=acc, 2=scratch
+    // Loop: while i < 5 { acc += PostIncSlot(scratch-ish)... } — keep it simple:
+    // acc = 0; i = 0; do { tmp = i++ (PostIncSlot i); acc = acc + tmp; } while i<5
+    // Then j = 5; --j (PreDecSlot); k = j--; (PostDecSlot) push results to acc.
+    let ops = vec![
+        (PushFrame, 1),
+        (LoadInt(0), 1),
+        (SetSlot(1), 1), // acc = 0
+        (LoadInt(0), 1),
+        (SetSlot(0), 1), // i = 0
+        // loop header @ ip 5
+        (PostIncSlot(0), 1), // push old i, i++
+        (GetSlot(1), 1),
+        (Add, 1),
+        (SetSlot(1), 1), // acc += old_i
+        (SlotLtIntJumpIfFalse(0, 5, 14), 1), // if i<5 fallthrough else jump exit(14)
+        (Jump(5), 1),
+        (Nop, 1),
+        (Nop, 1),
+        (Nop, 1),
+        // exit @ 14: j=10; --j; pre-dec pushes 9; acc+=9
+        (LoadInt(10), 1),
+        (SetSlot(2), 1),
+        (PreDecSlot(2), 1), // push 9
+        (GetSlot(1), 1),
+        (Add, 1),
+        (SetSlot(1), 1),
+        // post-dec j(=9) -> push 9, j=8; acc+=9
+        (PostDecSlot(2), 1),
+        (GetSlot(1), 1),
+        (Add, 1),
+        (SetSlot(1), 1),
+        (GetSlot(1), 1), // result = acc
+    ];
+    let chunk = build(&ops);
+
+    // Interpreter result.
+    let mut vm = VM::new(chunk.clone());
+    let interp = match vm.run() {
+        VMResult::Ok(v) => v.to_int(),
+        other => panic!("interp failed: {:?}", other),
+    };
+
+    // Block JIT (eager) result via slot buffer.
+    let jit = JitCompiler::new();
+    let mut slots = vec![0i64; 4];
+    let native = jit
+        .try_run_block(&chunk, &mut slots)
+        .or_else(|| jit.try_run_block(&chunk, &mut slots))
+        .expect("block jit should compile new slot ops");
+    // sum of 0..5 = 10, plus 9 + 9 = 28
+    assert_eq!(interp, 28, "interp value");
+    assert_eq!(native, interp, "block jit must match interpreter");
+}

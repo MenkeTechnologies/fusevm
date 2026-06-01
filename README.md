@@ -20,7 +20,7 @@
 
 ## `[PATENT PENDING]`
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 134 opcodes across 20 sections, 8 fused superinstructions, 29 first-class shell ops. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 184 opcodes across 21 sections, 8 fused superinstructions, 29 first-class shell ops, 50 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -73,7 +73,7 @@ awkrs source  ──► awk compiler    ──┘                               
 - **Stack + slots** — stack-based execution with slot-indexed fast paths for locals
 - **Three-tier Cranelift JIT** — Linear JIT (straight-line, compile-on-first-call), Block JIT (CFG-aware, threshold 10), Tracing JIT (records hot loop paths, threshold 50, deopts on type-guard miss)
 - **Zero-clone dispatch** — ops borrowed from chunk, in-place array/hash mutation, `Cow<str>` string coercion
-- **Zero runtime dependencies** — pure Rust, no allocator tricks, no unsafe
+- **Lean foundational dependencies** — pure Rust, no unsafe in the core; runtime deps are durable, widely-vetted crates (`serde`, `tracing`, `glob`, `chrono`); Cranelift JIT and `libc` disk-cache are opt-in feature flags
 
 ---
 
@@ -161,7 +161,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-134 opcodes across 20 sections in `src/op.rs`:
+184 opcodes across 20 sections in `src/op.rs`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -180,6 +180,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 | **Fused** | **8** | `AccumSumLoop`, `SlotIncLtIntJumpBack`, `ConcatConstLoop` |
 | Builtins | 1 | `CallBuiltin(id, argc)` (140 IDs in `shell_builtins.rs`) |
 | Shell Ops | 29 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile`, `RegexMatch` |
+| AWK Ops | 50 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkStrftime`, `AwkMktime`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
 ---
@@ -221,6 +222,35 @@ vm.set_shell_host(Box::new(MyHost));
 ```
 
 Sub-execution (cmd substitution, process substitution, trap handlers) is delivered to the host as `&Chunk` references taken from the parent's `sub_chunks` table. Build them with `ChunkBuilder::add_sub_chunk(sub) -> u16` and reference by index in `Op::CmdSubst(idx)`, `Op::ProcessSubIn(idx)`, `Op::ProcessSubOut(idx)`, `Op::TrapSet(idx)`.
+
+### AWK Host (0.13.0+)
+
+The 50 first-class `Op::Awk*` variants dispatch through the `AwkHost` trait. AWK's data model (numeric-string duality, `CONVFMT`/`OFMT` coercion, `$0`/`$n`/`NF` field coupling, `SUBSEP` arrays, regex, `getline`/`printf` IO) lives in the frontend (awkrs), so most AWK ops require a registered host; without one they stay inert but stack-balanced.
+
+Twenty-nine builtins are the exception — they execute natively **even with no host registered**. Most are pure on `fusevm::Value`; `rand`/`srand` run against a VM-owned PRNG seed (execution-intrinsic state, reset with the VM); `strftime`/`mktime` read the system timezone but need no AWK runtime state:
+
+- **Strings:** `substr`, `index`, `tolower`, `toupper`, scalar `length(s)`.
+- **Characters (gawk):** `ord` (first char → codepoint), `chr` (codepoint → char, empty if invalid).
+- **Math:** `int`, `sqrt`, `sin`, `cos`, `exp`, `log`, `atan2` (pure `f64`), `intdiv` (truncating integer quotient; `Undef` on divide-by-zero), `intdiv0` (same, but `0` on divide-by-zero), `mkbool` (`1`/`0` by truthiness).
+- **Bitwise (gawk):** `and`, `or`, `xor`, `compl`, `lshift`, `rshift` (operands truncated to integers).
+- **Conversion (gawk):** `strtonum` (`0x…` hex, `0…` octal, else longest decimal/float prefix).
+- **Time (gawk):** `systime`, `strftime`, `mktime` (`chrono`-backed; local-tz and UTC paths).
+- **PRNG (POSIX/gawk):** `rand`, `srand` (glibc LCG over a VM-owned seed initialized to 1; deterministic without a host).
+
+```rust
+use fusevm::{VM, ChunkBuilder, Op, Value};
+
+let mut b = ChunkBuilder::new();
+let s = b.add_constant(Value::str("hello"));
+b.emit(Op::LoadConst(s), 1);
+b.emit(Op::LoadInt(2), 1);
+b.emit(Op::LoadInt(3), 1);
+b.emit(Op::AwkSubstr(3), 1);          // substr("hello", 2, 3)
+let mut vm = VM::new(b.build());      // no set_awk_host needed
+// vm.run() → "ell"
+```
+
+A registered host may still override these (e.g. locale-aware casing, MPFR-precision math, or gawk's fatal-error on negative bitwise operands); the native path is used only when no host is present. `length($0)` and `length(arr)` always need the host (field/array state). `rand`/`srand` also need the host (RNG seed state).
 
 ---
 
