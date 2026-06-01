@@ -45,7 +45,14 @@
 //! `PreIncSlot`/`PreIncSlotVoid`/`SlotLtIntJumpIfFalse`/`SlotIncLtIntJumpBack`/`AccumSumLoop`/`AddAssignSlotVoid`.
 
 /// Extension trait for language-specific JIT codegen.
-/// Frontends implement this to JIT their Extended ops.
+/// Frontends implement this to JIT their `Op::Extended` ops.
+///
+/// Register an instance once at startup via [`register_global_extension`]; the
+/// block JIT then consults it both for eligibility ([`JitExtension::can_jit`])
+/// and codegen ([`JitExtension::emit_extended`]). Because the emitted code is
+/// plain Cranelift IR over the abstract i64 operand stack (no new host-helper
+/// relocations), Extended-containing chunks remain eligible for the on-disk
+/// native-code cache just like the universal subset.
 pub trait JitExtension: Send + Sync {
     /// Whether this extension can JIT-compile the given extended op ID.
     fn can_jit(&self, ext_id: u16) -> bool;
@@ -55,6 +62,67 @@ pub trait JitExtension: Send + Sync {
 
     /// Human-readable name for debugging.
     fn name(&self) -> &str;
+
+    /// Emit Cranelift IR for `Op::Extended(ext_id, arg)`, manipulating the
+    /// abstract operand stack through `cx` (pop inputs, push the result).
+    ///
+    /// Return `true` once the op has been fully lowered; return `false` to
+    /// decline, which aborts block-JIT compilation of the whole chunk so it
+    /// falls back to the interpreter. The default declines everything, so an
+    /// extension that only sets `can_jit` without overriding this is a no-op.
+    ///
+    /// Implementations must only emit self-contained IR (arithmetic, compares,
+    /// `select`, slot loads/stores) — calling out to host functions would add
+    /// relocations the native-code cache cannot persist, so such ops should
+    /// return `false` here and be handled by the interpreter instead.
+    #[cfg(feature = "jit")]
+    fn emit_extended(&self, ext_id: u16, arg: u8, cx: &mut ExtJitCtx) -> bool {
+        let _ = (ext_id, arg, cx);
+        false
+    }
+}
+
+#[cfg(feature = "jit")]
+pub use cranelift_jit_impl::ExtJitCtx;
+
+/// Opaque Cranelift SSA value handle produced/consumed by [`ExtJitCtx`] helpers.
+/// Frontends thread these between helper calls without depending on Cranelift.
+#[cfg(feature = "jit")]
+pub type JitValue = cranelift_codegen::ir::Value;
+
+/// Global registry of JIT extensions, consulted by the block JIT for any
+/// `Op::Extended` it encounters. Registration is process-global because the
+/// codegen path is reached through free functions (and frontends typically
+/// create throwaway [`JitCompiler`] instances per call), so per-instance
+/// registration would never reach the compiler.
+fn ext_registry() -> &'static std::sync::RwLock<Vec<std::sync::Arc<dyn JitExtension>>> {
+    static REG: std::sync::OnceLock<std::sync::RwLock<Vec<std::sync::Arc<dyn JitExtension>>>> =
+        std::sync::OnceLock::new();
+    REG.get_or_init(|| std::sync::RwLock::new(Vec::new()))
+}
+
+/// Register a JIT extension process-wide. Call once, before the first chunk is
+/// compiled (block-JIT eligibility is memoised per chunk, so an extension
+/// registered after a chunk was first judged ineligible will not retroactively
+/// make it eligible). Idempotent for a given extension `name`.
+pub fn register_global_extension(ext: std::sync::Arc<dyn JitExtension>) {
+    let mut reg = ext_registry().write().unwrap();
+    if reg.iter().any(|e| e.name() == ext.name()) {
+        return;
+    }
+    tracing::info!(name = ext.name(), ops = ext.op_count(), "JIT extension registered (global)");
+    reg.push(ext);
+}
+
+/// Find the registered extension that handles `ext_id`, if any.
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
+pub(crate) fn global_extension_for(ext_id: u16) -> Option<std::sync::Arc<dyn JitExtension>> {
+    ext_registry()
+        .read()
+        .unwrap()
+        .iter()
+        .find(|e| e.can_jit(ext_id))
+        .cloned()
 }
 
 /// Slot type tag observed at trace recording time.
@@ -827,6 +895,104 @@ mod cranelift_jit_impl {
             JitTy::Float => f64_to_i64_trunc(bcx, v),
         }
     }
+
+    /// Codegen handle handed to [`super::JitExtension::emit_extended`]. Wraps the
+    /// in-flight Cranelift function builder and the block's abstract operand
+    /// stack, exposing just enough to lower a numeric Extended op: pop i64
+    /// inputs, emit IR via [`ExtJitCtx::builder`], and push the i64 result.
+    ///
+    /// Floats on the stack are coerced to i64 on pop (matching the universal
+    /// integer ops), so extensions operate purely on `types::I64` values.
+    pub struct ExtJitCtx<'a, 'f> {
+        bcx: &'a mut FunctionBuilder<'f>,
+        stack: &'a mut Vec<(Value, JitTy)>,
+    }
+
+    impl<'a, 'f> ExtJitCtx<'a, 'f> {
+        /// Pop the top operand as an `i64` Cranelift value (coercing a float to
+        /// a truncated integer). Returns `None` if the abstract stack is empty,
+        /// which the caller treats as a codegen failure.
+        pub fn pop_i64(&mut self) -> Option<Value> {
+            let (v, ty) = self.stack.pop()?;
+            Some(scalar_store_i64(self.bcx, v, ty))
+        }
+
+        /// Push an `i64` Cranelift value as the new top operand.
+        pub fn push_i64(&mut self, v: Value) {
+            self.stack.push((v, JitTy::Int));
+        }
+
+        /// Access the underlying Cranelift function builder to emit IR. Use with
+        /// `cranelift_codegen::ir::InstBuilder` (`builder().ins()…`). Most
+        /// extensions can use the typed integer helpers below instead and avoid
+        /// depending on Cranelift directly.
+        pub fn builder(&mut self) -> &mut FunctionBuilder<'f> {
+            self.bcx
+        }
+
+        // ── Cranelift-free integer emit helpers (sufficient for numeric ops) ──
+
+        /// Materialise an `i64` constant.
+        pub fn iconst(&mut self, n: i64) -> Value {
+            self.bcx.ins().iconst(types::I64, n)
+        }
+        /// `a + b` (wrapping i64).
+        pub fn iadd(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().iadd(a, b)
+        }
+        /// `a - b` (wrapping i64).
+        pub fn isub(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().isub(a, b)
+        }
+        /// `a * b` (wrapping i64).
+        pub fn imul(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().imul(a, b)
+        }
+        /// Signed `a / b` (truncated). Caller must guarantee `b != 0` and not
+        /// `INT_MIN / -1`, otherwise the hardware divide traps.
+        pub fn sdiv(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().sdiv(a, b)
+        }
+        /// Signed `a % b` (truncated, sign of dividend). Same trap caveat as
+        /// [`ExtJitCtx::sdiv`].
+        pub fn srem(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().srem(a, b)
+        }
+        /// Bitwise `a & b`.
+        pub fn band(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().band(a, b)
+        }
+        /// Bitwise `a | b`.
+        pub fn bor(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().bor(a, b)
+        }
+        /// Bitwise `a ^ b`.
+        pub fn bxor(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().bxor(a, b)
+        }
+        /// `a == b` → boolean value (use with [`ExtJitCtx::select`]).
+        pub fn icmp_eq(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().icmp(IntCC::Equal, a, b)
+        }
+        /// `a != b` → boolean value.
+        pub fn icmp_ne(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().icmp(IntCC::NotEqual, a, b)
+        }
+        /// Signed `a < b` → boolean value.
+        pub fn icmp_slt(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().icmp(IntCC::SignedLessThan, a, b)
+        }
+        /// Signed `a > b` → boolean value.
+        pub fn icmp_sgt(&mut self, a: Value, b: Value) -> Value {
+            self.bcx.ins().icmp(IntCC::SignedGreaterThan, a, b)
+        }
+        /// `cond ? a : b` (branchless select; `cond` from an `icmp_*` helper).
+        pub fn select(&mut self, cond: Value, a: Value, b: Value) -> Value {
+            self.bcx.ins().select(cond, a, b)
+        }
+    }
+
+
 
     // ── Cranelift IR emission per op ──
 
@@ -2437,6 +2603,9 @@ mod cranelift_jit_impl {
     }
 
     fn is_block_eligible_op(op: &Op) -> bool {
+        if let Op::Extended(id, _) = op {
+            return super::global_extension_for(*id).is_some();
+        }
         matches!(
             op,
             Op::Nop
@@ -2986,6 +3155,18 @@ mod cranelift_jit_impl {
                             let final_i = bcx.block_params(loop_exit)[1];
                             bcx.def_var(sum_var, final_sum);
                             bcx.def_var(i_var, final_i);
+                        }
+
+                        // Extended — delegate to a registered JIT extension.
+                        Op::Extended(id, arg) => {
+                            let ext = super::global_extension_for(*id)?;
+                            let mut cx = ExtJitCtx {
+                                bcx: &mut bcx,
+                                stack: &mut stack,
+                            };
+                            if !ext.emit_extended(*id, *arg, &mut cx) {
+                                return None;
+                            }
                         }
 
                         // Data ops — delegate to emit_data_op
