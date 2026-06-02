@@ -497,3 +497,317 @@ fn new_slot_ops_block_jit_matches_interp() {
     assert_eq!(interp, 28, "interp value");
     assert_eq!(native, interp, "block jit must match interpreter");
 }
+
+/// awkrs lowers an `int(x)` builtin call to the native `Op::AwkInt` (Cranelift
+/// `trunc`). This verifies the end-to-end goal: a numeric chunk containing
+/// `AwkDivJit` — the op a front-end's always-float `/` lowers to (e.g.
+/// strykelang `$x / $y`) — now block-JIT-compiles AND persists a `blk` native
+/// blob to the on-disk cache. Previously div/mod chunks skipped persistence
+/// because the zero-divisor trap libcall was not a registered host helper;
+/// registering it under `H_AWK_DIV_TRAP` makes float division reuse the native
+/// disk cache across process restarts. The compiled result must equal the
+/// interpreter's exact float (`7 / 2 == 3.5`).
+#[test]
+fn disk_cache_awk_div_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("awkdiv");
+
+    // `$x / $y` with x = slot 0, y = slot 1: GetSlot(0); GetSlot(1); AwkDivJit.
+    // Always-float division: 7 / 2 == 3.5 (not integer 3).
+    let chunk = build(&[
+        (Op::GetSlot(0), 1),
+        (Op::GetSlot(1), 1),
+        (Op::AwkDivJit, 1),
+    ]);
+
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig {
+        block_threshold: 1,
+        ..TraceJitConfig::defaults()
+    });
+
+    let mut slots = vec![7i64, 2i64];
+    assert_eq!(
+        jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]),
+        None,
+        "below threshold"
+    );
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => {
+            assert_eq!(f, 3.5, "7.0 / 2.0 must be exactly 3.5");
+        }
+        other => panic!("expected Float(3.5) from AwkDivJit block, got {other:?}"),
+    }
+
+    jit.set_jit_cache_dir(None);
+
+    let blk: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.contains(".blk.") && n.ends_with(".fjit"))
+        })
+        .collect();
+    assert_eq!(
+        blk.len(),
+        1,
+        "expected one persisted blk.fjit for the AwkDivJit chunk, found {:?}",
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+
+    // Reload from disk on a fresh thread (fresh per-thread cache): the loader
+    // must patch the `H_AWK_DIV_TRAP` relocation to the live trap-helper address
+    // and reproduce the exact float, proving div chunks round-trip through the
+    // native disk cache.
+    let dir2 = dir.clone();
+    let chunk2 = chunk.clone();
+    let reloaded = std::thread::spawn(move || {
+        let jit = JitCompiler::new();
+        jit.set_jit_cache_dir(Some(dir2));
+        jit.set_config(TraceJitConfig {
+            block_threshold: 0,
+            ..TraceJitConfig::defaults()
+        });
+        let mut slots = vec![7i64, 2i64];
+        jit.try_run_block_eager_typed_kinded(&chunk2, &mut slots, &[])
+    })
+    .join()
+    .unwrap();
+    match reloaded {
+        Some(fusevm::BlockNum::Float(f)) => assert_eq!(f, 3.5, "reloaded blob must yield 3.5"),
+        other => panic!("expected reloaded Float(3.5), got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `AwkInt` — exactly the shape awkrs's `fusevm_bridge` emits for `x=int(x+c)`
+/// per record — block-JIT-compiles AND persists a `blk` native blob to the
+/// on-disk cache, so the JIT result is reused across process restarts.
+#[test]
+fn disk_cache_awk_int_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("awkint");
+
+    // Mirror awkrs's per-record chunk for `{ x = int(x + 1.9) }` with x = slot 0:
+    //   PushFrame; LoadFloat(seed); SetSlot(0);          (slot-init preamble)
+    //   GetSlot(0); LoadFloat(1.9); Add; AwkInt; Dup; SetSlot(0); Pop
+    let chunk = build(&[
+        (Op::PushFrame, 1),
+        (Op::LoadFloat(0.0), 1),
+        (Op::SetSlot(0), 1),
+        (Op::GetSlot(0), 1),
+        (Op::LoadFloat(1.9), 1),
+        (Op::Add, 1),
+        (Op::AwkInt, 1),
+        (Op::Dup, 1),
+        (Op::SetSlot(0), 1),
+        (Op::Pop, 1),
+    ]);
+
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    // Compile on the 2nd invocation (mimics warmup across records).
+    jit.set_config(TraceJitConfig {
+        block_threshold: 1,
+        ..TraceJitConfig::defaults()
+    });
+
+    let mut slots = vec![0i64; 1];
+    assert_eq!(jit.try_run_block(&chunk, &mut slots), None, "below threshold");
+    let _native = jit
+        .try_run_block(&chunk, &mut slots)
+        .expect("AwkInt chunk must block-JIT compile");
+    // int(0 + 1.9) = 1, written back to slot 0.
+    assert_eq!(slots[0], 1, "slot 0 should be int(1.9) == 1");
+
+    jit.set_jit_cache_dir(None);
+
+    // A `blk` native blob must have been persisted to disk.
+    let blk: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.contains(".blk.") && n.ends_with(".fjit"))
+        })
+        .collect();
+    assert_eq!(
+        blk.len(),
+        1,
+        "expected one persisted blk.fjit for the AwkInt chunk, found {:?}",
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The REAL awkrs lowering: a stable per-record chunk (no PushFrame preamble)
+/// whose accumulator slot holds an f64 BIT PATTERN (SlotKind::Float), seeded as
+/// data before the run. The block JIT must bitcast the slot through f64 so the
+/// arithmetic is real floating-point — not integer-add on the bit pattern.
+/// This pins the f64-slot block-JIT fix that makes awkrs `x = int(x + c)` loops
+/// compile-and-cache correctly under AWKRS_FUSEVM=1.
+#[test]
+fn disk_cache_awk_int_float_slot_block_persists() {
+    use fusevm::{SlotKind, TraceJitConfig};
+    let _g = serial();
+    let dir = fresh_dir("awkint_float");
+
+    // Stable chunk: GetSlot(0); LoadFloat(1.9); Add; AwkInt; Dup; SetSlot(0); Pop
+    let chunk = build(&[
+        (Op::GetSlot(0), 1),
+        (Op::LoadFloat(1.9), 1),
+        (Op::Add, 1),
+        (Op::AwkInt, 1),
+        (Op::Dup, 1),
+        (Op::SetSlot(0), 1),
+        (Op::Pop, 1),
+    ]);
+
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig {
+        block_threshold: 1,
+        ..TraceJitConfig::defaults()
+    });
+
+    let kinds = [SlotKind::Float];
+    // Slot 0 holds the f64 bit pattern of 0.0 (== 0i64) initially.
+    let mut slots = vec![0i64; 1];
+
+    assert_eq!(
+        jit.try_run_block_kinded(&chunk, &mut slots, &kinds),
+        None,
+        "below threshold"
+    );
+    let _native = jit
+        .try_run_block_kinded(&chunk, &mut slots, &kinds)
+        .expect("AwkInt float-slot chunk must block-JIT compile");
+    // int(0.0 + 1.9) = 1.0; slot 0 now holds the f64 bit pattern of 1.0.
+    assert_eq!(
+        f64::from_bits(slots[0] as u64),
+        1.0,
+        "slot 0 should hold f64 1.0 == int(1.9)"
+    );
+
+    // Run again to prove the accumulation is real f64 arithmetic, not int-add
+    // on bit patterns: int(1.0 + 1.9) = int(2.9) = 2.0.
+    let _ = jit.try_run_block_kinded(&chunk, &mut slots, &kinds);
+    assert_eq!(
+        f64::from_bits(slots[0] as u64),
+        2.0,
+        "second pass must be real f64 arithmetic: int(2.9) == 2"
+    );
+
+    jit.set_jit_cache_dir(None);
+
+    let blk: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.contains(".blk.") && n.ends_with(".fjit"))
+        })
+        .collect();
+    assert_eq!(
+        blk.len(),
+        1,
+        "expected one persisted blk.fjit for the float-slot AwkInt chunk"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A float-slot block chunk that calls a transcendental libcall op
+/// (`Op::AwkSin`) must block-JIT compile, run real f64 arithmetic, and persist a
+/// `.blk.fjit` whose relocation references the `H_SIN_F64` host helper. This
+/// pins the awk transcendental libcalls flowing through the on-disk cache (the
+/// `[Option<FuncId>; 8]` helper-id extension + SCHEMA_VERSION 4 bump).
+#[test]
+fn disk_cache_awk_sin_float_slot_block_persists() {
+    use fusevm::{SlotKind, TraceJitConfig};
+    let _g = serial();
+    let dir = fresh_dir("awksin_float");
+
+    // Stable chunk: GetSlot(0); AwkSin; LoadFloat(1.0); Add; Dup; SetSlot(0); Pop
+    // i.e. x = sin(x) + 1.0
+    let chunk = build(&[
+        (Op::GetSlot(0), 1),
+        (Op::AwkSin, 1),
+        (Op::LoadFloat(1.0), 1),
+        (Op::Add, 1),
+        (Op::Dup, 1),
+        (Op::SetSlot(0), 1),
+        (Op::Pop, 1),
+    ]);
+
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig {
+        block_threshold: 1,
+        ..TraceJitConfig::defaults()
+    });
+
+    let kinds = [SlotKind::Float];
+    let mut slots = vec![0i64; 1]; // f64 bit pattern of 0.0
+
+    assert_eq!(
+        jit.try_run_block_kinded(&chunk, &mut slots, &kinds),
+        None,
+        "below threshold"
+    );
+    let _native = jit
+        .try_run_block_kinded(&chunk, &mut slots, &kinds)
+        .expect("AwkSin float-slot chunk must block-JIT compile");
+    // sin(0.0) + 1.0 = 1.0
+    assert_eq!(
+        f64::from_bits(slots[0] as u64),
+        1.0,
+        "slot 0 should hold f64 sin(0)+1 == 1.0"
+    );
+
+    // Second pass: sin(1.0) + 1.0 — must be real f64 arithmetic via the libcall.
+    let _ = jit.try_run_block_kinded(&chunk, &mut slots, &kinds);
+    let expected = 1.0f64.sin() + 1.0;
+    assert_eq!(
+        f64::from_bits(slots[0] as u64),
+        expected,
+        "second pass must call the sin libcall: sin(1)+1"
+    );
+
+    jit.set_jit_cache_dir(None);
+
+    let blk: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.contains(".blk.") && n.ends_with(".fjit"))
+        })
+        .collect();
+    assert_eq!(
+        blk.len(),
+        1,
+        "expected one persisted blk.fjit for the float-slot AwkSin chunk"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

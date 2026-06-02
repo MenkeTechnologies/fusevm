@@ -114,6 +114,18 @@ pub const AWK_TOLOWER: u16 = AWK_OP_BASE + 39;
 /// `toupper(s)` — stack `[s]`.
 pub const AWK_TOUPPER: u16 = AWK_OP_BASE + 40;
 
+/// AWK control-flow signal codes carried by `Op::AwkSignal(code)`. The op halts
+/// the chunk; the frontend driver reads `VM::awk_signal()` and maps the code to
+/// its own control-flow (next record / next file / exit).
+pub mod signal {
+    /// `next` — skip remaining rules for the current record.
+    pub const NEXT: u8 = 0;
+    /// `nextfile` — skip the rest of the current input file.
+    pub const NEXTFILE: u8 = 1;
+    /// `exit [code]` — stop main-input processing and run `END`.
+    pub const EXIT: u8 = 2;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Numeric builtins  (no payload; pure f64 math, host-independent)
 // ═══════════════════════════════════════════════════════════════════════════

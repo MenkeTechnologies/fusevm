@@ -143,6 +143,12 @@ pub struct VM {
     /// model, so it lives here and is handled VM-side in both dispatch paths.
     /// Initialized to 1 to match awkrs's default seed sequence.
     awk_rand_seed: u64,
+    /// AWK control-flow signal raised by `Op::AwkSignal(code)` (the chunk halts
+    /// and the frontend driver reads this after `run()`): `next`/`nextfile`/
+    /// `exit` and range-pattern flow that has no `fusevm::Value` representation.
+    /// `None` unless an awk frontend emitted `Op::AwkSignal`; zshrs/stryke never
+    /// do, so for them this stays `None` and `Halted` behaves exactly as before.
+    awk_signal: Option<u8>,
     /// Halted flag
     halted: bool,
     /// Tracing JIT enabled. When true, backward branches consult the trace
@@ -215,6 +221,7 @@ impl VM {
             host: None,
             awk_host: None,
             awk_rand_seed: 1,
+            awk_signal: None,
             halted: false,
             #[cfg(feature = "jit")]
             tracing_jit: false,
@@ -309,6 +316,15 @@ impl VM {
     /// routes the reserved AWK op range to it (see [`crate::awk_host::AwkHost`]).
     pub fn set_awk_host(&mut self, host: Box<dyn AwkHost>) {
         self.awk_host = Some(host);
+    }
+
+    /// AWK control-flow signal raised by the most recent `run()`, if any. An
+    /// awk frontend reads this after `run()` returns to map `Op::AwkSignal`
+    /// codes (`awk_builtins::signal::{NEXT,NEXTFILE,EXIT}`) onto its own
+    /// record/file/exit control flow. `None` when no signal was raised (always
+    /// the case for zshrs/stryke, which never emit `Op::AwkSignal`).
+    pub fn awk_signal(&self) -> Option<u8> {
+        self.awk_signal
     }
 
     /// Register a handler for `Op::Extended(id, arg)` opcodes.
@@ -737,6 +753,10 @@ impl VM {
     /// before tracing JIT records anything.
     pub fn run(&mut self) -> VMResult {
         use crate::awk_builtins as ab;
+        // A fresh execution: clear any AWK signal raised by a prior run on a
+        // reused VM. (zshrs/stryke never emit `Op::AwkSignal`, so this stays
+        // `None` for them.)
+        self.awk_signal = None;
         // Phase 10: try block JIT first for fully-eligible chunks. The
         // block-JIT cache has its own threshold (10 invocations); the
         // call returns None until it warms up, at which point the whole
@@ -760,7 +780,23 @@ impl VM {
             };
             if eligible {
                 self.refresh_slot_buffers();
-                if let Some(result_i64) = self.jit.try_run_block(&self.chunk, &mut self.slot_buf) {
+                if let Some(result_i64) =
+                    self.jit
+                        .try_run_block_kinded(&self.chunk, &mut self.slot_buf, &self.slot_kinds_buf)
+                {
+                    // A JIT-compiled AwkDivJit/AwkModJit may have hit a zero
+                    // divisor and set the thread-local trap code before
+                    // returning. Honor it as the awk fatal, discarding the
+                    // (garbage) block result and slot writeback.
+                    match crate::jit::take_awk_div_trap() {
+                        1 => return VMResult::Error("division by zero attempted".to_string()),
+                        2 => {
+                            return VMResult::Error(
+                                "division by zero attempted in `%'".to_string(),
+                            )
+                        }
+                        _ => {}
+                    }
                     self.write_slots_back();
                     self.halted = true;
                     return VMResult::Ok(Value::Int(result_i64));
@@ -841,8 +877,11 @@ impl VM {
                                 }
                             }
                             Op::CallBuiltin(_, _) => rec.aborted = true,
-                            // AWK ops are host calls (like CallBuiltin) and
-                            // can't appear in a compiled trace — abort.
+                            // Most AWK ops are host calls (like CallBuiltin) and
+                            // can't appear in a compiled trace — abort. Pure ops
+                            // with native CLIF codegen in `emit_data_op`
+                            // (e.g. AwkInt → trunc) are omitted here so they can
+                            // be recorded and compiled.
                             Op::AwkFieldGet
                             | Op::AwkFieldSet
                             | Op::AwkNf
@@ -863,13 +902,16 @@ impl VM {
                             | Op::AwkMatch
                             | Op::AwkToLower
                             | Op::AwkToUpper
-                            | Op::AwkInt
                             | Op::AwkSqrt
                             | Op::AwkSin
                             | Op::AwkCos
                             | Op::AwkExp
                             | Op::AwkLog
                             | Op::AwkAtan2
+                            | Op::AwkDiv
+                            | Op::AwkMod
+                            | Op::AwkDivJit
+                            | Op::AwkModJit
                             | Op::AwkAnd(_)
                             | Op::AwkOr(_)
                             | Op::AwkXor(_)
@@ -893,6 +935,7 @@ impl VM {
                             | Op::AwkArrayDelete(_)
                             | Op::AwkArrayClear(_)
                             | Op::AwkArrayLen(_) => rec.aborted = true,
+                            Op::AwkSignal(_) => rec.aborted = true,
                             _ => {}
                         }
                     }
@@ -2235,6 +2278,57 @@ impl VM {
                 Op::AwkExp => self.dispatch_awk(ab::AWK_EXP, 0),
                 Op::AwkLog => self.dispatch_awk(ab::AWK_LOG, 0),
                 Op::AwkAtan2 => self.dispatch_awk(ab::AWK_ATAN2, 0),
+                // awk `a / b` and `a % b`: pop b then a (same order as Op::Div),
+                // raise the POSIX fatal error on a zero divisor instead of
+                // yielding Undef. Distinct from the shared shell-arithmetic ops.
+                Op::AwkDiv => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    let divisor = b.to_float();
+                    if divisor == 0.0 {
+                        return VMResult::Error("division by zero attempted".to_string());
+                    }
+                    self.push(Value::Float(a.to_float() / divisor));
+                }
+                Op::AwkMod => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    let divisor = b.to_float();
+                    if divisor == 0.0 {
+                        return VMResult::Error(
+                            "division by zero attempted in `%'".to_string(),
+                        );
+                    }
+                    self.push(Value::Float(a.to_float() % divisor));
+                }
+                // Block-JIT-eligible div/mod (see `Op::AwkDivJit`). The
+                // interpreter behavior is byte-identical to AwkDiv/AwkMod; the
+                // distinct opcode only changes JIT eligibility.
+                Op::AwkDivJit => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    let divisor = b.to_float();
+                    if divisor == 0.0 {
+                        return VMResult::Error("division by zero attempted".to_string());
+                    }
+                    self.push(Value::Float(a.to_float() / divisor));
+                }
+                Op::AwkModJit => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    let divisor = b.to_float();
+                    if divisor == 0.0 {
+                        return VMResult::Error(
+                            "division by zero attempted in `%'".to_string(),
+                        );
+                    }
+                    self.push(Value::Float(a.to_float() % divisor));
+                }
+                Op::PowFloat => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    self.push(Value::Float(a.to_float().powf(b.to_float())));
+                }
                 Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
                 Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
                 Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),
@@ -2259,6 +2353,12 @@ impl VM {
                 Op::AwkIntdiv => self.dispatch_awk(ab::AWK_INTDIV, 2),
                 Op::AwkIntdiv0 => self.dispatch_awk(ab::AWK_INTDIV0, 2),
                 Op::AwkGensub(argc) => self.dispatch_awk(ab::AWK_GENSUB, *argc as usize),
+                Op::AwkSignal(code) => {
+                    // Raise the AWK control-flow signal and halt this chunk; the
+                    // frontend driver reads `self.awk_signal()` after `run()`.
+                    self.awk_signal = Some(*code);
+                    self.halted = true;
+                }
             }
 
             // Tracing JIT: finalize an active recording on either:
@@ -2653,10 +2753,10 @@ impl VM {
     fn dispatch_awk_stub(&mut self, id: u16, payload: usize) {
         use crate::awk_builtins as ab;
         use crate::awk_host::{
-            awk_chr, awk_compl, awk_fold_and, awk_fold_or, awk_fold_xor, awk_index, awk_int,
-            awk_intdiv, awk_intdiv0, awk_length, awk_lshift, awk_mkbool, awk_mktime, awk_ord,
-            awk_rand, awk_rshift, awk_srand, awk_strftime, awk_strtonum, awk_substr, awk_systime,
-            awk_tolower, awk_toupper,
+            awk_canon_nan, awk_chr, awk_compl, awk_fold_and, awk_fold_or, awk_fold_xor, awk_index,
+            awk_int, awk_intdiv, awk_intdiv0, awk_length, awk_lshift, awk_mkbool, awk_mktime,
+            awk_ord, awk_rand, awk_rshift, awk_srand, awk_strftime, awk_strtonum, awk_substr,
+            awk_systime, awk_tolower, awk_toupper,
         };
         match id {
             // value-producing: pop declared operands, push neutral default
@@ -2712,15 +2812,15 @@ impl VM {
             }
             ab::AWK_SIN => {
                 let x = self.pop();
-                self.push(Value::Float(x.to_float().sin()));
+                self.push(Value::Float(awk_canon_nan(x.to_float().sin())));
             }
             ab::AWK_COS => {
                 let x = self.pop();
-                self.push(Value::Float(x.to_float().cos()));
+                self.push(Value::Float(awk_canon_nan(x.to_float().cos())));
             }
             ab::AWK_EXP => {
                 let x = self.pop();
-                self.push(Value::Float(x.to_float().exp()));
+                self.push(Value::Float(awk_canon_nan(x.to_float().exp())));
             }
             ab::AWK_LOG => {
                 let x = self.pop();
@@ -2729,7 +2829,7 @@ impl VM {
             ab::AWK_ATAN2 => {
                 let x = self.pop();
                 let y = self.pop();
-                self.push(Value::Float(y.to_float().atan2(x.to_float())));
+                self.push(Value::Float(awk_canon_nan(y.to_float().atan2(x.to_float()))));
             }
             // Host-independent bitwise builtins (gawk): pure integer math.
             ab::AWK_AND => {
@@ -4248,6 +4348,89 @@ mod tests {
             b.build()
         };
         assert_eq!(run_native(div0).to_float(), 0.0);
+    }
+
+    #[test]
+    fn awk_div_mod_compute_and_trap_on_zero() {
+        // awk `a / b` and `a % b` compute the float result for a nonzero
+        // divisor and raise the POSIX fatal runtime error on a zero divisor
+        // (distinct from the shell-arithmetic Op::Div/Op::Mod which yield
+        // Undef / 0). Pop order mirrors Op::Div: b is on top, a beneath.
+        let div = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(7.0), 1);
+            b.emit(Op::LoadFloat(2.0), 1);
+            b.emit(Op::AwkDiv, 1);
+            b.build()
+        };
+        assert_eq!(run_native(div).to_float(), 3.5);
+
+        let md = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(7.0), 1);
+            b.emit(Op::LoadFloat(3.0), 1);
+            b.emit(Op::AwkMod, 1);
+            b.build()
+        };
+        assert_eq!(run_native(md).to_float(), 1.0);
+
+        let div0 = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(1.0), 1);
+            b.emit(Op::LoadFloat(0.0), 1);
+            b.emit(Op::AwkDiv, 1);
+            b.build()
+        };
+        match VM::new(div0).run() {
+            VMResult::Error(m) => assert_eq!(m, "division by zero attempted"),
+            other => panic!("expected div-by-zero trap, got {:?}", other),
+        }
+
+        let mod0 = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(1.0), 1);
+            b.emit(Op::LoadFloat(0.0), 1);
+            b.emit(Op::AwkMod, 1);
+            b.build()
+        };
+        match VM::new(mod0).run() {
+            VMResult::Error(m) => assert_eq!(m, "division by zero attempted in `%'"),
+            other => panic!("expected mod-by-zero trap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn awk_signal_halts_chunk_and_records_code() {
+        use crate::awk_builtins::signal;
+        // `Op::AwkSignal(code)` halts the chunk immediately and stashes `code`
+        // in the VM for the frontend driver to read; ops after it do not run.
+        let chunk = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(1), 1);
+            b.emit(Op::AwkSignal(signal::NEXTFILE), 1);
+            // Unreachable once the signal halts the chunk.
+            b.emit(Op::LoadInt(99), 1);
+            b.build()
+        };
+        let mut vm = VM::new(chunk);
+        let r = vm.run();
+        assert_eq!(vm.awk_signal(), Some(signal::NEXTFILE));
+        // The pre-signal value remains on the stack; the post-signal LoadInt(99)
+        // never executed (would have been the Ok value otherwise).
+        match r {
+            VMResult::Ok(v) => assert_eq!(v.to_float(), 1.0),
+            other => panic!("expected Ok(1), got {:?}", other),
+        }
+
+        // A signal-free chunk leaves awk_signal None (zshrs/stryke behavior).
+        let plain = {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(5), 1);
+            b.build()
+        };
+        let mut vm2 = VM::new(plain);
+        let _ = vm2.run();
+        assert_eq!(vm2.awk_signal(), None);
     }
 
     #[test]

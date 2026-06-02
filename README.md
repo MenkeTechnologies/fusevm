@@ -20,7 +20,7 @@
 
 ## `[PATENT PENDING]`
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 184 opcodes across 21 sections, 8 fused superinstructions, 29 first-class shell ops, 50 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 189 opcodes across 21 sections, 8 fused superinstructions, 29 first-class shell ops, 55 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -161,7 +161,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-184 opcodes across 20 sections in `src/op.rs`:
+189 opcodes across 20 sections in `src/op.rs`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -180,7 +180,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 | **Fused** | **8** | `AccumSumLoop`, `SlotIncLtIntJumpBack`, `ConcatConstLoop` |
 | Builtins | 1 | `CallBuiltin(id, argc)` (140 IDs in `shell_builtins.rs`) |
 | Shell Ops | 29 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile`, `RegexMatch` |
-| AWK Ops | 50 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkStrftime`, `AwkMktime`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
+| AWK Ops | 55 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkDivJit`, `AwkModJit`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
 ---
@@ -225,7 +225,7 @@ Sub-execution (cmd substitution, process substitution, trap handlers) is deliver
 
 ### AWK Host (0.13.0+)
 
-The 50 first-class `Op::Awk*` variants dispatch through the `AwkHost` trait. AWK's data model (numeric-string duality, `CONVFMT`/`OFMT` coercion, `$0`/`$n`/`NF` field coupling, `SUBSEP` arrays, regex, `getline`/`printf` IO) lives in the frontend (awkrs), so most AWK ops require a registered host; without one they stay inert but stack-balanced.
+The 55 first-class `Op::Awk*` variants dispatch through the `AwkHost` trait. AWK's data model (numeric-string duality, `CONVFMT`/`OFMT` coercion, `$0`/`$n`/`NF` field coupling, `SUBSEP` arrays, regex, `getline`/`printf` IO) lives in the frontend (awkrs), so most AWK ops require a registered host; without one they stay inert but stack-balanced.
 
 Twenty-nine builtins are the exception — they execute natively **even with no host registered**. Most are pure on `fusevm::Value`; `rand`/`srand` run against a VM-owned PRNG seed (execution-intrinsic state, reset with the VM); `strftime`/`mktime` read the system timezone but need no AWK runtime state:
 
@@ -236,6 +236,9 @@ Twenty-nine builtins are the exception — they execute natively **even with no 
 - **Conversion (gawk):** `strtonum` (`0x…` hex, `0…` octal, else longest decimal/float prefix).
 - **Time (gawk):** `systime`, `strftime`, `mktime` (`chrono`-backed; local-tz and UTC paths).
 - **PRNG (POSIX/gawk):** `rand`, `srand` (glibc LCG over a VM-owned seed initialized to 1; deterministic without a host).
+- **Arithmetic (POSIX awk):** `AwkDiv` (`a / b`), `AwkMod` (`a % b`) — float divide/modulo that raise a fatal `"division by zero attempted"` / `"division by zero attempted in \`%'"` runtime error on a zero divisor (vs the shell-arithmetic `Op::Div`/`Op::Mod`, which yield `Undef`/`0`). Host-independent; interpreter-only (not block/trace-JIT-eligible, since they conditionally trap). `AwkDivJit` / `AwkModJit` are block-JIT-eligible variants with byte-identical interpreter semantics: the block JIT emits a **guarded early-exit** (compare the divisor to `0.0`; on equality call the `fusevm_jit_awk_div_trap` libcall with a code — `1` div / `2` mod — and `return` a sentinel, else `fdiv`/`fmod`). The VM's block-dispatch path reads the trap channel after the compiled run and converts a set code into the same fatal error the interpreter raises, so a JIT-compiled `for(;;) x = 1/0` traps instead of producing `inf`/`NaN` or hanging. The trap libcall is not a registered host-helper id, so `AwkDivJit`/`AwkModJit` chunks skip on-disk cache persistence (in-process JIT only) and never touch the shared cache schema — zshrs/stryke (which emit only `Op::Div`/`Op::Mod`) get byte-identical native code.
+
+**AWK control flow** has no `fusevm::Value` representation (`next`/`nextfile`/`exit` are statements, not expressions). `Op::AwkSignal(code)` carries it host-free: it halts the current chunk and stashes `code` (`awk_builtins::signal::{NEXT, NEXTFILE, EXIT}`) in the VM, which the frontend driver reads via `VM::awk_signal()` after `run()` to drive its own record/file/exit flow. zshrs/stryke never emit it, so `awk_signal()` stays `None` for them and `Halted` is byte-identical to before — the channel is a VM-state side effect, not a new `VMResult` variant. Interpreter-only.
 
 ```rust
 use fusevm::{VM, ChunkBuilder, Op, Value};
@@ -412,6 +415,12 @@ The block JIT handles real control flow — loops, conditionals, fused backedges
 | `nested_loop(100×100)` | 340 µs | **9.5 µs** | **36x** |
 
 The block JIT compiles the full CFG to native code via Cranelift. All mutable state flows through the slots pointer (`*mut i64`), and `AccumSumLoop` is register-allocated with block parameters — no memory traffic in the inner loop.
+
+**Float slots (`SlotKind::Float`).** Slots are promoted to Cranelift `i64` variables holding raw bits. When a slot's kind is `Float`, the `i64` *is* the `f64` bit pattern: `GetSlot` bitcasts `I64 → F64` (and integer operands are converted with `fcvt_from_sint` before float arithmetic), `SetSlot` bitcasts `F64 → I64`. Pass slot kinds via `try_run_block_kinded` / `try_run_block_eager_kinded`; the kind vector is folded into the native-code cache key (TLS and the on-disk `*.blk.fjit` blob) so float-specialized code is never reused for an integer slot or vice-versa. The default `try_run_block` / `try_run_block_eager` (no kinds) treat every slot as `Int` — unchanged behavior for integer consumers. This is what lets `awkrs` block-JIT-compile `f64` AWK numeric chunks (e.g. `x = int(x + c)`, lowered through `Op::AwkInt`) and persist them to the shared on-disk cache. Integer-only fused superinstructions (`PreIncSlot`, `AccumSumLoop`, `SlotIncLtIntJumpBack`, …) bail to the interpreter on a `Float` slot rather than miscompute it.
+
+**AWK math ops in the JIT.** `Op::AwkInt` compiles natively to a Cranelift `trunc`. The transcendentals `Op::AwkSin` / `AwkCos` / `AwkExp` / `AwkAtan2` compile to Cranelift libcalls into small `extern "C"` Rust helpers (`fusevm_jit_sin_f64`, …) that canonicalize a NaN result to `+nan` to match gawk/awkrs. These follow the same `None`-guarded import pattern as the existing `pow`/`fmod`/`lognot` libcalls — the helper imports are declared only when the op appears in the chunk (`MathIds::declare`), so chunks without them compile to byte-identical native code. For the on-disk cache the helper relocations are keyed by stable host-helper ids (`H_SIN_F64`…`H_ATAN2_F64`), carried in the per-function `[Option<FuncId>; 8]` helper table and re-resolved on load via `host_addr` (cache `SCHEMA_VERSION` 4). The gawk bitwise builtins `Op::AwkAnd` / `AwkOr` / `AwkXor` (variadic, ≥2 args) also compile natively: each operand is converted to `i64` with a **saturating** `fcvt_to_sint_sat` (matching awkrs's `num_to_u64`, which truncates and saturates NaN→0 / ±inf→i64 bounds rather than trapping), folded with Cranelift `band`/`bor`/`bxor`, and pushed back as an integer. No libcall and no host needed — pure integer arithmetic — so they are admitted to `is_block_eligible_op` directly.
+
+**Trapping div/mod in the JIT (guarded early-exit).** `Op::AwkDivJit` / `AwkModJit` are the block-JIT-eligible counterparts of the interpreter-only `AwkDiv`/`AwkMod`. Float `fdiv`/`fmod` do not hardware-trap (they yield `inf`/`NaN`), so a JIT-compiled awk division must check the divisor explicitly: the codegen pops divisor then dividend, emits `fcmp eq divisor, 0.0`, and branches — the trap block calls the `fusevm_jit_awk_div_trap(code)` libcall (`code` = `1` for div, `2` for mod) into a thread-local channel and `return`s a sentinel, while the continuation block computes `fdiv` (div) or the `fmod` libcall (mod). After the compiled block returns, the VM's block-dispatch path calls `take_awk_div_trap()` and, if a code was set, raises the same fatal `"division by zero attempted"` / `…in \`%'` error the interpreter raises — *before* writing slots back. Because the trap libcall is not a registered host-helper id, these chunks skip on-disk persistence (in-process JIT only) and add nothing to the cache schema; frontends that never emit them (zshrs/stryke) are byte-identical.
 
 ### Tracing JIT — hot loop bodies compiled to native code
 

@@ -49,10 +49,10 @@
 ///
 /// Register an instance once at startup via [`register_global_extension`]; the
 /// block JIT then consults it both for eligibility ([`JitExtension::can_jit`])
-/// and codegen ([`JitExtension::emit_extended`]). Because the emitted code is
-/// plain Cranelift IR over the abstract i64 operand stack (no new host-helper
-/// relocations), Extended-containing chunks remain eligible for the on-disk
-/// native-code cache just like the universal subset.
+/// and codegen ([`JitExtension::emit_extended`]). Extensions may emit pure
+/// integer IR or call host helpers registered via [`register_jit_helper`]
+/// (through [`ExtJitCtx::call_host`]); either way the resulting chunk remains
+/// eligible for the on-disk native-code cache.
 pub trait JitExtension: Send + Sync {
     /// Whether this extension can JIT-compile the given extended op ID.
     fn can_jit(&self, ext_id: u16) -> bool;
@@ -71,10 +71,13 @@ pub trait JitExtension: Send + Sync {
     /// falls back to the interpreter. The default declines everything, so an
     /// extension that only sets `can_jit` without overriding this is a no-op.
     ///
-    /// Implementations must only emit self-contained IR (arithmetic, compares,
-    /// `select`, slot loads/stores) — calling out to host functions would add
-    /// relocations the native-code cache cannot persist, so such ops should
-    /// return `false` here and be handled by the interpreter instead.
+    /// Implementations may emit self-contained integer IR (arithmetic,
+    /// compares, `select`, slot loads/stores) and may also call host helpers
+    /// registered via [`register_jit_helper`] through [`ExtJitCtx::call_host`]
+    /// (e.g. for string/collection ops whose operands are passed as `i64`
+    /// handles). Both styles remain eligible for the on-disk native-code cache:
+    /// integer IR has no relocations, and host-helper calls relocate to a
+    /// stable, name-derived helper id re-resolved live at load time.
     #[cfg(feature = "jit")]
     fn emit_extended(&self, ext_id: u16, arg: u8, cx: &mut ExtJitCtx) -> bool {
         let _ = (ext_id, arg, cx);
@@ -125,6 +128,82 @@ pub(crate) fn global_extension_for(ext_id: u16) -> Option<std::sync::Arc<dyn Jit
         .cloned()
 }
 
+/// A host helper function an extension can call from JIT-compiled code. The
+/// helper takes `n_args` `i64` arguments and returns one value (`i64`, or `f64`
+/// when `ret_float`). String/pointer operands are passed as `i64` handles.
+#[derive(Clone)]
+pub(crate) struct ExtHelper {
+    pub name: &'static str,
+    pub ptr: usize,
+    pub n_args: u8,
+    pub ret_float: bool,
+}
+
+fn ext_helper_registry() -> &'static std::sync::RwLock<Vec<ExtHelper>> {
+    static REG: std::sync::OnceLock<std::sync::RwLock<Vec<ExtHelper>>> = std::sync::OnceLock::new();
+    REG.get_or_init(|| std::sync::RwLock::new(Vec::new()))
+}
+
+/// 32-bit FNV-1a hash, used to derive a stable host-helper id from its name so
+/// the value persists across processes (and therefore across cache files).
+fn fnv1a32(s: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// Stable host-helper id for a given helper name. Extension helper ids always
+/// have the top bit set, keeping them disjoint from the built-in helpers
+/// (`H_POW_I64`..`H_LOGNOT`, which use small ids `0..4`).
+pub fn jit_helper_id(name: &str) -> u32 {
+    0x8000_0000 | (fnv1a32(name) & 0x7fff_ffff)
+}
+
+/// Register a host helper callable from extension JIT codegen and return its
+/// stable id (pass it to [`ExtJitCtx::call_host`]). The helper must be an
+/// `extern "C"` function taking `n_args` `i64` arguments and returning an `i64`
+/// (or `f64` when `ret_float`). Idempotent by `name`; call once at startup
+/// alongside [`register_global_extension`]. Because the helper is identified by
+/// a stable, name-derived id and resolved live at load time, chunks that call
+/// it remain eligible for the on-disk native-code cache.
+///
+/// # Safety
+/// `ptr` must point to a valid function with exactly the declared ABI; calling
+/// it with a mismatched signature is undefined behaviour.
+pub unsafe fn register_jit_helper(
+    name: &'static str,
+    ptr: *const u8,
+    n_args: u8,
+    ret_float: bool,
+) -> u32 {
+    let mut reg = ext_helper_registry().write().unwrap();
+    if !reg.iter().any(|h| h.name == name) {
+        reg.push(ExtHelper { name, ptr: ptr as usize, n_args, ret_float });
+        tracing::info!(name, n_args, ret_float, "JIT host helper registered (global)");
+    }
+    jit_helper_id(name)
+}
+
+/// Look up a registered host helper by its stable id.
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
+pub(crate) fn ext_helper_by_id(id: u32) -> Option<ExtHelper> {
+    ext_helper_registry()
+        .read()
+        .unwrap()
+        .iter()
+        .find(|h| jit_helper_id(h.name) == id)
+        .cloned()
+}
+
+/// Snapshot of all registered host helpers (used to seed `JITBuilder` symbols).
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
+pub(crate) fn ext_helpers_snapshot() -> Vec<ExtHelper> {
+    ext_helper_registry().read().unwrap().clone()
+}
+
 /// Slot type tag observed at trace recording time.
 ///
 /// Used by the tracing JIT entry guard: if a slot's runtime type at trace
@@ -136,6 +215,18 @@ pub enum SlotKind {
     Int,
     /// Slot holds an `f64` at trace-record time.
     Float,
+}
+
+/// Result of a typed block-JIT invocation. The block tier returns an `i64`
+/// register; a float result rides back as its raw `f64` bit pattern. This enum
+/// lets a typed caller recover the exact value instead of truncating floats to
+/// integers (the behavior of the plain `i64`-returning entry points).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BlockNum {
+    /// Integer result.
+    Int(i64),
+    /// Float result (decoded from the returned bit pattern).
+    Float(f64),
 }
 
 /// Serializable trace metadata for persistent cache export/import (phase 7).
@@ -302,6 +393,32 @@ impl DeoptFrame {
 pub const STACK_KIND_INT: u8 = 0;
 /// `STACK_KIND_FLOAT` tag — see [`STACK_KIND_INT`] doc-comment for the contract.
 pub const STACK_KIND_FLOAT: u8 = 1;
+
+thread_local! {
+    /// Trap channel for JIT-compiled `AwkDivJit`/`AwkModJit`.
+    ///
+    /// Float `fdiv`/`fmod` do not hardware-trap on a zero divisor (they yield
+    /// inf/nan), but awk requires a fatal "division by zero" error. The block
+    /// JIT therefore emits a guarded early-exit: on a zero divisor it calls
+    /// [`fusevm_jit_awk_div_trap`], which records `1` (div) or `2` (mod) here,
+    /// then returns a sentinel. The VM reads the code via [`take_awk_div_trap`]
+    /// immediately after a block invocation returns and converts a nonzero code
+    /// into the awk fatal, discarding the block's (garbage) result.
+    static AWK_DIV_TRAP: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Libcall invoked by JIT-compiled `AwkDivJit`/`AwkModJit` on a zero divisor.
+/// `kind` is `1` for division, `2` for modulo. Records the trap so the VM can
+/// raise the awk fatal after the block returns.
+pub(crate) extern "C" fn fusevm_jit_awk_div_trap(kind: i64) {
+    AWK_DIV_TRAP.with(|c| c.set(kind as u8));
+}
+
+/// Read and clear the pending div/mod trap code (`0` = none, `1` = div,
+/// `2` = mod) set by [`fusevm_jit_awk_div_trap`].
+pub(crate) fn take_awk_div_trap() -> u8 {
+    AWK_DIV_TRAP.with(|c| c.replace(0))
+}
 
 /// Out-parameter the trace fn writes on every invocation.
 ///
@@ -623,6 +740,25 @@ mod cranelift_jit_impl {
                     Cell::Dyn => Cell::Dyn,
                 });
             }
+            Op::PowFloat => {
+                let (a, b) = pop2_strict(stack)?;
+                match (a, b) {
+                    (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x.powf(y))),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            // awk int(x): truncate toward zero. An integer operand is already
+            // integral (identity); a float is truncated. Matches awkrs
+            // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
+            Op::AwkInt => {
+                let a = stack.pop()?;
+                stack.push(match a {
+                    Cell::Const(n) => Cell::Const(n),
+                    Cell::ConstF(f) => Cell::ConstF(f.trunc()),
+                    Cell::DynF => Cell::DynF,
+                    Cell::Dyn => Cell::Dyn,
+                });
+            }
             Op::Inc => {
                 let a = stack.pop()?;
                 stack.push(match a {
@@ -821,6 +957,136 @@ mod cranelift_jit_impl {
         }
     }
 
+    /// awk `sin(x)` — radians. NaN result canonicalized to a positive NaN so the
+    /// JIT matches awkrs/gawk (`+nan`), never a platform `-nan`.
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_sin_f64(x: f64) -> f64 {
+        let r = x.sin();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+
+    /// awk `cos(x)` — radians. NaN canonicalized to `+nan` (see `sin`).
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_cos_f64(x: f64) -> f64 {
+        let r = x.cos();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+
+    /// awk `exp(x)` — e^x. NaN canonicalized to `+nan` (see `sin`).
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_exp_f64(x: f64) -> f64 {
+        let r = x.exp();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+
+    /// awk `atan2(y, x)`. NaN canonicalized to `+nan` (see `sin`).
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_atan2_f64(y: f64, x: f64) -> f64 {
+        let r = y.atan2(x);
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+
+    /// FuncIds for the awk transcendental libcalls, declared lazily on a module
+    /// only when the corresponding op appears in the chunk (so chunks without
+    /// them compile to byte-identical native code as before).
+    #[derive(Default)]
+    struct MathIds {
+        sin: Option<cranelift_module::FuncId>,
+        cos: Option<cranelift_module::FuncId>,
+        exp: Option<cranelift_module::FuncId>,
+        atan2: Option<cranelift_module::FuncId>,
+        awk_div_trap: Option<cranelift_module::FuncId>,
+    }
+
+    /// Resolved `FuncRef`s for the awk transcendental libcalls, valid inside one
+    /// function builder.
+    #[derive(Default, Clone, Copy)]
+    struct MathRefs {
+        sin: Option<cranelift_codegen::ir::FuncRef>,
+        cos: Option<cranelift_codegen::ir::FuncRef>,
+        exp: Option<cranelift_codegen::ir::FuncRef>,
+        atan2: Option<cranelift_codegen::ir::FuncRef>,
+        awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
+    }
+
+    fn declare_unary_f64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::F64));
+        ps.returns.push(AbiParam::new(types::F64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_binary_f64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::F64));
+        ps.params.push(AbiParam::new(types::F64));
+        ps.returns.push(AbiParam::new(types::F64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_void_i64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::I64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    impl MathIds {
+        /// Declare the imports needed by `ops` (only the ones actually present).
+        fn declare(module: &mut JITModule, ops: &[Op]) -> Self {
+            let mut m = MathIds::default();
+            for op in ops {
+                match op {
+                    Op::AwkSin if m.sin.is_none() => {
+                        m.sin = declare_unary_f64(module, "fusevm_jit_sin_f64");
+                    }
+                    Op::AwkCos if m.cos.is_none() => {
+                        m.cos = declare_unary_f64(module, "fusevm_jit_cos_f64");
+                    }
+                    Op::AwkExp if m.exp.is_none() => {
+                        m.exp = declare_unary_f64(module, "fusevm_jit_exp_f64");
+                    }
+                    Op::AwkAtan2 if m.atan2.is_none() => {
+                        m.atan2 = declare_binary_f64(module, "fusevm_jit_atan2_f64");
+                    }
+                    Op::AwkDivJit | Op::AwkModJit if m.awk_div_trap.is_none() => {
+                        m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
+                    }
+                    _ => {}
+                }
+            }
+            m
+        }
+
+        /// Bind the declared `FuncId`s into a function builder's namespace.
+        fn resolve(&self, module: &mut JITModule, func: &mut cranelift_codegen::ir::Function) -> MathRefs {
+            MathRefs {
+                sin: self.sin.map(|id| module.declare_func_in_func(id, func)),
+                cos: self.cos.map(|id| module.declare_func_in_func(id, func)),
+                exp: self.exp.map(|id| module.declare_func_in_func(id, func)),
+                atan2: self.atan2.map(|id| module.declare_func_in_func(id, func)),
+                awk_div_trap: self
+                    .awk_div_trap
+                    .map(|id| module.declare_func_in_func(id, func)),
+            }
+        }
+    }
+
     fn new_jit_module() -> Option<JITModule> {
         let isa = cached_owned_isa()?.clone();
         let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
@@ -828,6 +1094,17 @@ mod cranelift_jit_impl {
         builder.symbol("fusevm_jit_pow_f64", fusevm_jit_pow_f64 as *const u8);
         builder.symbol("fusevm_jit_fmod_f64", fusevm_jit_fmod_f64 as *const u8);
         builder.symbol("fusevm_jit_lognot_i64", fusevm_jit_lognot_i64 as *const u8);
+        builder.symbol("fusevm_jit_sin_f64", fusevm_jit_sin_f64 as *const u8);
+        builder.symbol("fusevm_jit_cos_f64", fusevm_jit_cos_f64 as *const u8);
+        builder.symbol("fusevm_jit_exp_f64", fusevm_jit_exp_f64 as *const u8);
+        builder.symbol("fusevm_jit_atan2_f64", fusevm_jit_atan2_f64 as *const u8);
+        builder.symbol(
+            "fusevm_jit_awk_div_trap",
+            super::fusevm_jit_awk_div_trap as *const u8,
+        );
+        for h in super::ext_helpers_snapshot() {
+            builder.symbol(h.name, h.ptr as *const u8);
+        }
         Some(JITModule::new(builder))
     }
 
@@ -896,6 +1173,45 @@ mod cranelift_jit_impl {
         }
     }
 
+    /// Pop one operand and coerce it to an `i64` SSA value using *saturating*
+    /// float→int conversion, matching awkrs's `num_to_u64` = `n.trunc() as i64`
+    /// (Rust's `as` saturates: NaN→0, +inf→i64::MAX, -inf→i64::MIN). Used by the
+    /// AWK bitwise fold arms (`and`/`or`/`xor`). Distinct from `f64_to_i64_trunc`
+    /// (`fcvt_to_sint`, which *traps* out of range) — the bitwise builtins must
+    /// not trap on huge/NaN operands, they wrap like awkrs.
+    fn pop_as_i64_sat(bcx: &mut FunctionBuilder, stack: &mut Vec<(Value, JitTy)>) -> Option<Value> {
+        let (v, ty) = stack.pop()?;
+        Some(match ty {
+            JitTy::Int => v,
+            JitTy::Float => bcx.ins().fcvt_to_sint_sat(types::I64, v),
+        })
+    }
+
+    /// Pop one operand and coerce it to an `f64` SSA value (Int operands are
+    /// widened via `fcvt_from_sint`). Used by the unary/binary transcendental
+    /// libcall arms, which always operate in floating point.
+    fn pop_as_f64(bcx: &mut FunctionBuilder, stack: &mut Vec<(Value, JitTy)>) -> Option<Value> {
+        let (v, ty) = stack.pop()?;
+        Some(match ty {
+            JitTy::Float => v,
+            JitTy::Int => i64_to_f64(bcx, v),
+        })
+    }
+
+    /// Hash of a slot-kind snapshot (Float vs Int per slot). Folded into the
+    /// block-JIT cache key (TLS + on-disk) so native code specialized for Int
+    /// slots is never reused for Float slots, whose `GetSlot`/`SetSlot` bit-cast
+    /// and arithmetic differ. Only the Float/Int distinction matters.
+    pub(crate) fn slot_kinds_hash(kinds: &[super::SlotKind]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        kinds.len().hash(&mut h);
+        for k in kinds {
+            (matches!(k, super::SlotKind::Float) as u8).hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// Codegen handle handed to [`super::JitExtension::emit_extended`]. Wraps the
     /// in-flight Cranelift function builder and the block's abstract operand
     /// stack, exposing just enough to lower a numeric Extended op: pop i64
@@ -906,6 +1222,11 @@ mod cranelift_jit_impl {
     pub struct ExtJitCtx<'a, 'f> {
         bcx: &'a mut FunctionBuilder<'f>,
         stack: &'a mut Vec<(Value, JitTy)>,
+        module: &'a mut JITModule,
+        /// Cache of host helpers imported into the current function, keyed by
+        /// stable helper id. Doubles as the collector of `(FuncId, stable id)`
+        /// pairs threaded into the disk-cache relocation mapper.
+        helpers: &'a mut HashMap<u32, (cranelift_module::FuncId, cranelift_codegen::ir::FuncRef)>,
     }
 
     impl<'a, 'f> ExtJitCtx<'a, 'f> {
@@ -920,6 +1241,39 @@ mod cranelift_jit_impl {
         /// Push an `i64` Cranelift value as the new top operand.
         pub fn push_i64(&mut self, v: Value) {
             self.stack.push((v, JitTy::Int));
+        }
+
+        /// Call a registered host helper (see [`super::register_jit_helper`]) by
+        /// its stable id, passing `args` as `i64` values and returning the
+        /// helper's single result `Value` (`i64`, or `f64` for a `ret_float`
+        /// helper). Returns `None` if the id is not registered. The helper is
+        /// imported into the current function lazily and recorded so the chunk's
+        /// native code stays disk-cacheable.
+        pub fn call_host(&mut self, helper_id: u32, args: &[Value]) -> Option<Value> {
+            let fref = match self.helpers.get(&helper_id) {
+                Some((_, fref)) => *fref,
+                None => {
+                    let h = super::ext_helper_by_id(helper_id)?;
+                    let mut ps = self.module.make_signature();
+                    for _ in 0..h.n_args {
+                        ps.params.push(AbiParam::new(types::I64));
+                    }
+                    ps.returns.push(AbiParam::new(if h.ret_float {
+                        types::F64
+                    } else {
+                        types::I64
+                    }));
+                    let fid = self
+                        .module
+                        .declare_function(h.name, Linkage::Import, &ps)
+                        .ok()?;
+                    let fref = self.module.declare_func_in_func(fid, self.bcx.func);
+                    self.helpers.insert(helper_id, (fid, fref));
+                    fref
+                }
+            };
+            let call = self.bcx.ins().call(fref, args);
+            self.bcx.inst_results(call).first().copied()
         }
 
         /// Access the underlying Cranelift function builder to emit IR. Use with
@@ -1005,6 +1359,7 @@ mod cranelift_jit_impl {
         pow_f64_ref: Option<cranelift_codegen::ir::FuncRef>,
         fmod_f64_ref: Option<cranelift_codegen::ir::FuncRef>,
         lognot_ref: Option<cranelift_codegen::ir::FuncRef>,
+        math: MathRefs,
         constants: &[FuseValue],
     ) -> Option<()> {
         match op {
@@ -1096,12 +1451,77 @@ mod cranelift_jit_impl {
                     }
                 }
             }
+            Op::PowFloat => {
+                let b = pop_as_f64(bcx, stack)?;
+                let a = pop_as_f64(bcx, stack)?;
+                let fr = pow_f64_ref?;
+                let call = bcx.ins().call(fr, &[a, b]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
             Op::Negate => {
                 let (a, ty) = stack.pop()?;
                 match ty {
                     JitTy::Int => stack.push((bcx.ins().ineg(a), JitTy::Int)),
                     JitTy::Float => stack.push((bcx.ins().fneg(a), JitTy::Float)),
                 }
+            }
+            // awk int(x): truncate toward zero. Integer operand is already
+            // integral (identity); float uses Cranelift's `trunc`
+            // (roundToIntegralTowardZero), preserving NaN/inf — matching awkrs
+            // `Value::Num(as_number().trunc())`.
+            Op::AwkInt => {
+                let (a, ty) = stack.pop()?;
+                match ty {
+                    JitTy::Int => stack.push((a, JitTy::Int)),
+                    JitTy::Float => stack.push((bcx.ins().trunc(a), JitTy::Float)),
+                }
+            }
+            // awk sin/cos/exp: unary f64 transcendentals via a Rust libcall that
+            // canonicalizes NaN to `+nan` (matching awkrs/gawk). Integer operands
+            // are widened to f64 first. Result is always Float.
+            Op::AwkSin => {
+                let a = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.sin?, &[a]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
+            Op::AwkCos => {
+                let a = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.cos?, &[a]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
+            Op::AwkExp => {
+                let a = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.exp?, &[a]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
+            // awk atan2(y, x): the chunk pushes y then x, so x is on top.
+            Op::AwkAtan2 => {
+                let x = pop_as_f64(bcx, stack)?;
+                let y = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.atan2?, &[y, x]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
+            // awk and/or/xor(v1, v2, ...): variadic bitwise fold. Each operand is
+            // truncated toward zero and saturated to i64 (matching awkrs's
+            // `num_to_u64`), folded with the integer bit-op, and pushed as Int —
+            // its f64 materialization (`fcvt_from_sint`) matches awkrs's final
+            // `… as i64 as f64`. Folding order is irrelevant (and/or/xor are
+            // associative + commutative). The `u8` payload is the arg count
+            // (≥2, guaranteed by the parser); fewer than 2 bails the block JIT.
+            Op::AwkAnd(n) | Op::AwkOr(n) | Op::AwkXor(n) => {
+                if (*n as usize) < 2 {
+                    return None;
+                }
+                let mut acc = pop_as_i64_sat(bcx, stack)?;
+                for _ in 1..*n {
+                    let v = pop_as_i64_sat(bcx, stack)?;
+                    acc = match op {
+                        Op::AwkAnd(_) => bcx.ins().band(acc, v),
+                        Op::AwkOr(_) => bcx.ins().bor(acc, v),
+                        _ => bcx.ins().bxor(acc, v),
+                    };
+                }
+                stack.push((acc, JitTy::Int));
             }
             Op::Inc => {
                 let (a, ty) = stack.pop()?;
@@ -1355,7 +1775,7 @@ mod cranelift_jit_impl {
         let need_slots = needs_slots(seq);
         let mut module = new_jit_module()?;
 
-        let needs_pow = seq.iter().any(|o| matches!(o, Op::Pow));
+        let needs_pow = seq.iter().any(|o| matches!(o, Op::Pow | Op::PowFloat));
         let pow_i64_id = if needs_pow {
             let mut ps = module.make_signature();
             ps.params.push(AbiParam::new(types::I64));
@@ -1410,6 +1830,8 @@ mod cranelift_jit_impl {
             None
         };
 
+        let math_ids = MathIds::declare(&mut module, seq);
+
         let ptr_ty = module.target_config().pointer_type();
         let mut sig = module.make_signature();
         if need_slots {
@@ -1444,6 +1866,7 @@ mod cranelift_jit_impl {
             let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
             let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
             let lognot_ref = lognot_id.map(|lid| module.declare_func_in_func(lid, bcx.func));
+            let math = math_ids.resolve(&mut module, bcx.func);
 
             let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::with_capacity(32);
             for op in seq {
@@ -1456,6 +1879,7 @@ mod cranelift_jit_impl {
                     pow_f64_ref,
                     fmod_f64_ref,
                     lognot_ref,
+                    math,
                     &chunk.constants,
                 )?;
             }
@@ -1590,6 +2014,15 @@ mod cranelift_jit_impl {
         const H_POW_F64: u32 = 1;
         const H_FMOD_F64: u32 = 2;
         const H_LOGNOT: u32 = 3;
+        const H_SIN_F64: u32 = 4;
+        const H_COS_F64: u32 = 5;
+        const H_EXP_F64: u32 = 6;
+        const H_ATAN2_F64: u32 = 7;
+        /// Zero-divisor trap libcall for JIT-compiled `AwkDivJit`/`AwkModJit`.
+        /// Registering it as a known host helper lets div/mod chunks (e.g. a
+        /// front-end's float `/`) persist to the native disk cache instead of
+        /// being limited to the in-memory JIT.
+        pub(crate) const H_AWK_DIV_TRAP: u32 = 8;
 
         // Native-blob tier discriminator. Persisted in the file and verified on
         // load so a block blob can never be transmuted with a linear signature.
@@ -1598,15 +2031,27 @@ mod cranelift_jit_impl {
         pub(crate) const KIND_TRACE: u8 = 2;
 
         const MAGIC: &[u8; 8] = b"FJITNAT2";
-        const SCHEMA_VERSION: u32 = 2;
+        const SCHEMA_VERSION: u32 = 7;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
+            // Extension helper ids have the top bit set; resolve them live via
+            // the global helper registry (the frontend must have registered the
+            // helper before the cached blob is loaded, else this misses and the
+            // blob is rejected → safe recompile).
+            if id & 0x8000_0000 != 0 {
+                return super::super::ext_helper_by_id(id).map(|h| h.ptr);
+            }
             Some(match id {
                 H_POW_I64 => super::fusevm_jit_pow_i64 as *const u8 as usize,
                 H_POW_F64 => super::fusevm_jit_pow_f64 as *const u8 as usize,
                 H_FMOD_F64 => super::fusevm_jit_fmod_f64 as *const u8 as usize,
                 H_LOGNOT => super::fusevm_jit_lognot_i64 as *const u8 as usize,
+                H_SIN_F64 => super::fusevm_jit_sin_f64 as *const u8 as usize,
+                H_COS_F64 => super::fusevm_jit_cos_f64 as *const u8 as usize,
+                H_EXP_F64 => super::fusevm_jit_exp_f64 as *const u8 as usize,
+                H_ATAN2_F64 => super::fusevm_jit_atan2_f64 as *const u8 as usize,
+                H_AWK_DIV_TRAP => super::super::fusevm_jit_awk_div_trap as *const u8 as usize,
                 _ => return None,
             })
         }
@@ -1668,12 +2113,16 @@ mod cranelift_jit_impl {
 
         /// Map a block/trace `ctx`'s relocation index (a module `FuncId` as u32)
         /// to a stable host-helper id, using the helper-FuncId table captured at
-        /// build time. Order: `[pow_i64, pow_f64, fmod_f64, lognot]`.
+        /// build time. Order:
+        /// `[pow_i64, pow_f64, fmod_f64, lognot, sin, cos, exp, atan2]`.
         fn map_helper_funcid(
-            helper_ids: &[Option<cranelift_module::FuncId>; 4],
+            helper_ids: &[Option<cranelift_module::FuncId>; 8],
             index: u32,
         ) -> Option<u32> {
-            const HOST_IDS: [u32; 4] = [H_POW_I64, H_POW_F64, H_FMOD_F64, H_LOGNOT];
+            const HOST_IDS: [u32; 8] = [
+                H_POW_I64, H_POW_F64, H_FMOD_F64, H_LOGNOT, H_SIN_F64, H_COS_F64, H_EXP_F64,
+                H_ATAN2_F64,
+            ];
             for (slot, id) in helper_ids.iter().zip(HOST_IDS.iter()) {
                 if let Some(fid) = slot {
                     if fid.as_u32() == index {
@@ -1682,6 +2131,23 @@ mod cranelift_jit_impl {
                 }
             }
             None
+        }
+
+        /// Map a relocation index (module `FuncId` as u32) to a stable
+        /// host-helper id, consulting both the built-in helpers and any
+        /// extension helpers (`(FuncId, stable id)` pairs) used by the chunk.
+        fn map_helper_funcid_ext(
+            helper_ids: &[Option<cranelift_module::FuncId>; 8],
+            ext_helpers: &[(cranelift_module::FuncId, u32)],
+            index: u32,
+        ) -> Option<u32> {
+            if let Some(id) = map_helper_funcid(helper_ids, index) {
+                return Some(id);
+            }
+            ext_helpers
+                .iter()
+                .find(|(fid, _)| fid.as_u32() == index)
+                .map(|(_, id)| *id)
         }
 
         // ── Cache directory configuration ──
@@ -1939,6 +2405,23 @@ mod cranelift_jit_impl {
                 let fmod_f64_ref =
                     Some(import(&mut bcx, H_FMOD_F64, &[types::F64, types::F64], types::F64));
                 let lognot_ref = Some(import(&mut bcx, H_LOGNOT, &[types::I64], types::I64));
+                let math = MathRefs {
+                    sin: Some(import(&mut bcx, H_SIN_F64, &[types::F64], types::F64)),
+                    cos: Some(import(&mut bcx, H_COS_F64, &[types::F64], types::F64)),
+                    exp: Some(import(&mut bcx, H_EXP_F64, &[types::F64], types::F64)),
+                    atan2: Some(import(
+                        &mut bcx,
+                        H_ATAN2_F64,
+                        &[types::F64, types::F64],
+                        types::F64,
+                    )),
+                    // The linear tier never lowers AwkDivJit/AwkModJit (those are
+                    // block-only ops handled in `build_block_function`), so the
+                    // linear native path imports no trap ref. The block native
+                    // path *does* carry them and registers the trap libcall under
+                    // `H_AWK_DIV_TRAP`, so div/mod chunks persist to disk.
+                    awk_div_trap: None,
+                };
 
                 let mut stack: Vec<(Value, JitTy)> = Vec::with_capacity(32);
                 for op in seq {
@@ -1951,6 +2434,7 @@ mod cranelift_jit_impl {
                         pow_f64_ref,
                         fmod_f64_ref,
                         lognot_ref,
+                        math,
                         &chunk.constants,
                     )?;
                 }
@@ -2125,6 +2609,7 @@ mod cranelift_jit_impl {
             Some(CompiledBlock {
                 backing: BlockBacking::Native(loaded),
                 run,
+                ret_is_float: blob.ret_is_float,
             })
         }
 
@@ -2400,14 +2885,22 @@ mod cranelift_jit_impl {
         }
 
         /// Block-tier equivalent of [`try_load_or_build`]. Keyed by `op_hash`.
-        pub(crate) fn try_load_or_build_block(chunk: &Chunk, dir: &Path) -> Option<CompiledBlock> {
-            if let Some(blob) = read_blob(dir, "blk", chunk.op_hash, 0, 0) {
+        pub(crate) fn try_load_or_build_block(
+            chunk: &Chunk,
+            dir: &Path,
+            slot_kinds: &[crate::SlotKind],
+        ) -> Option<CompiledBlock> {
+            // The slot-kinds hash is the verification aux word: native code
+            // compiled for Int slots must not be reused for Float slots (the
+            // bit-cast/arithmetic differs), so a kinds mismatch rejects the file.
+            let kinds_hash = slot_kinds_hash(slot_kinds);
+            if let Some(blob) = read_blob(dir, "blk", chunk.op_hash, kinds_hash, kinds_hash) {
                 if let Some(compiled) = load_native_block(&blob) {
                     return Some(compiled);
                 }
             }
-            let blob = compile_block_native(chunk)?;
-            write_blob(dir, "blk", chunk.op_hash, 0, &blob);
+            let blob = compile_block_native(chunk, slot_kinds)?;
+            write_blob(dir, "blk", chunk.op_hash, kinds_hash, &blob);
             load_native_block(&blob)
         }
 
@@ -2449,25 +2942,34 @@ mod cranelift_jit_impl {
         /// Compile a chunk's block JIT to relocatable native code, or `None` if
         /// the chunk is ineligible or its code contains an unsupported
         /// relocation.
-        pub(crate) fn compile_block_native(chunk: &Chunk) -> Option<NativeBlob> {
-            let BuiltFn {
-                module,
-                mut ctx,
-                fid: _,
-                helper_ids,
-            } = build_block_function(chunk)?;
+        pub(crate) fn compile_block_native(
+            chunk: &Chunk,
+            slot_kinds: &[crate::SlotKind],
+        ) -> Option<NativeBlob> {
+            let (
+                BuiltFn {
+                    module,
+                    mut ctx,
+                    fid: _,
+                    helper_ids,
+                    ext_helpers,
+                },
+                ret_is_float,
+            ) = build_block_function(chunk, slot_kinds)?;
             let (code, relocs) = {
                 let isa = module.isa();
-                compile_and_extract(&mut ctx, isa, |index| map_helper_funcid(&helper_ids, index))?
+                compile_and_extract(&mut ctx, isa, |index| {
+                    map_helper_funcid_ext(&helper_ids, &ext_helpers, index)
+                })?
             };
             Some(NativeBlob {
                 kind: KIND_BLOCK,
                 code,
                 relocs,
                 entry: 0,
-                ret_is_float: false,
+                ret_is_float,
                 need_slots: true,
-                aux: 0,
+                aux: slot_kinds_hash(slot_kinds),
             })
         }
 
@@ -2488,6 +2990,7 @@ mod cranelift_jit_impl {
                 mut ctx,
                 fid: _,
                 helper_ids,
+                ext_helpers: _,
             } = build_trace_function(
                 ops,
                 recorded_ips,
@@ -2546,22 +3049,43 @@ mod cranelift_jit_impl {
         #[allow(dead_code)]
         backing: BlockBacking,
         run: BlockRun,
+        /// Whether the chunk's result is a float, returned as its raw `f64` bit
+        /// pattern in the `i64` register (the block signature is always
+        /// `fn(*mut i64) -> i64`; float results are `bitcast`, not truncated, so a
+        /// typed caller can recover the exact value via [`f64::from_bits`]).
+        ret_is_float: bool,
     }
 
     impl CompiledBlock {
-        /// Invoke and return the result as i64 (truncating float results).
+        /// Invoke and return the result as i64 (truncating float results, so all
+        /// existing integer-contract callers — incl. the awk/VM path — observe the
+        /// exact same value they did before float returns were bit-encoded).
+        #[allow(dead_code)]
         pub(crate) fn invoke(&self, slots: &mut [i64]) -> i64 {
+            let (bits, is_float) = self.invoke_typed(slots);
+            if is_float {
+                f64::from_bits(bits as u64) as i64
+            } else {
+                bits
+            }
+        }
+
+        /// Invoke and return `(raw_bits, ret_is_float)`. For a float result
+        /// `raw_bits` is the `f64` bit pattern (recover via `f64::from_bits`); for an
+        /// integer result it is the plain `i64`.
+        pub(crate) fn invoke_typed(&self, slots: &mut [i64]) -> (i64, bool) {
             let ptr = if slots.is_empty() {
                 std::ptr::null_mut()
             } else {
                 slots.as_mut_ptr()
             };
-            match &self.run {
+            let raw = match &self.run {
                 BlockRun::SlotsI(f) => unsafe { f(ptr) },
                 BlockRun::NoSlotsI(f) => unsafe { f() },
-                BlockRun::SlotsF(f) => (unsafe { f(ptr) }) as i64,
-                BlockRun::NoSlotsF(f) => (unsafe { f() }) as i64,
-            }
+                BlockRun::SlotsF(f) => (unsafe { f(ptr) }).to_bits() as i64,
+                BlockRun::NoSlotsF(f) => (unsafe { f() }).to_bits() as i64,
+            };
+            (raw, self.ret_is_float)
         }
     }
 
@@ -2624,6 +3148,7 @@ mod cranelift_jit_impl {
                 | Op::Div
                 | Op::Mod
                 | Op::Pow
+                | Op::PowFloat
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -2657,6 +3182,16 @@ mod cranelift_jit_impl {
                 | Op::AccumSumLoop(_, _, _)
                 | Op::PushFrame
                 | Op::PopFrame
+                | Op::AwkInt
+                | Op::AwkSin
+                | Op::AwkCos
+                | Op::AwkExp
+                | Op::AwkAtan2
+                | Op::AwkAnd(_)
+                | Op::AwkOr(_)
+                | Op::AwkXor(_)
+                | Op::AwkDivJit
+                | Op::AwkModJit
         )
     }
 
@@ -2679,8 +3214,8 @@ mod cranelift_jit_impl {
         BLOCK_CACHE_TLS.with(|cache_cell| {
             cache_cell
                 .borrow()
-                .get(&chunk.op_hash)
-                .map_or(false, |e| e.compiled.is_some())
+                .iter()
+                .any(|(&(op_hash, _kinds), e)| op_hash == chunk.op_hash && e.compiled.is_some())
         })
     }
 
@@ -2834,21 +3369,97 @@ mod cranelift_jit_impl {
         ctx: cranelift_codegen::Context,
         fid: cranelift_module::FuncId,
         #[allow(dead_code)]
-        helper_ids: [Option<cranelift_module::FuncId>; 4],
+        helper_ids: [Option<cranelift_module::FuncId>; 8],
+        /// `(FuncId, stable host-helper id)` for each extension host helper the
+        /// chunk calls — threaded into the cache relocation mapper.
+        #[allow(dead_code)]
+        ext_helpers: Vec<(cranelift_module::FuncId, u32)>,
     }
 
-    pub(crate) fn build_block_function(chunk: &Chunk) -> Option<BuiltFn> {
+    /// Pass the current operand `stack` as block parameters when branching to
+    /// `target`, so operand-stack values that are live across a basic-block boundary
+    /// survive the control-flow merge. (The block JIT otherwise keeps the operand
+    /// stack local to each Cranelift block, which silently drops values produced in
+    /// one block and consumed after a merge — e.g. a ternary `?:` / `if`-expression
+    /// / `&&` / `||` result.)
+    ///
+    /// The *first* predecessor to branch to a block fixes its parameter list (one
+    /// param per live stack entry, typed by [`JitTy`]); every later predecessor must
+    /// agree on arity and types, otherwise the chunk is rejected (`None`) and falls
+    /// back to the interpreter. Branching back to the entry block is unsupported
+    /// (its params are the function params), and also yields `None`. Returns the
+    /// block arguments to hand to the branch instruction.
+    fn branch_block_args(
+        bcx: &mut FunctionBuilder,
+        entry: cranelift_codegen::ir::Block,
+        target: cranelift_codegen::ir::Block,
+        stack: &[(Value, JitTy)],
+        param_tys: &mut HashMap<cranelift_codegen::ir::Block, Vec<JitTy>>,
+    ) -> Option<Vec<BlockArg>> {
+        if target == entry && !stack.is_empty() {
+            return None;
+        }
+        let tys: Vec<JitTy> = stack.iter().map(|(_, t)| *t).collect();
+        match param_tys.get(&target) {
+            Some(existing) => {
+                if *existing != tys {
+                    return None;
+                }
+            }
+            None => {
+                for ty in &tys {
+                    let clty = match ty {
+                        JitTy::Int => types::I64,
+                        JitTy::Float => types::F64,
+                    };
+                    bcx.append_block_param(target, clty);
+                }
+                param_tys.insert(target, tys);
+            }
+        }
+        Some(stack.iter().map(|(v, _)| BlockArg::Value(*v)).collect())
+    }
+
+    /// Build the block-JIT Cranelift function for `chunk`. Returns the built
+    /// function plus `ret_is_float`: whether the chunk's result is a float, which
+    /// the function returns as the raw `f64` bit pattern in its `i64` return
+    /// register (the signature is always `fn(*mut i64) -> i64`). Returns `None` if
+    /// the chunk is block-ineligible, or if two distinct return points disagree on
+    /// the result's int/float-ness (an inconsistent ABI the caller can't decode) —
+    /// in which case the caller falls back to the interpreter.
+    pub(crate) fn build_block_function(
+        chunk: &Chunk,
+        slot_kinds: &[super::SlotKind],
+    ) -> Option<(BuiltFn, bool)> {
         let ops = &chunk.ops;
         if !is_block_eligible(chunk) {
             return None;
         }
 
+        // A slot is Float-kinded when the runtime value it holds at block entry
+        // is a float (awk numeric vars). Float slots are stored as i64 bit
+        // patterns in the slot array; `GetSlot`/`SetSlot` bit-cast through f64.
+        // Integer-only fused slot superinstructions bail (return None) on a
+        // Float slot so the chunk falls back to the interpreter.
+        let slot_is_float =
+            |slot: u16| matches!(slot_kinds.get(slot as usize), Some(super::SlotKind::Float));
+
         let leaders = find_leaders(ops);
         let leader_vec: Vec<usize> = leaders.iter().copied().collect();
         let mut module = new_jit_module()?;
 
+        // Collects extension host helpers imported while lowering `Op::Extended`
+        // arms, as `helper_id -> (FuncId, FuncRef)`. Drained into `BuiltFn::
+        // ext_helpers` so `compile_block_native` can relocate them in cached
+        // native code. Stays empty for chunks with no extension calls (all
+        // AWK-op and pure-numeric chunks).
+        let mut ext_helper_map: std::collections::HashMap<
+            u32,
+            (cranelift_module::FuncId, cranelift_codegen::ir::FuncRef),
+        > = std::collections::HashMap::new();
+
         // Declare external helpers
-        let needs_pow = ops.iter().any(|o| matches!(o, Op::Pow));
+        let needs_pow = ops.iter().any(|o| matches!(o, Op::Pow | Op::PowFloat));
         let pow_i64_id = if needs_pow {
             let mut ps = module.make_signature();
             ps.params.push(AbiParam::new(types::I64));
@@ -2875,7 +3486,7 @@ mod cranelift_jit_impl {
         } else {
             None
         };
-        let needs_fmod = ops.iter().any(|o| matches!(o, Op::Mod));
+        let needs_fmod = ops.iter().any(|o| matches!(o, Op::Mod | Op::AwkModJit));
         let fmod_f64_id = if needs_fmod {
             let mut ps = module.make_signature();
             ps.params.push(AbiParam::new(types::F64));
@@ -2903,6 +3514,8 @@ mod cranelift_jit_impl {
             None
         };
 
+        let math_ids = MathIds::declare(&mut module, ops);
+
         let ptr_ty = module.target_config().pointer_type();
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 slots
@@ -2916,6 +3529,9 @@ mod cranelift_jit_impl {
         ctx.func.name = UserFuncName::user(0, fid.as_u32());
 
         let mut fctx = FunctionBuilderContext::new();
+        // Set inside the builder block at the chunk's return point(s); read after
+        // the block closes to tag the built function as float- or int-returning.
+        let ret_is_float_final: bool;
         {
             let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fctx);
 
@@ -2952,9 +3568,21 @@ mod cranelift_jit_impl {
             let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
             let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
             let lognot_ref = lognot_id.map(|lid| module.declare_func_in_func(lid, bcx.func));
+            let math = math_ids.resolve(&mut module, bcx.func);
 
             // Process each basic block
-            let mut block_terminated = false;
+
+            // Operand-stack values that are live across a basic-block boundary are
+            // carried as Cranelift block parameters (see `branch_block_args`). This
+            // records the JitTy of each block's params so successor blocks can seed
+            // their local operand stack and later predecessors can verify a match.
+            let mut block_param_tys: HashMap<cranelift_codegen::ir::Block, Vec<JitTy>> =
+                HashMap::new();
+
+            // Whether the chunk's result is a float, decided at the (one or more)
+            // return points. All return points must agree; a disagreement makes the
+            // i64-encoded result undecodable, so we bail to the interpreter.
+            let mut ret_is_float: Option<bool> = None;
 
             for (block_idx, &leader_ip) in leader_vec.iter().enumerate() {
                 let block_end = if block_idx + 1 < leader_vec.len() {
@@ -2963,17 +3591,29 @@ mod cranelift_jit_impl {
                     ops.len()
                 };
 
-                // Switch to this block (unless it's the entry which we already started)
+                let cur_block = block_map[&leader_ip];
+                // Switch to this block (unless it's the entry which we already started).
+                // Fallthrough jumps are emitted at the END of the predecessor block so
+                // the residual operand stack can be passed as block arguments.
                 if leader_ip > 0 {
-                    if !block_terminated {
-                        // Previous block fell through — emit jump
-                        bcx.ins().jump(block_map[&leader_ip], &[]);
-                    }
-                    bcx.switch_to_block(block_map[&leader_ip]);
+                    bcx.switch_to_block(cur_block);
                 }
 
                 let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::new();
-                block_terminated = false;
+                // Seed the local operand stack from this block's parameters (values
+                // carried in from predecessors across the merge).
+                if leader_ip > 0 {
+                    if let Some(tys) = block_param_tys.get(&cur_block) {
+                        let params: Vec<Value> = bcx.block_params(cur_block).to_vec();
+                        if params.len() != tys.len() {
+                            return None;
+                        }
+                        for (i, ty) in tys.iter().enumerate() {
+                            stack.push((params[i], *ty));
+                        }
+                    }
+                }
+                let mut block_terminated = false;
 
                 for ip in leader_ip..block_end {
                     let op = &ops[ip];
@@ -2982,7 +3622,14 @@ mod cranelift_jit_impl {
 
                         Op::Jump(target) => {
                             let target_block = *block_map.get(target)?;
-                            bcx.ins().jump(target_block, &[]);
+                            let args = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                target_block,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            bcx.ins().jump(target_block, &args);
                             block_terminated = true;
                         }
 
@@ -2995,7 +3642,21 @@ mod cranelift_jit_impl {
                             } else {
                                 return None;
                             };
-                            bcx.ins().brif(pred, target_block, &[], fall, &[]);
+                            let targs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                target_block,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            let fargs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                fall,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            bcx.ins().brif(pred, target_block, &targs, fall, &fargs);
                             block_terminated = true;
                         }
 
@@ -3008,23 +3669,67 @@ mod cranelift_jit_impl {
                             } else {
                                 return None;
                             };
-                            bcx.ins().brif(pred, fall, &[], target_block, &[]);
+                            let targs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                target_block,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            let fargs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                fall,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            bcx.ins().brif(pred, fall, &fargs, target_block, &targs);
                             block_terminated = true;
                         }
 
                         // ── Slot data ops: use Variables (register-allocated) ──
+                        // Float-kinded slots hold an i64 bit pattern; bit-cast
+                        // through f64 on use/def so downstream arithmetic is
+                        // float-aware (mirrors the tracing-JIT slot handling).
                         Op::GetSlot(slot) => {
                             let var = *slot_vars.get(slot)?;
-                            let v = bcx.use_var(var);
-                            stack.push((v, JitTy::Int));
+                            let raw = bcx.use_var(var);
+                            if slot_is_float(*slot) {
+                                let f = bcx.ins().bitcast(
+                                    types::F64,
+                                    cranelift_codegen::ir::MemFlags::new(),
+                                    raw,
+                                );
+                                stack.push((f, JitTy::Float));
+                            } else {
+                                stack.push((raw, JitTy::Int));
+                            }
                         }
                         Op::SetSlot(slot) => {
                             let var = *slot_vars.get(slot)?;
                             let (v, ty) = stack.pop()?;
-                            let v_i = scalar_store_i64(&mut bcx, v, ty);
+                            let v_i = if slot_is_float(*slot) {
+                                // Store the f64 bit pattern. Coerce an Int
+                                // operand to f64 first (integer-valued result of
+                                // e.g. a comparison or AwkInt), then bit-cast.
+                                let f = match ty {
+                                    JitTy::Float => v,
+                                    JitTy::Int => i64_to_f64(&mut bcx, v),
+                                };
+                                bcx.ins().bitcast(
+                                    types::I64,
+                                    cranelift_codegen::ir::MemFlags::new(),
+                                    f,
+                                )
+                            } else {
+                                scalar_store_i64(&mut bcx, v, ty)
+                            };
                             bcx.def_var(var, v_i);
                         }
                         Op::PreIncSlot(slot) => {
+                            if slot_is_float(*slot) {
+                                return None;
+                            }
                             let var = *slot_vars.get(slot)?;
                             let old = bcx.use_var(var);
                             let one = bcx.ins().iconst(types::I64, 1);
@@ -3033,6 +3738,9 @@ mod cranelift_jit_impl {
                             stack.push((new, JitTy::Int));
                         }
                         Op::PreIncSlotVoid(slot) => {
+                            if slot_is_float(*slot) {
+                                return None;
+                            }
                             let var = *slot_vars.get(slot)?;
                             let old = bcx.use_var(var);
                             let one = bcx.ins().iconst(types::I64, 1);
@@ -3040,6 +3748,9 @@ mod cranelift_jit_impl {
                             bcx.def_var(var, new);
                         }
                         Op::PreDecSlot(slot) => {
+                            if slot_is_float(*slot) {
+                                return None;
+                            }
                             let var = *slot_vars.get(slot)?;
                             let old = bcx.use_var(var);
                             let one = bcx.ins().iconst(types::I64, 1);
@@ -3048,6 +3759,9 @@ mod cranelift_jit_impl {
                             stack.push((new, JitTy::Int));
                         }
                         Op::PostIncSlot(slot) => {
+                            if slot_is_float(*slot) {
+                                return None;
+                            }
                             let var = *slot_vars.get(slot)?;
                             let old = bcx.use_var(var);
                             let one = bcx.ins().iconst(types::I64, 1);
@@ -3056,6 +3770,9 @@ mod cranelift_jit_impl {
                             stack.push((old, JitTy::Int));
                         }
                         Op::PostDecSlot(slot) => {
+                            if slot_is_float(*slot) {
+                                return None;
+                            }
                             let var = *slot_vars.get(slot)?;
                             let old = bcx.use_var(var);
                             let one = bcx.ins().iconst(types::I64, 1);
@@ -3064,6 +3781,9 @@ mod cranelift_jit_impl {
                             stack.push((old, JitTy::Int));
                         }
                         Op::AddAssignSlotVoid(a_slot, b_slot) => {
+                            if slot_is_float(*a_slot) || slot_is_float(*b_slot) {
+                                return None;
+                            }
                             let a_var = *slot_vars.get(a_slot)?;
                             let b_var = *slot_vars.get(b_slot)?;
                             let va = bcx.use_var(a_var);
@@ -3073,6 +3793,9 @@ mod cranelift_jit_impl {
                         }
 
                         Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
+                            if slot_is_float(*slot) {
+                                return None;
+                            }
                             let var = *slot_vars.get(slot)?;
                             let val = bcx.use_var(var);
                             let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
@@ -3084,11 +3807,28 @@ mod cranelift_jit_impl {
                                 return None;
                             };
                             // if >= limit, jump to target; otherwise fall through
-                            bcx.ins().brif(is_lt, fall, &[], target_block, &[]);
+                            let targs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                target_block,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            let fargs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                fall,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            bcx.ins().brif(is_lt, fall, &fargs, target_block, &targs);
                             block_terminated = true;
                         }
 
                         Op::SlotIncLtIntJumpBack(slot, limit, target) => {
+                            if slot_is_float(*slot) {
+                                return None;
+                            }
                             let var = *slot_vars.get(slot)?;
                             let old = bcx.use_var(var);
                             let one = bcx.ins().iconst(types::I64, 1);
@@ -3102,11 +3842,28 @@ mod cranelift_jit_impl {
                             } else {
                                 return None;
                             };
-                            bcx.ins().brif(is_lt, target_block, &[], fall, &[]);
+                            let targs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                target_block,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            let fargs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                fall,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            bcx.ins().brif(is_lt, target_block, &targs, fall, &fargs);
                             block_terminated = true;
                         }
 
                         Op::AccumSumLoop(sum_slot, i_slot, limit) => {
+                            if slot_is_float(*sum_slot) || slot_is_float(*i_slot) {
+                                return None;
+                            }
                             let sum_var = *slot_vars.get(sum_slot)?;
                             let i_var = *slot_vars.get(i_slot)?;
                             let sum_init = bcx.use_var(sum_var);
@@ -3163,10 +3920,52 @@ mod cranelift_jit_impl {
                             let mut cx = ExtJitCtx {
                                 bcx: &mut bcx,
                                 stack: &mut stack,
+                                module: &mut module,
+                                helpers: &mut ext_helper_map,
                             };
                             if !ext.emit_extended(*id, *arg, &mut cx) {
                                 return None;
                             }
+                        }
+
+                        // AWK div/mod with a guarded zero-divisor trap. Float
+                        // `fdiv`/`fmod` don't hardware-trap (they yield inf/nan),
+                        // but awk requires a fatal on a zero divisor. Emit an
+                        // early-exit: compare the divisor to 0.0; on equality
+                        // branch to a trap block that records the trap code via
+                        // the `fusevm_jit_awk_div_trap` libcall and returns a
+                        // sentinel (the VM reads the code after the block and
+                        // raises the awk error, discarding this result). The
+                        // operands match `Op::Div`/`Op::AwkDiv`: pop divisor (top)
+                        // then dividend.
+                        Op::AwkDivJit | Op::AwkModJit => {
+                            let trap_ref = math.awk_div_trap?;
+                            let divisor = pop_as_f64(&mut bcx, &mut stack)?;
+                            let dividend = pop_as_f64(&mut bcx, &mut stack)?;
+                            let zero = bcx.ins().f64const(0.0);
+                            let is_zero = bcx.ins().fcmp(FloatCC::Equal, divisor, zero);
+                            let trap_block = bcx.create_block();
+                            let cont_block = bcx.create_block();
+                            bcx.ins().brif(is_zero, trap_block, &[], cont_block, &[]);
+
+                            // Trap path: record code (1 = div, 2 = mod), return 0.
+                            bcx.switch_to_block(trap_block);
+                            let code = if matches!(op, Op::AwkDivJit) { 1 } else { 2 };
+                            let code_v = bcx.ins().iconst(types::I64, code);
+                            bcx.ins().call(trap_ref, &[code_v]);
+                            let sentinel = bcx.ins().iconst(types::I64, 0);
+                            bcx.ins().return_(&[sentinel]);
+
+                            // Continue path: compute the quotient/remainder.
+                            bcx.switch_to_block(cont_block);
+                            let res = if matches!(op, Op::AwkDivJit) {
+                                bcx.ins().fdiv(dividend, divisor)
+                            } else {
+                                let fref = fmod_f64_ref?;
+                                let call = bcx.ins().call(fref, &[dividend, divisor]);
+                                bcx.inst_results(call)[0]
+                            };
+                            stack.push((res, JitTy::Float));
                         }
 
                         // Data ops — delegate to emit_data_op
@@ -3180,6 +3979,7 @@ mod cranelift_jit_impl {
                                 pow_f64_ref,
                                 fmod_f64_ref,
                                 lognot_ref,
+                                math,
                                 &chunk.constants,
                             )?;
                         }
@@ -3190,11 +3990,30 @@ mod cranelift_jit_impl {
                 if !block_terminated {
                     if block_end == ops.len() {
                         // Final block: spill promoted slot variables to memory, then return
-                        let ret_val = if let Some((v, ty)) = stack.pop() {
-                            scalar_store_i64(&mut bcx, v, ty)
+                        let (ret_val, is_f) = if let Some((v, ty)) = stack.pop() {
+                            match ty {
+                                // A float result is returned as its raw f64 bit
+                                // pattern (bit-cast, NOT truncated), so a typed
+                                // caller recovers the exact value. The integer
+                                // `invoke` re-truncates, preserving old behavior.
+                                JitTy::Float => {
+                                    let bits = bcx.ins().bitcast(
+                                        types::I64,
+                                        cranelift_codegen::ir::MemFlags::new(),
+                                        v,
+                                    );
+                                    (bits, true)
+                                }
+                                JitTy::Int => (v, false),
+                            }
                         } else {
-                            bcx.ins().iconst(types::I64, 0)
+                            (bcx.ins().iconst(types::I64, 0), false)
                         };
+                        // All return points must agree on int vs float.
+                        match ret_is_float {
+                            Some(prev) if prev != is_f => return None,
+                            _ => ret_is_float = Some(is_f),
+                        }
                         // Write all slot Variables back to the slot pointer
                         // (caller observes the final state of the slot array)
                         for (&slot, &var) in &slot_vars {
@@ -3203,45 +4022,95 @@ mod cranelift_jit_impl {
                                 .store(MemFlags::trusted(), val, slot_base, (slot as i32) * 8);
                         }
                         bcx.ins().return_(&[ret_val]);
-                        block_terminated = true;
+                    } else {
+                        // Non-final unterminated block: fall through to the next leader,
+                        // carrying any live operand-stack values as block arguments.
+                        let next_block = *block_map.get(&block_end)?;
+                        let args = branch_block_args(
+                            &mut bcx,
+                            entry,
+                            next_block,
+                            &stack,
+                            &mut block_param_tys,
+                        )?;
+                        bcx.ins().jump(next_block, &args);
                     }
-                    // Non-final unterminated blocks get a fallthrough jump
-                    // at the top of the next iteration
                 }
             }
 
             bcx.seal_all_blocks();
             bcx.finalize();
+            ret_is_float_final = ret_is_float.unwrap_or(false);
         }
 
-        Some(BuiltFn {
-            module,
-            ctx,
-            fid,
-            helper_ids: [pow_i64_id, pow_f64_id, fmod_f64_id, lognot_id],
-        })
+        Some((
+            BuiltFn {
+                module,
+                ctx,
+                fid,
+                helper_ids: [
+                    pow_i64_id,
+                    pow_f64_id,
+                    fmod_f64_id,
+                    lognot_id,
+                    math_ids.sin,
+                    math_ids.cos,
+                    math_ids.exp,
+                    math_ids.atan2,
+                ],
+                ext_helpers: {
+                    // Extension host helpers called by this chunk, as `(FuncId,
+                    // stable id)` pairs, so `compile_block_native` can relocate
+                    // them in cached native code. Empty for chunks that call no
+                    // host helpers (e.g. all AWK-op or pure-numeric chunks).
+                    #[cfg_attr(not(feature = "jit-disk-cache"), allow(unused_mut))]
+                    let mut v: Vec<(cranelift_module::FuncId, u32)> = ext_helper_map
+                        .into_iter()
+                        .map(|(id, (fid, _))| (fid, id))
+                        .collect();
+                    // The `AwkDivJit`/`AwkModJit` zero-divisor trap libcall is a
+                    // built-in helper with a stable disk-cache id, so div/mod
+                    // chunks persist as native code instead of being limited to
+                    // the in-memory JIT.
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.awk_div_trap {
+                        v.push((fid, disk_cache::H_AWK_DIV_TRAP));
+                    }
+                    v
+                },
+            },
+            ret_is_float_final,
+        ))
     }
 
     /// In-memory block JIT: build the function and finalize it through the
     /// `JITModule`. Block functions are always `fn(*mut i64) -> i64`.
-    pub(crate) fn compile_block(chunk: &Chunk) -> Option<CompiledBlock> {
-        let BuiltFn {
-            mut module,
-            mut ctx,
-            fid,
-            helper_ids: _,
-        } = build_block_function(chunk)?;
+    pub(crate) fn compile_block(
+        chunk: &Chunk,
+        slot_kinds: &[super::SlotKind],
+    ) -> Option<CompiledBlock> {
+        let (
+            BuiltFn {
+                mut module,
+                mut ctx,
+                fid,
+                helper_ids: _,
+                ext_helpers: _,
+            },
+            ret_is_float,
+        ) = build_block_function(chunk, slot_kinds)?;
         module.define_function(fid, &mut ctx).ok()?;
         module.clear_context(&mut ctx);
         module.finalize_definitions().ok()?;
         let ptr = module.get_finalized_function(fid);
-        // Currently always SlotsI: signature is fn(*mut i64) -> i64.
-        // Future specialization: detect no-slots chunks → NoSlotsI;
-        // detect float-returning chunks → SlotsF/NoSlotsF.
+        // Always SlotsI: signature is fn(*mut i64) -> i64. A float result rides
+        // back in the i64 register as its f64 bit pattern; `ret_is_float` tells a
+        // typed caller to decode it.
         let run = BlockRun::SlotsI(unsafe { std::mem::transmute::<*const u8, BlockFnSlotsI>(ptr) });
         Some(CompiledBlock {
             backing: BlockBacking::Jit(module),
             run,
+            ret_is_float,
         })
     }
 
@@ -3261,7 +4130,7 @@ mod cranelift_jit_impl {
     }
 
     thread_local! {
-        static BLOCK_CACHE_TLS: RefCell<HashMap<u64, BlockCacheEntry>> =
+        static BLOCK_CACHE_TLS: RefCell<HashMap<(u64, u64), BlockCacheEntry>> =
             RefCell::new(HashMap::new());
     }
 
@@ -3274,17 +4143,82 @@ mod cranelift_jit_impl {
     /// Below the threshold this returns `None` and the caller falls back to the
     /// interpreter — avoiding compile cost for one-shot chunks.
     pub(crate) fn try_run_block(chunk: &Chunk, slots: &mut [i64]) -> Option<i64> {
-        try_run_block_inner(chunk, slots, cfg_block_threshold())
+        try_run_block_inner(chunk, slots, &[], cfg_block_threshold()).map(decode_block_i64)
+    }
+
+    /// Slot-kind-aware variant: `slot_kinds[i]` gives the runtime kind of slot
+    /// `i` (Float for awk numeric vars). Float slots are stored as i64 bit
+    /// patterns and bit-cast through f64 in the compiled code.
+    pub(crate) fn try_run_block_kinded(
+        chunk: &Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[super::SlotKind],
+    ) -> Option<i64> {
+        try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold()).map(decode_block_i64)
+    }
+
+    /// Typed slot-kind-aware variant: returns the chunk result as a
+    /// [`BlockNum`], preserving float results exactly (rather than truncating
+    /// them to i64 like [`try_run_block_kinded`]). Used by frontends whose chunk
+    /// result may be a float value.
+    pub(crate) fn try_run_block_typed_kinded(
+        chunk: &Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[super::SlotKind],
+    ) -> Option<super::BlockNum> {
+        try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold()).map(decode_block_num)
     }
 
     /// Like `try_run_block` but compiles immediately (no warmup). For tests
     /// and synthetic benchmarks where you want to skip the tiered policy.
     pub(crate) fn try_run_block_eager(chunk: &Chunk, slots: &mut [i64]) -> Option<i64> {
-        try_run_block_inner(chunk, slots, 0)
+        try_run_block_inner(chunk, slots, &[], 0).map(decode_block_i64)
     }
 
-    fn try_run_block_inner(chunk: &Chunk, slots: &mut [i64], threshold: u32) -> Option<i64> {
-        let key = chunk.op_hash;
+    /// Slot-kind-aware eager variant (see [`try_run_block_kinded`]).
+    pub(crate) fn try_run_block_eager_kinded(
+        chunk: &Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[super::SlotKind],
+    ) -> Option<i64> {
+        try_run_block_inner(chunk, slots, slot_kinds, 0).map(decode_block_i64)
+    }
+
+    /// Typed eager slot-kind-aware variant (see [`try_run_block_typed_kinded`]).
+    pub(crate) fn try_run_block_eager_typed_kinded(
+        chunk: &Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[super::SlotKind],
+    ) -> Option<super::BlockNum> {
+        try_run_block_inner(chunk, slots, slot_kinds, 0).map(decode_block_num)
+    }
+
+    /// Decode a `(raw_bits, ret_is_float)` block result to an i64, truncating a
+    /// float result (preserving the historical integer contract).
+    fn decode_block_i64((raw, is_float): (i64, bool)) -> i64 {
+        if is_float {
+            f64::from_bits(raw as u64) as i64
+        } else {
+            raw
+        }
+    }
+
+    /// Decode a `(raw_bits, ret_is_float)` block result to a typed [`BlockNum`].
+    fn decode_block_num((raw, is_float): (i64, bool)) -> super::BlockNum {
+        if is_float {
+            super::BlockNum::Float(f64::from_bits(raw as u64))
+        } else {
+            super::BlockNum::Int(raw)
+        }
+    }
+
+    fn try_run_block_inner(
+        chunk: &Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[super::SlotKind],
+        threshold: u32,
+    ) -> Option<(i64, bool)> {
+        let key = (chunk.op_hash, slot_kinds_hash(slot_kinds));
 
         BLOCK_CACHE_TLS.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
@@ -3294,7 +4228,7 @@ mod cranelift_jit_impl {
             });
 
             if let Some(ref compiled) = entry.compiled {
-                return Some(compiled.invoke(slots));
+                return Some(compiled.invoke_typed(slots));
             }
 
             entry.hot_count = entry.hot_count.saturating_add(1);
@@ -3307,8 +4241,10 @@ mod cranelift_jit_impl {
             #[cfg(feature = "jit-disk-cache")]
             {
                 if let Some(dir) = disk_cache::cache_dir() {
-                    if let Some(compiled) = disk_cache::try_load_or_build_block(chunk, &dir) {
-                        let result = compiled.invoke(slots);
+                    if let Some(compiled) =
+                        disk_cache::try_load_or_build_block(chunk, &dir, slot_kinds)
+                    {
+                        let result = compiled.invoke_typed(slots);
                         entry.compiled = Some(Box::new(compiled));
                         return Some(result);
                     }
@@ -3317,8 +4253,8 @@ mod cranelift_jit_impl {
             }
 
             // Compile on threshold cross
-            let compiled = compile_block(chunk)?;
-            let result = compiled.invoke(slots);
+            let compiled = compile_block(chunk, slot_kinds)?;
+            let result = compiled.invoke_typed(slots);
             entry.compiled = Some(Box::new(compiled));
             Some(result)
         })
@@ -4256,7 +5192,7 @@ mod cranelift_jit_impl {
         let mut module = new_jit_module()?;
 
         // Helper signatures (call out to fmod/pow/lognot when needed).
-        let needs_pow = ops.iter().any(|o| matches!(o, Op::Pow));
+        let needs_pow = ops.iter().any(|o| matches!(o, Op::Pow | Op::PowFloat));
         let pow_i64_id = if needs_pow {
             let mut ps = module.make_signature();
             ps.params.push(AbiParam::new(types::I64));
@@ -4311,6 +5247,8 @@ mod cranelift_jit_impl {
             None
         };
 
+        let math_ids = MathIds::declare(&mut module, ops);
+
         let ptr_ty = module.target_config().pointer_type();
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 slots
@@ -4343,6 +5281,7 @@ mod cranelift_jit_impl {
             let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
             let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
             let lognot_ref = lognot_id.map(|lid| module.declare_func_in_func(lid, bcx.func));
+            let math = math_ids.resolve(&mut module, bcx.func);
 
             // Caller frame: eagerly promote slot variables from the slot
             // pointer. Inlined frames are pushed lazily on Op::Call.
@@ -4642,6 +5581,7 @@ mod cranelift_jit_impl {
                             pow_f64_ref,
                             fmod_f64_ref,
                             lognot_ref,
+                            math,
                             constants,
                         )?;
                     }
@@ -4761,7 +5701,17 @@ mod cranelift_jit_impl {
             module,
             ctx,
             fid,
-            helper_ids: [pow_i64_id, pow_f64_id, fmod_f64_id, lognot_id],
+            helper_ids: [
+                pow_i64_id,
+                pow_f64_id,
+                fmod_f64_id,
+                lognot_id,
+                math_ids.sin,
+                math_ids.cos,
+                math_ids.exp,
+                math_ids.atan2,
+            ],
+            ext_helpers: Vec::new(),
         })
     }
 
@@ -4778,6 +5728,7 @@ mod cranelift_jit_impl {
             mut ctx,
             fid,
             helper_ids: _,
+            ext_helpers: _,
         } = build_trace_function(
             ops,
             recorded_ips,
@@ -4979,6 +5930,7 @@ impl JitCompiler {
                 | Op::Div
                 | Op::Mod
                 | Op::Pow
+                | Op::PowFloat
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -5176,12 +6128,76 @@ impl JitCompiler {
         cranelift_jit_impl::try_run_block(chunk, slots)
     }
 
+    /// Slot-kind-aware [`try_run_block`]: `slot_kinds[i]` is the runtime kind of
+    /// slot `i`. Float slots (awk numeric vars) are stored as i64 bit patterns
+    /// and bit-cast through f64 in the compiled native code. The slot kinds are
+    /// part of the cache key, so Int- and Float-specialized blocks never alias.
+    #[cfg(feature = "jit")]
+    pub fn try_run_block_kinded(
+        &self,
+        chunk: &crate::Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[SlotKind],
+    ) -> Option<i64> {
+        cranelift_jit_impl::try_run_block_kinded(chunk, slots, slot_kinds)
+    }
+
     /// Like `try_run_block` but skips the tiered policy — compiles immediately
     /// on first call. Use for tests, microbenchmarks, or AOT-style usage.
     #[cfg(feature = "jit")]
     /// Public method `try_run_block_eager` — see the implementing block's surrounding context for the call contract.
     pub fn try_run_block_eager(&self, chunk: &crate::Chunk, slots: &mut [i64]) -> Option<i64> {
         cranelift_jit_impl::try_run_block_eager(chunk, slots)
+    }
+
+    /// Slot-kind-aware eager variant (see [`Self::try_run_block_kinded`]).
+    #[cfg(feature = "jit")]
+    pub fn try_run_block_eager_kinded(
+        &self,
+        chunk: &crate::Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[SlotKind],
+    ) -> Option<i64> {
+        cranelift_jit_impl::try_run_block_eager_kinded(chunk, slots, slot_kinds)
+    }
+
+    /// Typed slot-kind-aware [`try_run_block_kinded`]: returns the chunk result
+    /// as a [`BlockNum`], preserving float results exactly instead of truncating
+    /// them to `i64`. Use this when the chunk's result may be a float value (the
+    /// plain `i64` entry points truncate floats for backward compatibility).
+    #[cfg(feature = "jit")]
+    pub fn try_run_block_typed_kinded(
+        &self,
+        chunk: &crate::Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[SlotKind],
+    ) -> Option<BlockNum> {
+        cranelift_jit_impl::try_run_block_typed_kinded(chunk, slots, slot_kinds)
+    }
+
+    /// Typed eager slot-kind-aware variant (see [`Self::try_run_block_typed_kinded`]).
+    #[cfg(feature = "jit")]
+    pub fn try_run_block_eager_typed_kinded(
+        &self,
+        chunk: &crate::Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[SlotKind],
+    ) -> Option<BlockNum> {
+        cranelift_jit_impl::try_run_block_eager_typed_kinded(chunk, slots, slot_kinds)
+    }
+
+    /// Reads and clears the JIT zero-divisor trap channel set by a compiled
+    /// [`Op::AwkDivJit`]/[`Op::AwkModJit`] that hit a `b == 0` divisor.
+    ///
+    /// Returns `true` if a trap fired since the last call (the JIT-returned
+    /// result for that segment is a sentinel and must be discarded). Front-ends
+    /// that lower their own float division to `Op::AwkDivJit` should call this
+    /// immediately after a `try_run_block*` invocation; on `true`, decline the
+    /// JIT result and re-run on the interpreter so the front-end's own
+    /// division-by-zero semantics (error message, etc.) take effect.
+    #[cfg(feature = "jit")]
+    pub fn take_awk_div_trap(&self) -> bool {
+        take_awk_div_trap() != 0
     }
 
     /// Check if a chunk is eligible for block JIT.
@@ -5637,4 +6653,48 @@ impl Default for JitCompiler {
 /// Compiled native code handle (placeholder for block JIT — linear JIT is cached internally).
 pub struct NativeCode {
     _private: (),
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod awk_div_trap_tests {
+    use super::{take_awk_div_trap, JitCompiler};
+    use crate::{ChunkBuilder, Op, SlotKind};
+
+    fn run_div_mod(op: Op, dividend: f64, divisor: f64) -> u8 {
+        // slot0 = OP(slot0, slot1); awk pops divisor (top) then dividend, so
+        // GetSlot(0)=dividend first, GetSlot(1)=divisor second.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::GetSlot(1), 1);
+        b.emit(op.clone(), 1);
+        b.emit(Op::Dup, 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::Pop, 1);
+        let chunk = b.build();
+
+        let jit = JitCompiler::new();
+        assert!(jit.is_block_eligible(&chunk), "{op:?} must be block-eligible");
+
+        let _ = take_awk_div_trap(); // clear any prior state
+        let kinds = [SlotKind::Float, SlotKind::Float];
+        let mut slots = vec![dividend.to_bits() as i64, divisor.to_bits() as i64];
+        jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+            .unwrap_or_else(|| panic!("{op:?} chunk must compile"));
+        take_awk_div_trap()
+    }
+
+    #[test]
+    fn awk_div_jit_traps_on_zero_divisor() {
+        // Zero divisor → guarded early-exit fires the trap libcall (code 1 = div).
+        assert_eq!(run_div_mod(Op::AwkDivJit, 7.0, 0.0), 1, "div-by-zero must trap (code 1)");
+        // Nonzero divisor → no trap.
+        assert_eq!(run_div_mod(Op::AwkDivJit, 7.0, 2.0), 0, "nonzero div must not trap");
+    }
+
+    #[test]
+    fn awk_mod_jit_traps_on_zero_divisor() {
+        // Zero divisor → guarded early-exit fires the trap libcall (code 2 = mod).
+        assert_eq!(run_div_mod(Op::AwkModJit, 7.0, 0.0), 2, "mod-by-zero must trap (code 2)");
+        assert_eq!(run_div_mod(Op::AwkModJit, 7.0, 3.0), 0, "nonzero mod must not trap");
+    }
 }

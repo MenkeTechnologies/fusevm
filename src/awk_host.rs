@@ -187,17 +187,17 @@ pub trait AwkHost: Send {
 
     /// `sin(x)` — radians.
     fn sin(&mut self, x: &Value) -> Value {
-        Value::Float(x.to_float().sin())
+        Value::Float(awk_canon_nan(x.to_float().sin()))
     }
 
     /// `cos(x)` — radians.
     fn cos(&mut self, x: &Value) -> Value {
-        Value::Float(x.to_float().cos())
+        Value::Float(awk_canon_nan(x.to_float().cos()))
     }
 
     /// `exp(x)` — e^x.
     fn exp(&mut self, x: &Value) -> Value {
-        Value::Float(x.to_float().exp())
+        Value::Float(awk_canon_nan(x.to_float().exp()))
     }
 
     /// `log(x)` — natural log.
@@ -207,7 +207,7 @@ pub trait AwkHost: Send {
 
     /// `atan2(y, x)`.
     fn atan2(&mut self, y: &Value, x: &Value) -> Value {
-        Value::Float(y.to_float().atan2(x.to_float()))
+        Value::Float(awk_canon_nan(y.to_float().atan2(x.to_float())))
     }
 
     // ── Bitwise builtins (gawk; pure integer math, host-independent) ─────────
@@ -433,6 +433,18 @@ pub fn awk_int(x: &Value) -> Value {
         Value::Int(t as i64)
     } else {
         Value::Float(t)
+    }
+}
+
+/// Canonicalize a NaN result to a positive NaN, matching awkrs/gawk's `+nan`
+/// (awkrs normalizes the sign in vm_builtins; platform libm may return `-nan`
+/// for some non-finite transcendental inputs). Finite/inf results pass through.
+#[inline]
+pub fn awk_canon_nan(r: f64) -> f64 {
+    if r.is_nan() {
+        f64::NAN
+    } else {
+        r
     }
 }
 

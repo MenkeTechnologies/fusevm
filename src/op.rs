@@ -408,6 +408,37 @@ pub enum Op {
     AwkLog,
     /// `atan2(y, x)` — arctangent of `y/x`. Stack `[y, x]`. Host-independent.
     AwkAtan2,
+    /// awk `a / b` — float divide. Stack `[a, b]`. Raises a fatal
+    /// "division by zero attempted" runtime error when `b == 0` (POSIX awk),
+    /// distinct from the shell-arithmetic `Op::Div` which yields `Undef`.
+    /// Host-independent.
+    AwkDiv,
+    /// awk `a % b` — float modulo (`fmod`). Stack `[a, b]`. Raises a fatal
+    /// "division by zero attempted in `%'" runtime error when `b == 0` (POSIX
+    /// awk), distinct from `Op::Mod`. Host-independent.
+    AwkMod,
+    /// Block-JIT-eligible variant of [`Op::AwkDiv`] — identical semantics
+    /// (float divide, fatal "division by zero attempted" on `b == 0`), but the
+    /// block JIT compiles it natively with a guarded early-exit: on a zero
+    /// divisor the compiled code sets a thread-local trap code and returns, and
+    /// the VM raises the fatal immediately after the block function returns
+    /// (`AwkDiv` stays interpreter-only so its existing behavior is untouched).
+    /// Emitted only by the awkrs fusevm bridge for offloaded numeric chunks.
+    /// Host-independent.
+    AwkDivJit,
+    /// Block-JIT-eligible variant of [`Op::AwkMod`] — identical semantics
+    /// (float modulo, fatal "division by zero attempted in `%'" on `b == 0`)
+    /// with the same guarded early-exit trap as [`Op::AwkDivJit`].
+    /// Host-independent.
+    AwkModJit,
+    /// Always-float exponentiation: pops `[base, exp]`, pushes
+    /// `Float(base.powf(exp))`. Unlike [`Op::Pow`] (whose JIT lowering keeps an
+    /// integer result for two static-`Int` operands), this op coerces BOTH
+    /// operands to `f64` in every tier, so the JIT and interpreter agree and the
+    /// chunk stays disk-cacheable (reuses the `pow_f64` host helper). Intended
+    /// for frontends whose `**` is always floating-point (e.g. strykelang).
+    /// Host-independent.
+    PowFloat,
     /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
     /// `u16` = name-pool index of the array variable.
     AwkArrayGet(u16),
@@ -457,6 +488,12 @@ pub enum Op {
     AwkIntdiv0,
     /// `gensub(re, repl, how [, target])` — pops `u8` args; pushes the result string. Host-bound (IGNORECASE, `$0`).
     AwkGensub(u8),
+    /// AWK control-flow signal — halts the current chunk and stashes `code` in
+    /// the VM for the frontend driver to read after `run()` (`0`=next,
+    /// `1`=nextfile, `2`=exit; see `crate::awk_builtins::signal`). Has no
+    /// `fusevm::Value` representation, so it is a VM-state side effect rather
+    /// than a stack value. zshrs/stryke never emit it. Interpreter-only.
+    AwkSignal(u8),
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -655,7 +692,8 @@ impl Hash for Op {
             | Op::AwkSrand(n)
             | Op::AwkStrftime(n)
             | Op::AwkMktime(n)
-            | Op::AwkGensub(n) => n.hash(state),
+            | Op::AwkGensub(n)
+            | Op::AwkSignal(n) => n.hash(state),
             Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
                 slot.hash(state);
                 limit.hash(state);
@@ -702,6 +740,7 @@ impl Hash for Op {
             | Op::Div
             | Op::Mod
             | Op::Pow
+            | Op::PowFloat
             | Op::Negate
             | Op::Inc
             | Op::Dec
@@ -770,6 +809,10 @@ impl Hash for Op {
             | Op::AwkExp
             | Op::AwkLog
             | Op::AwkAtan2
+            | Op::AwkDiv
+            | Op::AwkMod
+            | Op::AwkDivJit
+            | Op::AwkModJit
             | Op::AwkCompl
             | Op::AwkLshift
             | Op::AwkRshift
