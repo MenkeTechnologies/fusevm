@@ -439,6 +439,14 @@ pub enum Op {
     /// for frontends whose `**` is always floating-point (e.g. strykelang).
     /// Host-independent.
     PowFloat,
+    /// Always-float square root: pops `[x]`, pushes `Float(x.sqrt())` (NaN for a
+    /// negative operand). Lowers to a native Cranelift `fsqrt` in the JIT and
+    /// `f64::sqrt` in the interpreter — identical across tiers, with no host
+    /// helper or relocation, so the chunk is trivially disk-cacheable. Unlike
+    /// [`Op::AwkSqrt`] (which dispatches through the awk host and is not
+    /// JIT-lowerable), this op is host-independent. Intended for frontends whose
+    /// `sqrt` is always floating-point (e.g. strykelang).
+    SqrtFloat,
     /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
     /// `u16` = name-pool index of the array variable.
     AwkArrayGet(u16),
@@ -741,6 +749,7 @@ impl Hash for Op {
             | Op::Mod
             | Op::Pow
             | Op::PowFloat
+            | Op::SqrtFloat
             | Op::Negate
             | Op::Inc
             | Op::Dec

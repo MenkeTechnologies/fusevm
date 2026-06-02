@@ -747,6 +747,13 @@ mod cranelift_jit_impl {
                     _ => stack.push(Cell::DynF),
                 }
             }
+            Op::SqrtFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.sqrt())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
             // awk int(x): truncate toward zero. An integer operand is already
             // integral (identity); a float is truncated. Matches awkrs
             // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
@@ -1458,6 +1465,10 @@ mod cranelift_jit_impl {
                 let call = bcx.ins().call(fr, &[a, b]);
                 stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
             }
+            Op::SqrtFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                stack.push((bcx.ins().sqrt(a), JitTy::Float));
+            }
             Op::Negate => {
                 let (a, ty) = stack.pop()?;
                 match ty {
@@ -2034,7 +2045,9 @@ mod cranelift_jit_impl {
         // 7 -> 8: inserted `Op::PowFloat` mid-enum, shifting the serde/Hash
         // discriminants of all following ops; bumped to invalidate any prior
         // op_hash-keyed blobs that would otherwise collide.
-        const SCHEMA_VERSION: u32 = 8;
+        // 8 -> 9: inserted `Op::SqrtFloat` mid-enum (same discriminant-shift
+        // reasoning).
+        const SCHEMA_VERSION: u32 = 9;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -3152,6 +3165,7 @@ mod cranelift_jit_impl {
                 | Op::Mod
                 | Op::Pow
                 | Op::PowFloat
+                | Op::SqrtFloat
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -5934,6 +5948,7 @@ impl JitCompiler {
                 | Op::Mod
                 | Op::Pow
                 | Op::PowFloat
+                | Op::SqrtFloat
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
