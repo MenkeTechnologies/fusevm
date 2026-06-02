@@ -447,6 +447,25 @@ pub enum Op {
     /// JIT-lowerable), this op is host-independent. Intended for frontends whose
     /// `sqrt` is always floating-point (e.g. strykelang).
     SqrtFloat,
+    /// Always-float sine (radians): pops `[x]`, pushes `Float(x.sin())`. Lowers
+    /// to the `fusevm_jit_sin_f64` host helper in the JIT (the same one
+    /// [`Op::AwkSin`] uses) and `f64::sin` in the interpreter. Unlike
+    /// [`Op::AwkSin`] (which dispatches through the awk host and would panic in a
+    /// non-awk fallback), this op is host-independent and runs in the plain
+    /// interpreter, so the chunk is disk-cacheable. Intended for frontends whose
+    /// `sin` is always floating-point (e.g. strykelang).
+    SinFloat,
+    /// Always-float cosine (radians): pops `[x]`, pushes `Float(x.cos())`. See
+    /// [`Op::SinFloat`]; reuses the `fusevm_jit_cos_f64` host helper.
+    CosFloat,
+    /// Always-float exponential: pops `[x]`, pushes `Float(x.exp())`. See
+    /// [`Op::SinFloat`]; reuses the `fusevm_jit_exp_f64` host helper.
+    ExpFloat,
+    /// Always-float two-argument arctangent: the chunk pushes `y` then `x` (so
+    /// `x` is on top), pops both, and pushes `Float(y.atan2(x))`. See
+    /// [`Op::SinFloat`]; reuses the `fusevm_jit_atan2_f64` host helper. Intended
+    /// for frontends whose `atan2` is always floating-point (e.g. strykelang).
+    Atan2Float,
     /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
     /// `u16` = name-pool index of the array variable.
     AwkArrayGet(u16),
@@ -750,6 +769,10 @@ impl Hash for Op {
             | Op::Pow
             | Op::PowFloat
             | Op::SqrtFloat
+            | Op::SinFloat
+            | Op::CosFloat
+            | Op::ExpFloat
+            | Op::Atan2Float
             | Op::Negate
             | Op::Inc
             | Op::Dec

@@ -2333,6 +2333,23 @@ impl VM {
                     let a = self.pop();
                     self.push(Value::Float(a.to_float().sqrt()));
                 }
+                Op::SinFloat => {
+                    let a = self.pop();
+                    self.push(Value::Float(a.to_float().sin()));
+                }
+                Op::CosFloat => {
+                    let a = self.pop();
+                    self.push(Value::Float(a.to_float().cos()));
+                }
+                Op::ExpFloat => {
+                    let a = self.pop();
+                    self.push(Value::Float(a.to_float().exp()));
+                }
+                Op::Atan2Float => {
+                    let x = self.pop();
+                    let y = self.pop();
+                    self.push(Value::Float(y.to_float().atan2(x.to_float())));
+                }
                 Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
                 Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
                 Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),

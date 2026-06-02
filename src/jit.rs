@@ -754,6 +754,34 @@ mod cranelift_jit_impl {
                     _ => stack.push(Cell::DynF),
                 }
             }
+            Op::SinFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.sin())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::CosFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.cos())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::ExpFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.exp())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::Atan2Float => {
+                let (a, b) = pop2_strict(stack)?;
+                match (a, b) {
+                    (Cell::ConstF(y), Cell::ConstF(x)) => stack.push(Cell::ConstF(y.atan2(x))),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
             // awk int(x): truncate toward zero. An integer operand is already
             // integral (identity); a float is truncated. Matches awkrs
             // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
@@ -1059,16 +1087,16 @@ mod cranelift_jit_impl {
             let mut m = MathIds::default();
             for op in ops {
                 match op {
-                    Op::AwkSin if m.sin.is_none() => {
+                    Op::AwkSin | Op::SinFloat if m.sin.is_none() => {
                         m.sin = declare_unary_f64(module, "fusevm_jit_sin_f64");
                     }
-                    Op::AwkCos if m.cos.is_none() => {
+                    Op::AwkCos | Op::CosFloat if m.cos.is_none() => {
                         m.cos = declare_unary_f64(module, "fusevm_jit_cos_f64");
                     }
-                    Op::AwkExp if m.exp.is_none() => {
+                    Op::AwkExp | Op::ExpFloat if m.exp.is_none() => {
                         m.exp = declare_unary_f64(module, "fusevm_jit_exp_f64");
                     }
-                    Op::AwkAtan2 if m.atan2.is_none() => {
+                    Op::AwkAtan2 | Op::Atan2Float if m.atan2.is_none() => {
                         m.atan2 = declare_binary_f64(module, "fusevm_jit_atan2_f64");
                     }
                     Op::AwkDivJit | Op::AwkModJit if m.awk_div_trap.is_none() => {
@@ -1468,6 +1496,31 @@ mod cranelift_jit_impl {
             Op::SqrtFloat => {
                 let a = pop_as_f64(bcx, stack)?;
                 stack.push((bcx.ins().sqrt(a), JitTy::Float));
+            }
+            // Always-float transcendentals reusing the awk host helpers, but as
+            // host-independent ops (the interpreter computes them directly rather
+            // than dispatching through the awk host).
+            Op::SinFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.sin?, &[a]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
+            Op::CosFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.cos?, &[a]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
+            Op::ExpFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.exp?, &[a]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
+            // atan2(y, x): the chunk pushes y then x, so x is on top.
+            Op::Atan2Float => {
+                let x = pop_as_f64(bcx, stack)?;
+                let y = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.atan2?, &[y, x]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
             }
             Op::Negate => {
                 let (a, ty) = stack.pop()?;
@@ -2047,7 +2100,9 @@ mod cranelift_jit_impl {
         // op_hash-keyed blobs that would otherwise collide.
         // 8 -> 9: inserted `Op::SqrtFloat` mid-enum (same discriminant-shift
         // reasoning).
-        const SCHEMA_VERSION: u32 = 9;
+        // 9 -> 10: inserted `Op::SinFloat`/`CosFloat`/`ExpFloat`/`Atan2Float`
+        // mid-enum (same discriminant-shift reasoning).
+        const SCHEMA_VERSION: u32 = 10;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -3166,6 +3221,10 @@ mod cranelift_jit_impl {
                 | Op::Pow
                 | Op::PowFloat
                 | Op::SqrtFloat
+                | Op::SinFloat
+                | Op::CosFloat
+                | Op::ExpFloat
+                | Op::Atan2Float
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -5949,6 +6008,10 @@ impl JitCompiler {
                 | Op::Pow
                 | Op::PowFloat
                 | Op::SqrtFloat
+                | Op::SinFloat
+                | Op::CosFloat
+                | Op::ExpFloat
+                | Op::Atan2Float
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
