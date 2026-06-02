@@ -2358,6 +2358,10 @@ impl VM {
                     let a = self.pop();
                     self.push(Value::Float(a.to_float().abs()));
                 }
+                Op::TruncInt => {
+                    let a = self.pop();
+                    self.push(Value::Int(a.to_int()));
+                }
                 Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
                 Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
                 Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),

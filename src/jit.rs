@@ -796,6 +796,14 @@ mod cranelift_jit_impl {
                     _ => stack.push(Cell::DynF),
                 }
             }
+            Op::TruncInt => {
+                let a = stack.pop()?;
+                stack.push(match a {
+                    Cell::Const(n) => Cell::Const(n),
+                    Cell::ConstF(f) => Cell::Const(f as i64),
+                    _ => Cell::Dyn,
+                });
+            }
             // awk int(x): truncate toward zero. An integer operand is already
             // integral (identity); a float is truncated. Matches awkrs
             // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
@@ -1565,6 +1573,16 @@ mod cranelift_jit_impl {
                 let a = pop_as_f64(bcx, stack)?;
                 stack.push((bcx.ins().fabs(a), JitTy::Float));
             }
+            Op::TruncInt => {
+                let (a, ty) = stack.pop()?;
+                match ty {
+                    JitTy::Int => stack.push((a, JitTy::Int)),
+                    JitTy::Float => {
+                        let i = bcx.ins().fcvt_to_sint_sat(types::I64, a);
+                        stack.push((i, JitTy::Int));
+                    }
+                }
+            }
             Op::Negate => {
                 let (a, ty) = stack.pop()?;
                 match ty {
@@ -2151,7 +2169,9 @@ mod cranelift_jit_impl {
         // reasoning).
         // 11 -> 12: inserted `Op::AbsFloat` mid-enum (same discriminant-shift
         // reasoning).
-        const SCHEMA_VERSION: u32 = 12;
+        // 12 -> 13: inserted `Op::TruncInt` mid-enum (same discriminant-shift
+        // reasoning).
+        const SCHEMA_VERSION: u32 = 13;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -3278,6 +3298,7 @@ mod cranelift_jit_impl {
                 | Op::Atan2Float
                 | Op::LogFloat
                 | Op::AbsFloat
+                | Op::TruncInt
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -6074,6 +6095,7 @@ impl JitCompiler {
                 | Op::Atan2Float
                 | Op::LogFloat
                 | Op::AbsFloat
+                | Op::TruncInt
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec

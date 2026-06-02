@@ -478,6 +478,13 @@ pub enum Op {
     /// frontends whose `abs` is floating-point (e.g. strykelang); integral
     /// results format identically to their integer form.
     AbsFloat,
+    /// Truncate-to-integer (`int(x)`): pops `[x]`, pushes `Int` of `x`
+    /// truncated toward zero. An integer operand is returned unchanged (full
+    /// i64 precision); a float is converted via a saturating cast (matching
+    /// Rust's `f as i64` and Cranelift `fcvt_to_sint_sat`). Unlike [`Op::AwkInt`]
+    /// (which keeps awk's float result), this yields a genuine integer — intended
+    /// for frontends whose `int` returns an integer (e.g. strykelang/Perl).
+    TruncInt,
     /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
     /// `u16` = name-pool index of the array variable.
     AwkArrayGet(u16),
@@ -787,6 +794,7 @@ impl Hash for Op {
             | Op::Atan2Float
             | Op::LogFloat
             | Op::AbsFloat
+            | Op::TruncInt
             | Op::Negate
             | Op::Inc
             | Op::Dec
