@@ -681,6 +681,91 @@ fn disk_cache_pow_float_block_persists() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `SqrtFloat` — the op a front-end's always-float `sqrt` lowers to (e.g.
+/// strykelang `sqrt($x)`) — block-JIT-compiles AND persists a `blk` native blob
+/// to the on-disk cache. It lowers to a native Cranelift `fsqrt` (no host helper
+/// or relocation at all), so the JIT result equals the interpreter's exact float
+/// (`sqrt(2.0) == 1.4142135623730951`) and the chunk round-trips through the disk
+/// cache with no schema-helper dependency.
+#[test]
+fn disk_cache_sqrt_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("sqrtfloat");
+
+    // `sqrt($x)` with x = slot 0: GetSlot(0); SqrtFloat. Always-float: the
+    // perfect square 9 -> 3.0, and 2 -> 1.4142135623730951.
+    let chunk = build(&[(Op::GetSlot(0), 1), (Op::SqrtFloat, 1)]);
+
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig {
+        block_threshold: 1,
+        ..TraceJitConfig::defaults()
+    });
+
+    let mut slots = vec![9i64];
+    assert_eq!(
+        jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]),
+        None,
+        "below threshold"
+    );
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => {
+            assert_eq!(f, 3.0, "sqrt(9.0) must be exactly 3.0");
+        }
+        other => panic!("expected Float(3.0) from SqrtFloat block, got {other:?}"),
+    }
+
+    jit.set_jit_cache_dir(None);
+
+    let blk: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.contains(".blk.") && n.ends_with(".fjit"))
+        })
+        .collect();
+    assert_eq!(
+        blk.len(),
+        1,
+        "expected one persisted blk.fjit for the SqrtFloat chunk, found {:?}",
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+
+    // Reload from disk on a fresh thread: a native `fsqrt` carries no host-helper
+    // relocation, so the blob must reproduce the exact float straight from disk.
+    let dir2 = dir.clone();
+    let chunk2 = chunk.clone();
+    let reloaded = std::thread::spawn(move || {
+        let jit = JitCompiler::new();
+        jit.set_jit_cache_dir(Some(dir2));
+        jit.set_config(TraceJitConfig {
+            block_threshold: 0,
+            ..TraceJitConfig::defaults()
+        });
+        let mut slots = vec![2i64];
+        jit.try_run_block_eager_typed_kinded(&chunk2, &mut slots, &[])
+    })
+    .join()
+    .unwrap();
+    match reloaded {
+        Some(fusevm::BlockNum::Float(f)) => {
+            assert_eq!(f, 2.0_f64.sqrt(), "reloaded blob must yield sqrt(2.0)")
+        }
+        other => panic!("expected reloaded Float(sqrt(2.0)), got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `AwkInt` — exactly the shape awkrs's `fusevm_bridge` emits for `x=int(x+c)`
 /// per record — block-JIT-compiles AND persists a `blk` native blob to the
 /// on-disk cache, so the JIT result is reused across process restarts.
