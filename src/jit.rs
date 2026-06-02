@@ -782,6 +782,13 @@ mod cranelift_jit_impl {
                     _ => stack.push(Cell::DynF),
                 }
             }
+            Op::LogFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.ln())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
             // awk int(x): truncate toward zero. An integer operand is already
             // integral (identity); a float is truncated. Matches awkrs
             // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
@@ -1037,6 +1044,19 @@ mod cranelift_jit_impl {
         }
     }
 
+    /// Natural logarithm `log(x)` — NaN canonicalized to `+nan` (see `sin`).
+    /// Used by the always-float [`Op::LogFloat`]; awk's own `log` dispatches
+    /// through the awk host instead.
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_log_f64(x: f64) -> f64 {
+        let r = x.ln();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+
     /// FuncIds for the awk transcendental libcalls, declared lazily on a module
     /// only when the corresponding op appears in the chunk (so chunks without
     /// them compile to byte-identical native code as before).
@@ -1046,6 +1066,7 @@ mod cranelift_jit_impl {
         cos: Option<cranelift_module::FuncId>,
         exp: Option<cranelift_module::FuncId>,
         atan2: Option<cranelift_module::FuncId>,
+        log: Option<cranelift_module::FuncId>,
         awk_div_trap: Option<cranelift_module::FuncId>,
     }
 
@@ -1057,6 +1078,7 @@ mod cranelift_jit_impl {
         cos: Option<cranelift_codegen::ir::FuncRef>,
         exp: Option<cranelift_codegen::ir::FuncRef>,
         atan2: Option<cranelift_codegen::ir::FuncRef>,
+        log: Option<cranelift_codegen::ir::FuncRef>,
         awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
     }
 
@@ -1099,6 +1121,9 @@ mod cranelift_jit_impl {
                     Op::AwkAtan2 | Op::Atan2Float if m.atan2.is_none() => {
                         m.atan2 = declare_binary_f64(module, "fusevm_jit_atan2_f64");
                     }
+                    Op::LogFloat if m.log.is_none() => {
+                        m.log = declare_unary_f64(module, "fusevm_jit_log_f64");
+                    }
                     Op::AwkDivJit | Op::AwkModJit if m.awk_div_trap.is_none() => {
                         m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
                     }
@@ -1115,6 +1140,7 @@ mod cranelift_jit_impl {
                 cos: self.cos.map(|id| module.declare_func_in_func(id, func)),
                 exp: self.exp.map(|id| module.declare_func_in_func(id, func)),
                 atan2: self.atan2.map(|id| module.declare_func_in_func(id, func)),
+                log: self.log.map(|id| module.declare_func_in_func(id, func)),
                 awk_div_trap: self
                     .awk_div_trap
                     .map(|id| module.declare_func_in_func(id, func)),
@@ -1133,6 +1159,7 @@ mod cranelift_jit_impl {
         builder.symbol("fusevm_jit_cos_f64", fusevm_jit_cos_f64 as *const u8);
         builder.symbol("fusevm_jit_exp_f64", fusevm_jit_exp_f64 as *const u8);
         builder.symbol("fusevm_jit_atan2_f64", fusevm_jit_atan2_f64 as *const u8);
+        builder.symbol("fusevm_jit_log_f64", fusevm_jit_log_f64 as *const u8);
         builder.symbol(
             "fusevm_jit_awk_div_trap",
             super::fusevm_jit_awk_div_trap as *const u8,
@@ -1520,6 +1547,11 @@ mod cranelift_jit_impl {
                 let x = pop_as_f64(bcx, stack)?;
                 let y = pop_as_f64(bcx, stack)?;
                 let call = bcx.ins().call(math.atan2?, &[y, x]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+            }
+            Op::LogFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let call = bcx.ins().call(math.log?, &[a]);
                 stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
             }
             Op::Negate => {
@@ -2087,6 +2119,8 @@ mod cranelift_jit_impl {
         /// front-end's float `/`) persist to the native disk cache instead of
         /// being limited to the in-memory JIT.
         pub(crate) const H_AWK_DIV_TRAP: u32 = 8;
+        /// Natural-log libcall for JIT-compiled `Op::LogFloat`.
+        pub(crate) const H_LOG_F64: u32 = 9;
 
         // Native-blob tier discriminator. Persisted in the file and verified on
         // load so a block blob can never be transmuted with a linear signature.
@@ -2102,7 +2136,9 @@ mod cranelift_jit_impl {
         // reasoning).
         // 9 -> 10: inserted `Op::SinFloat`/`CosFloat`/`ExpFloat`/`Atan2Float`
         // mid-enum (same discriminant-shift reasoning).
-        const SCHEMA_VERSION: u32 = 10;
+        // 10 -> 11: inserted `Op::LogFloat` mid-enum (same discriminant-shift
+        // reasoning).
+        const SCHEMA_VERSION: u32 = 11;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -2122,6 +2158,7 @@ mod cranelift_jit_impl {
                 H_COS_F64 => super::fusevm_jit_cos_f64 as *const u8 as usize,
                 H_EXP_F64 => super::fusevm_jit_exp_f64 as *const u8 as usize,
                 H_ATAN2_F64 => super::fusevm_jit_atan2_f64 as *const u8 as usize,
+                H_LOG_F64 => super::fusevm_jit_log_f64 as *const u8 as usize,
                 H_AWK_DIV_TRAP => super::super::fusevm_jit_awk_div_trap as *const u8 as usize,
                 _ => return None,
             })
@@ -2486,6 +2523,7 @@ mod cranelift_jit_impl {
                         &[types::F64, types::F64],
                         types::F64,
                     )),
+                    log: Some(import(&mut bcx, H_LOG_F64, &[types::F64], types::F64)),
                     // The linear tier never lowers AwkDivJit/AwkModJit (those are
                     // block-only ops handled in `build_block_function`), so the
                     // linear native path imports no trap ref. The block native
@@ -3225,6 +3263,7 @@ mod cranelift_jit_impl {
                 | Op::CosFloat
                 | Op::ExpFloat
                 | Op::Atan2Float
+                | Op::LogFloat
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -4151,6 +4190,13 @@ mod cranelift_jit_impl {
                     #[cfg(feature = "jit-disk-cache")]
                     if let Some(fid) = math_ids.awk_div_trap {
                         v.push((fid, disk_cache::H_AWK_DIV_TRAP));
+                    }
+                    // `LogFloat`'s natural-log libcall is a built-in helper with a
+                    // stable id, carried through `ext_helpers` (not one of the
+                    // fixed-array transcendentals) so log chunks persist natively.
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.log {
+                        v.push((fid, disk_cache::H_LOG_F64));
                     }
                     v
                 },
@@ -6012,6 +6058,7 @@ impl JitCompiler {
                 | Op::CosFloat
                 | Op::ExpFloat
                 | Op::Atan2Float
+                | Op::LogFloat
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec

@@ -850,6 +850,89 @@ fn disk_cache_sin_float_block_persists() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `LogFloat` — the op a front-end's always-float natural `log` lowers to (e.g.
+/// strykelang `log($x)`) — block-JIT-compiles AND persists a `blk` native blob
+/// to the on-disk cache. It calls a NEW `fusevm_jit_log_f64` host helper carried
+/// through the chunk's `ext_helpers` (like the div/mod trap), exercising that
+/// path's relocation round-trip: the reloaded blob must re-resolve the helper.
+#[test]
+fn disk_cache_log_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("logfloat");
+
+    // `log($x)` with x = slot 0: GetSlot(0); LogFloat. log(1.0) == 0.0 exactly.
+    let chunk = build(&[(Op::GetSlot(0), 1), (Op::LogFloat, 1)]);
+
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig {
+        block_threshold: 1,
+        ..TraceJitConfig::defaults()
+    });
+
+    let mut slots = vec![1i64];
+    assert_eq!(
+        jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]),
+        None,
+        "below threshold"
+    );
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => {
+            assert_eq!(f, 0.0, "log(1.0) must be exactly 0.0");
+        }
+        other => panic!("expected Float(0.0) from LogFloat block, got {other:?}"),
+    }
+
+    jit.set_jit_cache_dir(None);
+
+    let blk: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.contains(".blk.") && n.ends_with(".fjit"))
+        })
+        .collect();
+    assert_eq!(
+        blk.len(),
+        1,
+        "expected one persisted blk.fjit for the LogFloat chunk, found {:?}",
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+
+    // Reload from disk on a fresh thread: the `log` host helper must be
+    // re-resolved from its persisted id so the blob reproduces log(8.0).
+    let dir2 = dir.clone();
+    let chunk2 = chunk.clone();
+    let reloaded = std::thread::spawn(move || {
+        let jit = JitCompiler::new();
+        jit.set_jit_cache_dir(Some(dir2));
+        jit.set_config(TraceJitConfig {
+            block_threshold: 0,
+            ..TraceJitConfig::defaults()
+        });
+        let mut slots = vec![8i64];
+        jit.try_run_block_eager_typed_kinded(&chunk2, &mut slots, &[])
+    })
+    .join()
+    .unwrap();
+    match reloaded {
+        Some(fusevm::BlockNum::Float(f)) => {
+            assert_eq!(f, 8.0_f64.ln(), "reloaded blob must yield log(8.0)")
+        }
+        other => panic!("expected reloaded Float(log(8.0)), got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `AwkInt` — exactly the shape awkrs's `fusevm_bridge` emits for `x=int(x+c)`
 /// per record — block-JIT-compiles AND persists a `blk` native blob to the
 /// on-disk cache, so the JIT result is reused across process restarts.

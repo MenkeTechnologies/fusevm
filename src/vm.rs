@@ -2350,6 +2350,10 @@ impl VM {
                     let y = self.pop();
                     self.push(Value::Float(y.to_float().atan2(x.to_float())));
                 }
+                Op::LogFloat => {
+                    let a = self.pop();
+                    self.push(Value::Float(a.to_float().ln()));
+                }
                 Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
                 Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
                 Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),

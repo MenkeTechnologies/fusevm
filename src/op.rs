@@ -466,6 +466,12 @@ pub enum Op {
     /// [`Op::SinFloat`]; reuses the `fusevm_jit_atan2_f64` host helper. Intended
     /// for frontends whose `atan2` is always floating-point (e.g. strykelang).
     Atan2Float,
+    /// Always-float natural logarithm: pops `[x]`, pushes `Float(x.ln())`. Lowers
+    /// to the `fusevm_jit_log_f64` host helper in the JIT and `f64::ln` in the
+    /// interpreter. Host-independent (unlike [`Op::AwkLog`], which dispatches
+    /// through the awk host). Intended for frontends whose `log` is the always-
+    /// floating-point natural log (e.g. strykelang).
+    LogFloat,
     /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
     /// `u16` = name-pool index of the array variable.
     AwkArrayGet(u16),
@@ -773,6 +779,7 @@ impl Hash for Op {
             | Op::CosFloat
             | Op::ExpFloat
             | Op::Atan2Float
+            | Op::LogFloat
             | Op::Negate
             | Op::Inc
             | Op::Dec
