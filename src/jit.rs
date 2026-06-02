@@ -789,6 +789,13 @@ mod cranelift_jit_impl {
                     _ => stack.push(Cell::DynF),
                 }
             }
+            Op::AbsFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.abs())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
             // awk int(x): truncate toward zero. An integer operand is already
             // integral (identity); a float is truncated. Matches awkrs
             // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
@@ -1554,6 +1561,10 @@ mod cranelift_jit_impl {
                 let call = bcx.ins().call(math.log?, &[a]);
                 stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
             }
+            Op::AbsFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                stack.push((bcx.ins().fabs(a), JitTy::Float));
+            }
             Op::Negate => {
                 let (a, ty) = stack.pop()?;
                 match ty {
@@ -2138,7 +2149,9 @@ mod cranelift_jit_impl {
         // mid-enum (same discriminant-shift reasoning).
         // 10 -> 11: inserted `Op::LogFloat` mid-enum (same discriminant-shift
         // reasoning).
-        const SCHEMA_VERSION: u32 = 11;
+        // 11 -> 12: inserted `Op::AbsFloat` mid-enum (same discriminant-shift
+        // reasoning).
+        const SCHEMA_VERSION: u32 = 12;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -3264,6 +3277,7 @@ mod cranelift_jit_impl {
                 | Op::ExpFloat
                 | Op::Atan2Float
                 | Op::LogFloat
+                | Op::AbsFloat
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -6059,6 +6073,7 @@ impl JitCompiler {
                 | Op::ExpFloat
                 | Op::Atan2Float
                 | Op::LogFloat
+                | Op::AbsFloat
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec

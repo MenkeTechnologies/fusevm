@@ -472,6 +472,12 @@ pub enum Op {
     /// through the awk host). Intended for frontends whose `log` is the always-
     /// floating-point natural log (e.g. strykelang).
     LogFloat,
+    /// Always-float absolute value: pops `[x]`, pushes `Float(x.abs())`. Lowers
+    /// to the native Cranelift `fabs` in the JIT (no host helper, like
+    /// [`Op::SqrtFloat`]) and `f64::abs` in the interpreter. Intended for
+    /// frontends whose `abs` is floating-point (e.g. strykelang); integral
+    /// results format identically to their integer form.
+    AbsFloat,
     /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
     /// `u16` = name-pool index of the array variable.
     AwkArrayGet(u16),
@@ -780,6 +786,7 @@ impl Hash for Op {
             | Op::ExpFloat
             | Op::Atan2Float
             | Op::LogFloat
+            | Op::AbsFloat
             | Op::Negate
             | Op::Inc
             | Op::Dec

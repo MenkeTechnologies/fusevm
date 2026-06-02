@@ -2354,6 +2354,10 @@ impl VM {
                     let a = self.pop();
                     self.push(Value::Float(a.to_float().ln()));
                 }
+                Op::AbsFloat => {
+                    let a = self.pop();
+                    self.push(Value::Float(a.to_float().abs()));
+                }
                 Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
                 Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
                 Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),
