@@ -590,6 +590,97 @@ fn disk_cache_awk_div_block_persists() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `PowFloat` — the op a front-end's always-float `**` lowers to (e.g.
+/// strykelang `$x ** $y`) — block-JIT-compiles AND persists a `blk` native blob
+/// to the on-disk cache. Unlike `Op::Pow` (whose JIT keeps an integer result
+/// for two static-`Int` operands), `PowFloat` coerces both operands to f64 in
+/// every tier, so the JIT result equals the interpreter's exact float
+/// (`2 ** 10 == 1024.0`) and the chunk reuses the already-registered `pow_f64`
+/// host helper — no schema bump or new host helper needed.
+#[test]
+fn disk_cache_pow_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("powfloat");
+
+    // `$x ** $y` with x = slot 0, y = slot 1: GetSlot(0); GetSlot(1); PowFloat.
+    // Always-float power: 2 ** 10 == 1024.0 (Float, not integer 1024).
+    let chunk = build(&[
+        (Op::GetSlot(0), 1),
+        (Op::GetSlot(1), 1),
+        (Op::PowFloat, 1),
+    ]);
+
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig {
+        block_threshold: 1,
+        ..TraceJitConfig::defaults()
+    });
+
+    let mut slots = vec![2i64, 10i64];
+    assert_eq!(
+        jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]),
+        None,
+        "below threshold"
+    );
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => {
+            assert_eq!(f, 1024.0, "2.0 ** 10.0 must be exactly 1024.0");
+        }
+        other => panic!("expected Float(1024.0) from PowFloat block, got {other:?}"),
+    }
+
+    jit.set_jit_cache_dir(None);
+
+    let blk: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map_or(false, |n| n.contains(".blk.") && n.ends_with(".fjit"))
+        })
+        .collect();
+    assert_eq!(
+        blk.len(),
+        1,
+        "expected one persisted blk.fjit for the PowFloat chunk, found {:?}",
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+
+    // Reload from disk on a fresh thread: the loader must patch the pow_f64
+    // host-helper relocation and reproduce the exact float, proving PowFloat
+    // chunks round-trip through the native disk cache.
+    let dir2 = dir.clone();
+    let chunk2 = chunk.clone();
+    let reloaded = std::thread::spawn(move || {
+        let jit = JitCompiler::new();
+        jit.set_jit_cache_dir(Some(dir2));
+        jit.set_config(TraceJitConfig {
+            block_threshold: 0,
+            ..TraceJitConfig::defaults()
+        });
+        let mut slots = vec![2i64, 10i64];
+        jit.try_run_block_eager_typed_kinded(&chunk2, &mut slots, &[])
+    })
+    .join()
+    .unwrap();
+    match reloaded {
+        Some(fusevm::BlockNum::Float(f)) => {
+            assert_eq!(f, 1024.0, "reloaded blob must yield 1024.0")
+        }
+        other => panic!("expected reloaded Float(1024.0), got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `AwkInt` — exactly the shape awkrs's `fusevm_bridge` emits for `x=int(x+c)`
 /// per record — block-JIT-compiles AND persists a `blk` native blob to the
 /// on-disk cache, so the JIT result is reused across process restarts.
