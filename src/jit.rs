@@ -2031,7 +2031,10 @@ mod cranelift_jit_impl {
         pub(crate) const KIND_TRACE: u8 = 2;
 
         const MAGIC: &[u8; 8] = b"FJITNAT2";
-        const SCHEMA_VERSION: u32 = 7;
+        // 7 -> 8: inserted `Op::PowFloat` mid-enum, shifting the serde/Hash
+        // discriminants of all following ops; bumped to invalidate any prior
+        // op_hash-keyed blobs that would otherwise collide.
+        const SCHEMA_VERSION: u32 = 8;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
