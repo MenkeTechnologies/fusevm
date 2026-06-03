@@ -911,6 +911,11 @@ impl VM {
                             | Op::AwkMod
                             | Op::AwkDivJit
                             | Op::AwkModJit
+                            | Op::AwkSqrtJit
+                            | Op::AwkLogJit
+                            | Op::AwkLshiftJit
+                            | Op::AwkRshiftJit
+                            | Op::AwkComplJit
                             | Op::AwkAnd(_)
                             | Op::AwkOr(_)
                             | Op::AwkXor(_)
@@ -2318,6 +2323,69 @@ impl VM {
                         return VMResult::Error("division by zero attempted in `%'".to_string());
                     }
                     self.push(Value::Float(a.to_float() % divisor));
+                }
+                // awk sqrt(x) — interpreter path. On negative input, emit the
+                // generic "awk: warning: sqrt: received negative argument <x>"
+                // warning to stderr (the JIT-trapped path uses the same generic
+                // format via the warn libcall, so the two tiers agree).
+                Op::AwkSqrtJit => {
+                    let a = self.pop().to_float();
+                    if a < 0.0 {
+                        eprintln!("awk: warning: sqrt: received negative argument {a}");
+                        self.push(Value::Float(f64::NAN));
+                    } else {
+                        self.push(Value::Float(a.sqrt()));
+                    }
+                }
+                // awk log(x) — interpreter path. Negative emits the generic warn
+                // and pushes NaN; zero returns -inf naturally (no lint warn in
+                // this tier — host frontends that want LINT=1 behavior must use
+                // the existing `Op::AwkLog` host-dispatched variant).
+                Op::AwkLogJit => {
+                    let a = self.pop().to_float();
+                    if a < 0.0 {
+                        eprintln!("awk: warning: log: received negative argument {a}");
+                        self.push(Value::Float(f64::NAN));
+                    } else {
+                        self.push(Value::Float(a.ln()));
+                    }
+                }
+                // awk lshift(a, n) — fatal on negative operands. Stack [a, n]:
+                // pop n then a (matches the awk evaluation order pushed by
+                // frontends).
+                Op::AwkLshiftJit => {
+                    let n = self.pop().to_float();
+                    let a = self.pop().to_float();
+                    if a < 0.0 || n < 0.0 {
+                        return VMResult::Error(
+                            "lshift: negative values are not allowed".to_string(),
+                        );
+                    }
+                    let shifted = (a as i64).wrapping_shl((n as u32) & 0x3f);
+                    self.push(Value::Float(shifted as f64));
+                }
+                // awk rshift(a, n) — same guard as lshift but logical right.
+                Op::AwkRshiftJit => {
+                    let n = self.pop().to_float();
+                    let a = self.pop().to_float();
+                    if a < 0.0 || n < 0.0 {
+                        return VMResult::Error(
+                            "rshift: negative values are not allowed".to_string(),
+                        );
+                    }
+                    let shifted = ((a as i64) as u64).wrapping_shr((n as u32) & 0x3f);
+                    self.push(Value::Float(shifted as f64));
+                }
+                // awk compl(a) — fatal on negative. `!a` in u64 space then back
+                // to f64 (the high bits saturate the f64 mantissa, matching
+                // awkrs's `num_to_u64` semantics).
+                Op::AwkComplJit => {
+                    let a = self.pop().to_float();
+                    if a < 0.0 {
+                        return VMResult::Error("compl: negative value is not allowed".to_string());
+                    }
+                    let v = !(a as i64);
+                    self.push(Value::Float(v as f64));
                 }
                 Op::PowFloat => {
                     let b = self.pop();
@@ -4649,5 +4717,119 @@ mod tests {
         assert!(is_awk_op(AWK_FIELD_GET));
         assert!(is_awk_op(AWK_ARRAY_LEN));
         assert!(!is_awk_op(AWK_OP_END));
+    }
+
+    // ── Block-JIT-eligible builtins with awk negative-arg semantics ──
+    // Interpreter-tier coverage for AwkSqrtJit / AwkLogJit (warn-then-NaN) and
+    // AwkLshiftJit / AwkRshiftJit / AwkComplJit (fatal trap). Block-JIT codegen
+    // is a separate follow-up — these stay block-JIT-ineligible for now and
+    // run on the fusevm interpreter through the chunk dispatch.
+
+    fn build_unary(op: Op, x: f64) -> crate::Chunk {
+        let mut b = crate::ChunkBuilder::new();
+        b.emit(Op::PushFrame, 1);
+        b.emit(Op::LoadFloat(x), 1);
+        b.emit(op, 1);
+        b.build()
+    }
+
+    fn build_binary(op: Op, a: f64, n: f64) -> crate::Chunk {
+        let mut b = crate::ChunkBuilder::new();
+        b.emit(Op::PushFrame, 1);
+        b.emit(Op::LoadFloat(a), 1);
+        b.emit(Op::LoadFloat(n), 1);
+        b.emit(op, 1);
+        b.build()
+    }
+
+    #[test]
+    fn awk_sqrt_jit_negative_warns_returns_nan() {
+        let chunk = build_unary(Op::AwkSqrtJit, -4.0);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert!(v.to_float().is_nan(), "expected NaN, got {v:?}"),
+            other => panic!("expected Ok(NaN), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awk_sqrt_jit_positive_returns_sqrt() {
+        let chunk = build_unary(Op::AwkSqrtJit, 16.0);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_float(), 4.0),
+            other => panic!("expected Ok(4.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awk_log_jit_positive_returns_ln() {
+        let chunk = build_unary(Op::AwkLogJit, std::f64::consts::E);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert!((v.to_float() - 1.0).abs() < 1e-10),
+            other => panic!("expected Ok(~1.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awk_log_jit_negative_warns_returns_nan() {
+        let chunk = build_unary(Op::AwkLogJit, -1.0);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert!(v.to_float().is_nan()),
+            other => panic!("expected Ok(NaN), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awk_lshift_jit_computes_left_shift() {
+        let chunk = build_binary(Op::AwkLshiftJit, 1.0, 4.0);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_float(), 16.0, "1 << 4 == 16"),
+            other => panic!("expected Ok(16.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awk_lshift_jit_negative_amount_errors() {
+        let chunk = build_binary(Op::AwkLshiftJit, 1.0, -1.0);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Error(msg) => assert!(msg.contains("lshift"), "msg = {msg:?}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awk_rshift_jit_computes_right_shift() {
+        let chunk = build_binary(Op::AwkRshiftJit, 16.0, 2.0);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_float(), 4.0, "16 >> 2 == 4"),
+            other => panic!("expected Ok(4.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awk_compl_jit_negates_bits() {
+        // compl(15) ≈ !15 in i64 ≈ -16 ≈ as f64 ≈ -16.0
+        let chunk = build_unary(Op::AwkComplJit, 15.0);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Ok(v) => assert_eq!(v.to_float(), -16.0, "compl(15) == -16"),
+            other => panic!("expected Ok(-16.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awk_compl_jit_negative_errors() {
+        let chunk = build_unary(Op::AwkComplJit, -1.0);
+        let mut vm = VM::new(chunk);
+        match vm.run() {
+            VMResult::Error(msg) => assert!(msg.contains("compl"), "msg = {msg:?}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }

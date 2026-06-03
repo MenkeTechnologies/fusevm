@@ -430,6 +430,34 @@ pub enum Op {
     /// with the same guarded early-exit trap as [`Op::AwkDivJit`].
     /// Host-independent.
     AwkModJit,
+    /// Block-JIT-eligible variant of `sqrt(x)` — `f64::sqrt` on the non-negative
+    /// path, libcall warning + `+NaN` on the negative path (matching the awk
+    /// "received negative argument" warning). Uses Cranelift block params to
+    /// phi-merge the two paths into a single SSA result, so the chunk stays
+    /// disk-cacheable through the warn libcall (registered as a named host
+    /// helper). Host-independent.
+    AwkSqrtJit,
+    /// Block-JIT-eligible variant of `log(x)` — `f64::ln` on the non-negative
+    /// path (which yields `-inf` for `0.0` naturally), libcall warning + `+NaN`
+    /// on the negative path. Same phi-merge pattern as [`Op::AwkSqrtJit`].
+    /// The host-default `lint_warn` on zero (gawk LINT=1) is omitted here.
+    /// Host-independent.
+    AwkLogJit,
+    /// Block-JIT-eligible variant of `lshift(a, n)` — pops `[a, n]`. Raises
+    /// the awk fatal "negative values are not allowed" when either operand is
+    /// negative (guarded early-exit via the trap channel, code 3). The
+    /// non-negative path computes `(a as i64) << (n as i64 & 0x3f)` and pushes
+    /// the result as a float, matching the awkrs interpreter behavior.
+    /// Host-independent.
+    AwkLshiftJit,
+    /// Block-JIT-eligible variant of `rshift(a, n)` — same guard as
+    /// [`Op::AwkLshiftJit`] (trap code 4), uses unsigned-right-shift on the
+    /// non-negative path. Host-independent.
+    AwkRshiftJit,
+    /// Block-JIT-eligible variant of `compl(a)` — pops `[a]`. Raises fatal
+    /// "negative value is not allowed" when `a < 0` (trap code 5). Non-negative
+    /// path computes `!(a as i64)` and pushes as float. Host-independent.
+    AwkComplJit,
     /// Always-float exponentiation: pops `[base, exp]`, pushes
     /// `Float(base.powf(exp))`. Unlike [`Op::Pow`] (whose JIT lowering keeps an
     /// integer result for two static-`Int` operands), this op coerces BOTH
@@ -866,6 +894,11 @@ impl Hash for Op {
             | Op::AwkMod
             | Op::AwkDivJit
             | Op::AwkModJit
+            | Op::AwkSqrtJit
+            | Op::AwkLogJit
+            | Op::AwkLshiftJit
+            | Op::AwkRshiftJit
+            | Op::AwkComplJit
             | Op::AwkCompl
             | Op::AwkLshift
             | Op::AwkRshift
