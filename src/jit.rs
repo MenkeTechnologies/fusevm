@@ -877,6 +877,10 @@ mod cranelift_jit_impl {
             Op::TanhFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.tanh())), _ => stack.push(Cell::DynF) } }
             Op::Log2Float => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.log2())), _ => stack.push(Cell::DynF) } }
             Op::Log10Float => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.log10())), _ => stack.push(Cell::DynF) } }
+            Op::AbsInt => { let a = stack.pop()?; match a { Cell::Const(n) => stack.push(Cell::Const(n.wrapping_abs())), _ => stack.push(Cell::Dyn) } }
+            Op::GcdInt => { let (_, _) = pop2_strict(stack)?; stack.push(Cell::Dyn); }
+            Op::LcmInt => { let (_, _) = pop2_strict(stack)?; stack.push(Cell::Dyn); }
+            Op::TimeInt => { stack.push(Cell::Dyn); }
             // awk int(x): truncate toward zero. An integer operand is already
             // integral (identity); a float is truncated. Matches awkrs
             // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
@@ -1167,6 +1171,35 @@ mod cranelift_jit_impl {
     #[no_mangle] pub extern "C" fn fusevm_jit_log2_f64(x: f64) -> f64 { let r = x.log2(); if r.is_nan() { f64::NAN } else { r } }
     #[no_mangle] pub extern "C" fn fusevm_jit_log10_f64(x: f64) -> f64 { let r = x.log10(); if r.is_nan() { f64::NAN } else { r } }
 
+    /// GCD of two i64s (reduced by absolute value). gcd(0, 0) = 0.
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_gcd_i64(a: i64, b: i64) -> i64 {
+        let mut x = a.unsigned_abs();
+        let mut y = b.unsigned_abs();
+        while y != 0 { let t = x % y; x = y; y = t; }
+        x.min(i64::MAX as u64) as i64
+    }
+
+    /// LCM of two i64s — saturating at i64::MAX. lcm(_, 0) = 0.
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_lcm_i64(a: i64, b: i64) -> i64 {
+        let x = a.unsigned_abs();
+        let y = b.unsigned_abs();
+        if x == 0 || y == 0 { return 0; }
+        let g = fusevm_jit_gcd_i64(a, b).unsigned_abs();
+        let prod = (x / g).saturating_mul(y);
+        prod.min(i64::MAX as u64) as i64
+    }
+
+    /// Unix epoch seconds. 0 if clock pre-dates epoch.
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_time_i64() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
     /// FuncIds for the awk transcendental libcalls, declared lazily on a module
     /// only when the corresponding op appears in the chunk (so chunks without
     /// them compile to byte-identical native code as before).
@@ -1186,6 +1219,9 @@ mod cranelift_jit_impl {
         tanh: Option<cranelift_module::FuncId>,
         log2: Option<cranelift_module::FuncId>,
         log10: Option<cranelift_module::FuncId>,
+        gcd_i64: Option<cranelift_module::FuncId>,
+        lcm_i64: Option<cranelift_module::FuncId>,
+        time_i64: Option<cranelift_module::FuncId>,
         awk_div_trap: Option<cranelift_module::FuncId>,
         awk_neg_warn: Option<cranelift_module::FuncId>,
         awk_get_field_num: Option<cranelift_module::FuncId>,
@@ -1209,6 +1245,9 @@ mod cranelift_jit_impl {
         tanh: Option<cranelift_codegen::ir::FuncRef>,
         log2: Option<cranelift_codegen::ir::FuncRef>,
         log10: Option<cranelift_codegen::ir::FuncRef>,
+        gcd_i64: Option<cranelift_codegen::ir::FuncRef>,
+        lcm_i64: Option<cranelift_codegen::ir::FuncRef>,
+        time_i64: Option<cranelift_codegen::ir::FuncRef>,
         awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
         awk_neg_warn: Option<cranelift_codegen::ir::FuncRef>,
         awk_get_field_num: Option<cranelift_codegen::ir::FuncRef>,
@@ -1249,6 +1288,20 @@ mod cranelift_jit_impl {
         let mut ps = module.make_signature();
         ps.params.push(AbiParam::new(types::I64));
         ps.returns.push(AbiParam::new(types::F64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_binary_i64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::I64));
+        ps.params.push(AbiParam::new(types::I64));
+        ps.returns.push(AbiParam::new(types::I64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_nullary_i64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.returns.push(AbiParam::new(types::I64));
         module.declare_function(name, Linkage::Import, &ps).ok()
     }
 
@@ -1331,6 +1384,9 @@ mod cranelift_jit_impl {
                 tanh: self.tanh.map(|id| module.declare_func_in_func(id, func)),
                 log2: self.log2.map(|id| module.declare_func_in_func(id, func)),
                 log10: self.log10.map(|id| module.declare_func_in_func(id, func)),
+                gcd_i64: self.gcd_i64.map(|id| module.declare_func_in_func(id, func)),
+                lcm_i64: self.lcm_i64.map(|id| module.declare_func_in_func(id, func)),
+                time_i64: self.time_i64.map(|id| module.declare_func_in_func(id, func)),
                 awk_div_trap: self
                     .awk_div_trap
                     .map(|id| module.declare_func_in_func(id, func)),
@@ -1365,6 +1421,9 @@ mod cranelift_jit_impl {
         builder.symbol("fusevm_jit_tanh_f64", fusevm_jit_tanh_f64 as *const u8);
         builder.symbol("fusevm_jit_log2_f64", fusevm_jit_log2_f64 as *const u8);
         builder.symbol("fusevm_jit_log10_f64", fusevm_jit_log10_f64 as *const u8);
+        builder.symbol("fusevm_jit_gcd_i64", fusevm_jit_gcd_i64 as *const u8);
+        builder.symbol("fusevm_jit_lcm_i64", fusevm_jit_lcm_i64 as *const u8);
+        builder.symbol("fusevm_jit_time_i64", fusevm_jit_time_i64 as *const u8);
         builder.symbol(
             "fusevm_jit_awk_div_trap",
             super::fusevm_jit_awk_div_trap as *const u8,
@@ -1792,6 +1851,32 @@ mod cranelift_jit_impl {
             Op::TanhFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.tanh?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
             Op::Log2Float => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.log2?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
             Op::Log10Float => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.log10?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::AbsInt => {
+                let (a, ty) = stack.pop()?;
+                match ty {
+                    JitTy::Int => stack.push((bcx.ins().iabs(a), JitTy::Int)),
+                    JitTy::Float => {
+                        let i = bcx.ins().fcvt_to_sint_sat(types::I64, a);
+                        stack.push((bcx.ins().iabs(i), JitTy::Int));
+                    }
+                }
+            }
+            Op::GcdInt => {
+                let (b, _) = stack.pop()?;
+                let (a, _) = stack.pop()?;
+                let c = bcx.ins().call(math.gcd_i64?, &[a, b]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Int));
+            }
+            Op::LcmInt => {
+                let (b, _) = stack.pop()?;
+                let (a, _) = stack.pop()?;
+                let c = bcx.ins().call(math.lcm_i64?, &[a, b]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Int));
+            }
+            Op::TimeInt => {
+                let c = bcx.ins().call(math.time_i64?, &[]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Int));
+            }
             Op::Negate => {
                 let (a, ty) = stack.pop()?;
                 match ty {
@@ -2378,6 +2463,9 @@ mod cranelift_jit_impl {
         pub(crate) const H_TANH_F64: u32 = 16;
         pub(crate) const H_LOG2_F64: u32 = 17;
         pub(crate) const H_LOG10_F64: u32 = 18;
+        pub(crate) const H_GCD_I64: u32 = 19;
+        pub(crate) const H_LCM_I64: u32 = 20;
+        pub(crate) const H_TIME_I64: u32 = 21;
 
         // Native-blob tier discriminator. Persisted in the file and verified on
         // load so a block blob can never be transmuted with a linear signature.
@@ -2400,7 +2488,8 @@ mod cranelift_jit_impl {
         // 12 -> 13: inserted `Op::TruncInt` mid-enum (same discriminant-shift
         // reasoning).
         // 13 -> 14: inserted 13 new float ops as a block (same reasoning).
-        const SCHEMA_VERSION: u32 = 14;
+        // 14 -> 15: inserted Op::{AbsInt,GcdInt,LcmInt,TimeInt} as a block.
+        const SCHEMA_VERSION: u32 = 15;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -2430,6 +2519,9 @@ mod cranelift_jit_impl {
                 H_TANH_F64 => super::fusevm_jit_tanh_f64 as *const u8 as usize,
                 H_LOG2_F64 => super::fusevm_jit_log2_f64 as *const u8 as usize,
                 H_LOG10_F64 => super::fusevm_jit_log10_f64 as *const u8 as usize,
+                H_GCD_I64 => super::fusevm_jit_gcd_i64 as *const u8 as usize,
+                H_LCM_I64 => super::fusevm_jit_lcm_i64 as *const u8 as usize,
+                H_TIME_I64 => super::fusevm_jit_time_i64 as *const u8 as usize,
                 H_AWK_DIV_TRAP => super::super::fusevm_jit_awk_div_trap as *const u8 as usize,
                 _ => return None,
             })
@@ -2822,6 +2914,9 @@ mod cranelift_jit_impl {
                     tanh: Some(import(&mut bcx, H_TANH_F64, &[types::F64], types::F64)),
                     log2: Some(import(&mut bcx, H_LOG2_F64, &[types::F64], types::F64)),
                     log10: Some(import(&mut bcx, H_LOG10_F64, &[types::F64], types::F64)),
+                    gcd_i64: Some(import(&mut bcx, H_GCD_I64, &[types::I64, types::I64], types::I64)),
+                    lcm_i64: Some(import(&mut bcx, H_LCM_I64, &[types::I64, types::I64], types::I64)),
+                    time_i64: Some(import(&mut bcx, H_TIME_I64, &[], types::I64)),
                     // The linear tier never lowers AwkDivJit/AwkModJit (those are
                     // block-only ops handled in `build_block_function`), so the
                     // linear native path imports no trap ref. The block native
@@ -3586,6 +3681,10 @@ mod cranelift_jit_impl {
                 | Op::TanhFloat
                 | Op::Log2Float
                 | Op::Log10Float
+                | Op::AbsInt
+                | Op::GcdInt
+                | Op::LcmInt
+                | Op::TimeInt
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -4682,6 +4781,12 @@ mod cranelift_jit_impl {
                     if let Some(fid) = math_ids.log2 { v.push((fid, disk_cache::H_LOG2_F64)); }
                     #[cfg(feature = "jit-disk-cache")]
                     if let Some(fid) = math_ids.log10 { v.push((fid, disk_cache::H_LOG10_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.gcd_i64 { v.push((fid, disk_cache::H_GCD_I64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.lcm_i64 { v.push((fid, disk_cache::H_LCM_I64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.time_i64 { v.push((fid, disk_cache::H_TIME_I64)); }
                     v
                 },
             },
@@ -6558,6 +6663,10 @@ impl JitCompiler {
                 | Op::TanhFloat
                 | Op::Log2Float
                 | Op::Log10Float
+                | Op::AbsInt
+                | Op::GcdInt
+                | Op::LcmInt
+                | Op::TimeInt
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
