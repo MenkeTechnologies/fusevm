@@ -1282,6 +1282,9 @@ mod cranelift_jit_impl {
                     Op::TanhFloat if m.tanh.is_none() => { m.tanh = declare_unary_f64(module, "fusevm_jit_tanh_f64"); }
                     Op::Log2Float if m.log2.is_none() => { m.log2 = declare_unary_f64(module, "fusevm_jit_log2_f64"); }
                     Op::Log10Float if m.log10.is_none() => { m.log10 = declare_unary_f64(module, "fusevm_jit_log10_f64"); }
+                    Op::GcdInt if m.gcd_i64.is_none() => { m.gcd_i64 = declare_binary_i64(module, "fusevm_jit_gcd_i64"); }
+                    Op::LcmInt if m.lcm_i64.is_none() => { m.lcm_i64 = declare_binary_i64(module, "fusevm_jit_lcm_i64"); }
+                    Op::TimeInt if m.time_i64.is_none() => { m.time_i64 = declare_nullary_i64(module, "fusevm_jit_time_i64"); }
                     Op::AwkDivJit | Op::AwkModJit if m.awk_div_trap.is_none() => {
                         m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
                     }
