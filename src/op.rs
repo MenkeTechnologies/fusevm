@@ -547,6 +547,18 @@ pub enum Op {
     Log2Float,
     /// Base-10 logarithm. Host helper `fusevm_jit_log10_f64`.
     Log10Float,
+    /// Integer absolute value (`abs(i64)`). Native Cranelift `iabs`.
+    AbsInt,
+    /// Greatest common divisor of two non-negative i64s (`gcd(|a|, |b|)`).
+    /// Host helper `fusevm_jit_gcd_i64`; returns 0 if both inputs are 0.
+    GcdInt,
+    /// Least common multiple of two non-negative i64s (`lcm(|a|, |b|)`).
+    /// Host helper `fusevm_jit_lcm_i64`; returns 0 if either input is 0; saturates
+    /// at i64::MAX on overflow.
+    LcmInt,
+    /// Unix epoch seconds as i64 (`time()`). Host helper `fusevm_jit_time_i64`.
+    /// Pure-ish — depends on system clock; not const-foldable.
+    TimeInt,
     /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
     /// `u16` = name-pool index of the array variable.
     AwkArrayGet(u16),
@@ -870,6 +882,10 @@ impl Hash for Op {
             | Op::TanhFloat
             | Op::Log2Float
             | Op::Log10Float
+            | Op::AbsInt
+            | Op::GcdInt
+            | Op::LcmInt
+            | Op::TimeInt
             | Op::Negate
             | Op::Inc
             | Op::Dec

@@ -2461,6 +2461,31 @@ impl VM {
                 Op::TanhFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().tanh())); }
                 Op::Log2Float => { let a = self.pop(); self.push(Value::Float(a.to_float().log2())); }
                 Op::Log10Float => { let a = self.pop(); self.push(Value::Float(a.to_float().log10())); }
+                Op::AbsInt => { let a = self.pop(); self.push(Value::Int(a.to_int().wrapping_abs())); }
+                Op::GcdInt => {
+                    let b = self.pop().to_int().unsigned_abs();
+                    let a = self.pop().to_int().unsigned_abs();
+                    let mut x = a; let mut y = b;
+                    while y != 0 { let t = x % y; x = y; y = t; }
+                    self.push(Value::Int(x as i64));
+                }
+                Op::LcmInt => {
+                    let b = self.pop().to_int().unsigned_abs();
+                    let a = self.pop().to_int().unsigned_abs();
+                    if a == 0 || b == 0 { self.push(Value::Int(0)); } else {
+                        let mut x = a; let mut y = b;
+                        while y != 0 { let t = x % y; x = y; y = t; }
+                        let prod = (a / x).saturating_mul(b);
+                        self.push(Value::Int(prod.min(i64::MAX as u64) as i64));
+                    }
+                }
+                Op::TimeInt => {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    self.push(Value::Int(secs));
+                }
                 Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
                 Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
                 Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),
