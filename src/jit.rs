@@ -864,6 +864,19 @@ mod cranelift_jit_impl {
                     _ => Cell::Dyn,
                 });
             }
+            Op::CeilFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.ceil())), _ => stack.push(Cell::DynF) } }
+            Op::FloorFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.floor())), _ => stack.push(Cell::DynF) } }
+            Op::TruncFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.trunc())), _ => stack.push(Cell::DynF) } }
+            Op::RoundFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.round_ties_even())), _ => stack.push(Cell::DynF) } }
+            Op::TanFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.tan())), _ => stack.push(Cell::DynF) } }
+            Op::AsinFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.asin())), _ => stack.push(Cell::DynF) } }
+            Op::AcosFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.acos())), _ => stack.push(Cell::DynF) } }
+            Op::AtanFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.atan())), _ => stack.push(Cell::DynF) } }
+            Op::SinhFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.sinh())), _ => stack.push(Cell::DynF) } }
+            Op::CoshFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.cosh())), _ => stack.push(Cell::DynF) } }
+            Op::TanhFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.tanh())), _ => stack.push(Cell::DynF) } }
+            Op::Log2Float => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.log2())), _ => stack.push(Cell::DynF) } }
+            Op::Log10Float => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.log10())), _ => stack.push(Cell::DynF) } }
             // awk int(x): truncate toward zero. An integer operand is already
             // integral (identity); a float is truncated. Matches awkrs
             // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
@@ -1144,6 +1157,16 @@ mod cranelift_jit_impl {
         }
     }
 
+    #[no_mangle] pub extern "C" fn fusevm_jit_tan_f64(x: f64) -> f64 { let r = x.tan(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle] pub extern "C" fn fusevm_jit_asin_f64(x: f64) -> f64 { let r = x.asin(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle] pub extern "C" fn fusevm_jit_acos_f64(x: f64) -> f64 { let r = x.acos(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle] pub extern "C" fn fusevm_jit_atan_f64(x: f64) -> f64 { let r = x.atan(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle] pub extern "C" fn fusevm_jit_sinh_f64(x: f64) -> f64 { let r = x.sinh(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle] pub extern "C" fn fusevm_jit_cosh_f64(x: f64) -> f64 { let r = x.cosh(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle] pub extern "C" fn fusevm_jit_tanh_f64(x: f64) -> f64 { let r = x.tanh(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle] pub extern "C" fn fusevm_jit_log2_f64(x: f64) -> f64 { let r = x.log2(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle] pub extern "C" fn fusevm_jit_log10_f64(x: f64) -> f64 { let r = x.log10(); if r.is_nan() { f64::NAN } else { r } }
+
     /// FuncIds for the awk transcendental libcalls, declared lazily on a module
     /// only when the corresponding op appears in the chunk (so chunks without
     /// them compile to byte-identical native code as before).
@@ -1154,6 +1177,15 @@ mod cranelift_jit_impl {
         exp: Option<cranelift_module::FuncId>,
         atan2: Option<cranelift_module::FuncId>,
         log: Option<cranelift_module::FuncId>,
+        tan: Option<cranelift_module::FuncId>,
+        asin: Option<cranelift_module::FuncId>,
+        acos: Option<cranelift_module::FuncId>,
+        atan: Option<cranelift_module::FuncId>,
+        sinh: Option<cranelift_module::FuncId>,
+        cosh: Option<cranelift_module::FuncId>,
+        tanh: Option<cranelift_module::FuncId>,
+        log2: Option<cranelift_module::FuncId>,
+        log10: Option<cranelift_module::FuncId>,
         awk_div_trap: Option<cranelift_module::FuncId>,
         awk_neg_warn: Option<cranelift_module::FuncId>,
         awk_get_field_num: Option<cranelift_module::FuncId>,
@@ -1168,6 +1200,15 @@ mod cranelift_jit_impl {
         exp: Option<cranelift_codegen::ir::FuncRef>,
         atan2: Option<cranelift_codegen::ir::FuncRef>,
         log: Option<cranelift_codegen::ir::FuncRef>,
+        tan: Option<cranelift_codegen::ir::FuncRef>,
+        asin: Option<cranelift_codegen::ir::FuncRef>,
+        acos: Option<cranelift_codegen::ir::FuncRef>,
+        atan: Option<cranelift_codegen::ir::FuncRef>,
+        sinh: Option<cranelift_codegen::ir::FuncRef>,
+        cosh: Option<cranelift_codegen::ir::FuncRef>,
+        tanh: Option<cranelift_codegen::ir::FuncRef>,
+        log2: Option<cranelift_codegen::ir::FuncRef>,
+        log10: Option<cranelift_codegen::ir::FuncRef>,
         awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
         awk_neg_warn: Option<cranelift_codegen::ir::FuncRef>,
         awk_get_field_num: Option<cranelift_codegen::ir::FuncRef>,
@@ -1232,6 +1273,15 @@ mod cranelift_jit_impl {
                     Op::LogFloat if m.log.is_none() => {
                         m.log = declare_unary_f64(module, "fusevm_jit_log_f64");
                     }
+                    Op::TanFloat if m.tan.is_none() => { m.tan = declare_unary_f64(module, "fusevm_jit_tan_f64"); }
+                    Op::AsinFloat if m.asin.is_none() => { m.asin = declare_unary_f64(module, "fusevm_jit_asin_f64"); }
+                    Op::AcosFloat if m.acos.is_none() => { m.acos = declare_unary_f64(module, "fusevm_jit_acos_f64"); }
+                    Op::AtanFloat if m.atan.is_none() => { m.atan = declare_unary_f64(module, "fusevm_jit_atan_f64"); }
+                    Op::SinhFloat if m.sinh.is_none() => { m.sinh = declare_unary_f64(module, "fusevm_jit_sinh_f64"); }
+                    Op::CoshFloat if m.cosh.is_none() => { m.cosh = declare_unary_f64(module, "fusevm_jit_cosh_f64"); }
+                    Op::TanhFloat if m.tanh.is_none() => { m.tanh = declare_unary_f64(module, "fusevm_jit_tanh_f64"); }
+                    Op::Log2Float if m.log2.is_none() => { m.log2 = declare_unary_f64(module, "fusevm_jit_log2_f64"); }
+                    Op::Log10Float if m.log10.is_none() => { m.log10 = declare_unary_f64(module, "fusevm_jit_log10_f64"); }
                     Op::AwkDivJit | Op::AwkModJit if m.awk_div_trap.is_none() => {
                         m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
                     }
@@ -1269,6 +1319,15 @@ mod cranelift_jit_impl {
                 exp: self.exp.map(|id| module.declare_func_in_func(id, func)),
                 atan2: self.atan2.map(|id| module.declare_func_in_func(id, func)),
                 log: self.log.map(|id| module.declare_func_in_func(id, func)),
+                tan: self.tan.map(|id| module.declare_func_in_func(id, func)),
+                asin: self.asin.map(|id| module.declare_func_in_func(id, func)),
+                acos: self.acos.map(|id| module.declare_func_in_func(id, func)),
+                atan: self.atan.map(|id| module.declare_func_in_func(id, func)),
+                sinh: self.sinh.map(|id| module.declare_func_in_func(id, func)),
+                cosh: self.cosh.map(|id| module.declare_func_in_func(id, func)),
+                tanh: self.tanh.map(|id| module.declare_func_in_func(id, func)),
+                log2: self.log2.map(|id| module.declare_func_in_func(id, func)),
+                log10: self.log10.map(|id| module.declare_func_in_func(id, func)),
                 awk_div_trap: self
                     .awk_div_trap
                     .map(|id| module.declare_func_in_func(id, func)),
@@ -1294,6 +1353,15 @@ mod cranelift_jit_impl {
         builder.symbol("fusevm_jit_exp_f64", fusevm_jit_exp_f64 as *const u8);
         builder.symbol("fusevm_jit_atan2_f64", fusevm_jit_atan2_f64 as *const u8);
         builder.symbol("fusevm_jit_log_f64", fusevm_jit_log_f64 as *const u8);
+        builder.symbol("fusevm_jit_tan_f64", fusevm_jit_tan_f64 as *const u8);
+        builder.symbol("fusevm_jit_asin_f64", fusevm_jit_asin_f64 as *const u8);
+        builder.symbol("fusevm_jit_acos_f64", fusevm_jit_acos_f64 as *const u8);
+        builder.symbol("fusevm_jit_atan_f64", fusevm_jit_atan_f64 as *const u8);
+        builder.symbol("fusevm_jit_sinh_f64", fusevm_jit_sinh_f64 as *const u8);
+        builder.symbol("fusevm_jit_cosh_f64", fusevm_jit_cosh_f64 as *const u8);
+        builder.symbol("fusevm_jit_tanh_f64", fusevm_jit_tanh_f64 as *const u8);
+        builder.symbol("fusevm_jit_log2_f64", fusevm_jit_log2_f64 as *const u8);
+        builder.symbol("fusevm_jit_log10_f64", fusevm_jit_log10_f64 as *const u8);
         builder.symbol(
             "fusevm_jit_awk_div_trap",
             super::fusevm_jit_awk_div_trap as *const u8,
@@ -1708,6 +1776,19 @@ mod cranelift_jit_impl {
                     }
                 }
             }
+            Op::CeilFloat => { let a = pop_as_f64(bcx, stack)?; stack.push((bcx.ins().ceil(a), JitTy::Float)); }
+            Op::FloorFloat => { let a = pop_as_f64(bcx, stack)?; stack.push((bcx.ins().floor(a), JitTy::Float)); }
+            Op::TruncFloat => { let a = pop_as_f64(bcx, stack)?; stack.push((bcx.ins().trunc(a), JitTy::Float)); }
+            Op::RoundFloat => { let a = pop_as_f64(bcx, stack)?; stack.push((bcx.ins().nearest(a), JitTy::Float)); }
+            Op::TanFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.tan?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::AsinFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.asin?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::AcosFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.acos?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::AtanFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.atan?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::SinhFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.sinh?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::CoshFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.cosh?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::TanhFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.tanh?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::Log2Float => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.log2?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::Log10Float => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.log10?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
             Op::Negate => {
                 let (a, ty) = stack.pop()?;
                 match ty {
@@ -2285,6 +2366,15 @@ mod cranelift_jit_impl {
         pub(crate) const H_AWK_DIV_TRAP: u32 = 8;
         /// Natural-log libcall for JIT-compiled `Op::LogFloat`.
         pub(crate) const H_LOG_F64: u32 = 9;
+        pub(crate) const H_TAN_F64: u32 = 10;
+        pub(crate) const H_ASIN_F64: u32 = 11;
+        pub(crate) const H_ACOS_F64: u32 = 12;
+        pub(crate) const H_ATAN_F64: u32 = 13;
+        pub(crate) const H_SINH_F64: u32 = 14;
+        pub(crate) const H_COSH_F64: u32 = 15;
+        pub(crate) const H_TANH_F64: u32 = 16;
+        pub(crate) const H_LOG2_F64: u32 = 17;
+        pub(crate) const H_LOG10_F64: u32 = 18;
 
         // Native-blob tier discriminator. Persisted in the file and verified on
         // load so a block blob can never be transmuted with a linear signature.
@@ -2306,7 +2396,8 @@ mod cranelift_jit_impl {
         // reasoning).
         // 12 -> 13: inserted `Op::TruncInt` mid-enum (same discriminant-shift
         // reasoning).
-        const SCHEMA_VERSION: u32 = 13;
+        // 13 -> 14: inserted 13 new float ops as a block (same reasoning).
+        const SCHEMA_VERSION: u32 = 14;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -2327,6 +2418,15 @@ mod cranelift_jit_impl {
                 H_EXP_F64 => super::fusevm_jit_exp_f64 as *const u8 as usize,
                 H_ATAN2_F64 => super::fusevm_jit_atan2_f64 as *const u8 as usize,
                 H_LOG_F64 => super::fusevm_jit_log_f64 as *const u8 as usize,
+                H_TAN_F64 => super::fusevm_jit_tan_f64 as *const u8 as usize,
+                H_ASIN_F64 => super::fusevm_jit_asin_f64 as *const u8 as usize,
+                H_ACOS_F64 => super::fusevm_jit_acos_f64 as *const u8 as usize,
+                H_ATAN_F64 => super::fusevm_jit_atan_f64 as *const u8 as usize,
+                H_SINH_F64 => super::fusevm_jit_sinh_f64 as *const u8 as usize,
+                H_COSH_F64 => super::fusevm_jit_cosh_f64 as *const u8 as usize,
+                H_TANH_F64 => super::fusevm_jit_tanh_f64 as *const u8 as usize,
+                H_LOG2_F64 => super::fusevm_jit_log2_f64 as *const u8 as usize,
+                H_LOG10_F64 => super::fusevm_jit_log10_f64 as *const u8 as usize,
                 H_AWK_DIV_TRAP => super::super::fusevm_jit_awk_div_trap as *const u8 as usize,
                 _ => return None,
             })
@@ -2710,6 +2810,15 @@ mod cranelift_jit_impl {
                         types::F64,
                     )),
                     log: Some(import(&mut bcx, H_LOG_F64, &[types::F64], types::F64)),
+                    tan: Some(import(&mut bcx, H_TAN_F64, &[types::F64], types::F64)),
+                    asin: Some(import(&mut bcx, H_ASIN_F64, &[types::F64], types::F64)),
+                    acos: Some(import(&mut bcx, H_ACOS_F64, &[types::F64], types::F64)),
+                    atan: Some(import(&mut bcx, H_ATAN_F64, &[types::F64], types::F64)),
+                    sinh: Some(import(&mut bcx, H_SINH_F64, &[types::F64], types::F64)),
+                    cosh: Some(import(&mut bcx, H_COSH_F64, &[types::F64], types::F64)),
+                    tanh: Some(import(&mut bcx, H_TANH_F64, &[types::F64], types::F64)),
+                    log2: Some(import(&mut bcx, H_LOG2_F64, &[types::F64], types::F64)),
+                    log10: Some(import(&mut bcx, H_LOG10_F64, &[types::F64], types::F64)),
                     // The linear tier never lowers AwkDivJit/AwkModJit (those are
                     // block-only ops handled in `build_block_function`), so the
                     // linear native path imports no trap ref. The block native
@@ -3461,6 +3570,19 @@ mod cranelift_jit_impl {
                 | Op::LogFloat
                 | Op::AbsFloat
                 | Op::TruncInt
+                | Op::CeilFloat
+                | Op::FloorFloat
+                | Op::TruncFloat
+                | Op::RoundFloat
+                | Op::TanFloat
+                | Op::AsinFloat
+                | Op::AcosFloat
+                | Op::AtanFloat
+                | Op::SinhFloat
+                | Op::CoshFloat
+                | Op::TanhFloat
+                | Op::Log2Float
+                | Op::Log10Float
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
@@ -4539,6 +4661,24 @@ mod cranelift_jit_impl {
                     if let Some(fid) = math_ids.log {
                         v.push((fid, disk_cache::H_LOG_F64));
                     }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.tan { v.push((fid, disk_cache::H_TAN_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.asin { v.push((fid, disk_cache::H_ASIN_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.acos { v.push((fid, disk_cache::H_ACOS_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.atan { v.push((fid, disk_cache::H_ATAN_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.sinh { v.push((fid, disk_cache::H_SINH_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.cosh { v.push((fid, disk_cache::H_COSH_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.tanh { v.push((fid, disk_cache::H_TANH_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.log2 { v.push((fid, disk_cache::H_LOG2_F64)); }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.log10 { v.push((fid, disk_cache::H_LOG10_F64)); }
                     v
                 },
             },
@@ -6402,6 +6542,19 @@ impl JitCompiler {
                 | Op::LogFloat
                 | Op::AbsFloat
                 | Op::TruncInt
+                | Op::CeilFloat
+                | Op::FloorFloat
+                | Op::TruncFloat
+                | Op::RoundFloat
+                | Op::TanFloat
+                | Op::AsinFloat
+                | Op::AcosFloat
+                | Op::AtanFloat
+                | Op::SinhFloat
+                | Op::CoshFloat
+                | Op::TanhFloat
+                | Op::Log2Float
+                | Op::Log10Float
                 | Op::Negate
                 | Op::Inc
                 | Op::Dec
