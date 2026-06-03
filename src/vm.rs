@@ -794,6 +794,21 @@ impl VM {
                         2 => {
                             return VMResult::Error("division by zero attempted in `%'".to_string())
                         }
+                        3 => {
+                            return VMResult::Error(
+                                "lshift: negative values are not allowed".to_string(),
+                            )
+                        }
+                        4 => {
+                            return VMResult::Error(
+                                "rshift: negative values are not allowed".to_string(),
+                            )
+                        }
+                        5 => {
+                            return VMResult::Error(
+                                "compl: negative value is not allowed".to_string(),
+                            )
+                        }
                         _ => {}
                     }
                     self.write_slots_back();

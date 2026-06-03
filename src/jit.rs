@@ -431,10 +431,24 @@ pub(crate) extern "C" fn fusevm_jit_awk_div_trap(kind: i64) {
 }
 
 /// Read and clear the pending div/mod trap code (`0` = none, `1` = div,
-/// `2` = mod) set by [`fusevm_jit_awk_div_trap`].
+/// `2` = mod, `3` = lshift, `4` = rshift, `5` = compl) set by
+/// [`fusevm_jit_awk_div_trap`].
 #[allow(dead_code)] // used by JIT trap-drain path conditionally compiled out
 pub(crate) fn take_awk_div_trap() -> u8 {
     AWK_DIV_TRAP.with(|c| c.replace(0))
+}
+
+/// Libcall invoked by JIT-compiled [`crate::Op::AwkSqrtJit`] and
+/// [`crate::Op::AwkLogJit`] when the input is negative. Writes a gawk-shaped
+/// warning to stderr; the JIT then produces NaN as the result. `op_id` is `0`
+/// for sqrt and `1` for log so the warning carries the right function name.
+#[allow(dead_code)] // referenced by Cranelift via raw function pointer, not Rust call graph
+pub(crate) extern "C" fn fusevm_jit_awk_neg_warn(op_id: i64, value: f64) {
+    let name = if op_id == 0 { "sqrt" } else { "log" };
+    eprintln!(
+        "awk: warning: {}: received negative argument {}",
+        name, value
+    );
 }
 
 /// Out-parameter the trace fn writes on every invocation.
@@ -1112,6 +1126,7 @@ mod cranelift_jit_impl {
         atan2: Option<cranelift_module::FuncId>,
         log: Option<cranelift_module::FuncId>,
         awk_div_trap: Option<cranelift_module::FuncId>,
+        awk_neg_warn: Option<cranelift_module::FuncId>,
     }
 
     /// Resolved `FuncRef`s for the awk transcendental libcalls, valid inside one
@@ -1124,6 +1139,7 @@ mod cranelift_jit_impl {
         atan2: Option<cranelift_codegen::ir::FuncRef>,
         log: Option<cranelift_codegen::ir::FuncRef>,
         awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
+        awk_neg_warn: Option<cranelift_codegen::ir::FuncRef>,
     }
 
     fn declare_unary_f64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
@@ -1144,6 +1160,16 @@ mod cranelift_jit_impl {
     fn declare_void_i64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
         let mut ps = module.make_signature();
         ps.params.push(AbiParam::new(types::I64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_void_i64_f64(
+        module: &mut JITModule,
+        name: &str,
+    ) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::I64));
+        ps.params.push(AbiParam::new(types::F64));
         module.declare_function(name, Linkage::Import, &ps).ok()
     }
 
@@ -1171,7 +1197,19 @@ mod cranelift_jit_impl {
                     Op::AwkDivJit | Op::AwkModJit if m.awk_div_trap.is_none() => {
                         m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
                     }
+                    Op::AwkLshiftJit | Op::AwkRshiftJit | Op::AwkComplJit
+                        if m.awk_div_trap.is_none() =>
+                    {
+                        m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
+                    }
+                    Op::AwkLogJit if m.log.is_none() => {
+                        m.log = declare_unary_f64(module, "fusevm_jit_log_f64");
+                    }
                     _ => {}
+                }
+                // The warn libcall is shared between AwkSqrtJit and AwkLogJit.
+                if matches!(op, Op::AwkSqrtJit | Op::AwkLogJit) && m.awk_neg_warn.is_none() {
+                    m.awk_neg_warn = declare_void_i64_f64(module, "fusevm_jit_awk_neg_warn");
                 }
             }
             m
@@ -1192,6 +1230,9 @@ mod cranelift_jit_impl {
                 awk_div_trap: self
                     .awk_div_trap
                     .map(|id| module.declare_func_in_func(id, func)),
+                awk_neg_warn: self
+                    .awk_neg_warn
+                    .map(|id| module.declare_func_in_func(id, func)),
             }
         }
     }
@@ -1211,6 +1252,10 @@ mod cranelift_jit_impl {
         builder.symbol(
             "fusevm_jit_awk_div_trap",
             super::fusevm_jit_awk_div_trap as *const u8,
+        );
+        builder.symbol(
+            "fusevm_jit_awk_neg_warn",
+            super::fusevm_jit_awk_neg_warn as *const u8,
         );
         for h in super::ext_helpers_snapshot() {
             builder.symbol(h.name, h.ptr as *const u8);
@@ -3407,6 +3452,11 @@ mod cranelift_jit_impl {
                 | Op::AwkXor(_)
                 | Op::AwkDivJit
                 | Op::AwkModJit
+                | Op::AwkSqrtJit
+                | Op::AwkLogJit
+                | Op::AwkLshiftJit
+                | Op::AwkRshiftJit
+                | Op::AwkComplJit
         )
     }
 
@@ -4180,6 +4230,130 @@ mod cranelift_jit_impl {
                                 let call = bcx.ins().call(fref, &[dividend, divisor]);
                                 bcx.inst_results(call)[0]
                             };
+                            stack.push((res, JitTy::Float));
+                        }
+
+                        // awk sqrt(x) — warn-then-NaN on negative. Non-fatal,
+                        // so phi-merge: warn path produces NaN, positive path
+                        // produces fsqrt; both jump to a merge block whose F64
+                        // block parameter receives the result.
+                        Op::AwkSqrtJit => {
+                            let warn_ref = math.awk_neg_warn?;
+                            let v = pop_as_f64(&mut bcx, &mut stack)?;
+                            let zero = bcx.ins().f64const(0.0);
+                            let is_neg = bcx.ins().fcmp(FloatCC::LessThan, v, zero);
+                            let warn_block = bcx.create_block();
+                            let pos_block = bcx.create_block();
+                            let merge_block = bcx.create_block();
+                            bcx.append_block_param(merge_block, types::F64);
+                            bcx.ins().brif(is_neg, warn_block, &[], pos_block, &[]);
+
+                            bcx.switch_to_block(warn_block);
+                            let id0 = bcx.ins().iconst(types::I64, 0);
+                            bcx.ins().call(warn_ref, &[id0, v]);
+                            let nan = bcx.ins().f64const(f64::NAN);
+                            bcx.ins().jump(merge_block, &[BlockArg::Value(nan)]);
+
+                            bcx.switch_to_block(pos_block);
+                            let res = bcx.ins().sqrt(v);
+                            bcx.ins().jump(merge_block, &[BlockArg::Value(res)]);
+
+                            bcx.switch_to_block(merge_block);
+                            let merged = bcx.block_params(merge_block)[0];
+                            stack.push((merged, JitTy::Float));
+                        }
+
+                        // awk log(x) — warn-then-NaN on negative; libcall on
+                        // positive. Phi-merge identical in shape to AwkSqrtJit.
+                        Op::AwkLogJit => {
+                            let warn_ref = math.awk_neg_warn?;
+                            let log_ref = math.log?;
+                            let v = pop_as_f64(&mut bcx, &mut stack)?;
+                            let zero = bcx.ins().f64const(0.0);
+                            let is_neg = bcx.ins().fcmp(FloatCC::LessThan, v, zero);
+                            let warn_block = bcx.create_block();
+                            let pos_block = bcx.create_block();
+                            let merge_block = bcx.create_block();
+                            bcx.append_block_param(merge_block, types::F64);
+                            bcx.ins().brif(is_neg, warn_block, &[], pos_block, &[]);
+
+                            bcx.switch_to_block(warn_block);
+                            let id1 = bcx.ins().iconst(types::I64, 1);
+                            bcx.ins().call(warn_ref, &[id1, v]);
+                            let nan = bcx.ins().f64const(f64::NAN);
+                            bcx.ins().jump(merge_block, &[BlockArg::Value(nan)]);
+
+                            bcx.switch_to_block(pos_block);
+                            let call = bcx.ins().call(log_ref, &[v]);
+                            let res = bcx.inst_results(call)[0];
+                            bcx.ins().jump(merge_block, &[BlockArg::Value(res)]);
+
+                            bcx.switch_to_block(merge_block);
+                            let merged = bcx.block_params(merge_block)[0];
+                            stack.push((merged, JitTy::Float));
+                        }
+
+                        // awk lshift(a, n) / rshift(a, n) — fatal on either
+                        // operand negative. Stack [a, n]: pop n then a, matching
+                        // the interpreter. Trap codes: 3 = lshift, 4 = rshift.
+                        Op::AwkLshiftJit | Op::AwkRshiftJit => {
+                            let trap_ref = math.awk_div_trap?;
+                            let n = pop_as_f64(&mut bcx, &mut stack)?;
+                            let a = pop_as_f64(&mut bcx, &mut stack)?;
+                            let zero = bcx.ins().f64const(0.0);
+                            let a_neg = bcx.ins().fcmp(FloatCC::LessThan, a, zero);
+                            let n_neg = bcx.ins().fcmp(FloatCC::LessThan, n, zero);
+                            let any_neg = bcx.ins().bor(a_neg, n_neg);
+                            let trap_block = bcx.create_block();
+                            let cont_block = bcx.create_block();
+                            bcx.ins().brif(any_neg, trap_block, &[], cont_block, &[]);
+
+                            bcx.switch_to_block(trap_block);
+                            let code = if matches!(op, Op::AwkLshiftJit) { 3 } else { 4 };
+                            let code_v = bcx.ins().iconst(types::I64, code);
+                            bcx.ins().call(trap_ref, &[code_v]);
+                            let sentinel = bcx.ins().iconst(types::I64, 0);
+                            bcx.ins().return_(&[sentinel]);
+
+                            // Continue: convert f64 → i64 (saturating), mask
+                            // shift amount to 6 bits to match Rust's
+                            // `wrapping_shl((n as u32) & 0x3f)`, then back to f64.
+                            bcx.switch_to_block(cont_block);
+                            let a_i = bcx.ins().fcvt_to_sint_sat(types::I64, a);
+                            let n_i = bcx.ins().fcvt_to_sint_sat(types::I64, n);
+                            let mask = bcx.ins().iconst(types::I64, 0x3f);
+                            let n_masked = bcx.ins().band(n_i, mask);
+                            let shifted = if matches!(op, Op::AwkLshiftJit) {
+                                bcx.ins().ishl(a_i, n_masked)
+                            } else {
+                                bcx.ins().ushr(a_i, n_masked)
+                            };
+                            let res = bcx.ins().fcvt_from_sint(types::F64, shifted);
+                            stack.push((res, JitTy::Float));
+                        }
+
+                        // awk compl(a) — fatal on negative; otherwise `!(a as i64)`
+                        // then back to f64. Trap code 5.
+                        Op::AwkComplJit => {
+                            let trap_ref = math.awk_div_trap?;
+                            let v = pop_as_f64(&mut bcx, &mut stack)?;
+                            let zero = bcx.ins().f64const(0.0);
+                            let is_neg = bcx.ins().fcmp(FloatCC::LessThan, v, zero);
+                            let trap_block = bcx.create_block();
+                            let cont_block = bcx.create_block();
+                            bcx.ins().brif(is_neg, trap_block, &[], cont_block, &[]);
+
+                            bcx.switch_to_block(trap_block);
+                            let code_v = bcx.ins().iconst(types::I64, 5);
+                            bcx.ins().call(trap_ref, &[code_v]);
+                            let sentinel = bcx.ins().iconst(types::I64, 0);
+                            bcx.ins().return_(&[sentinel]);
+
+                            bcx.switch_to_block(cont_block);
+                            let v_i = bcx.ins().fcvt_to_sint_sat(types::I64, v);
+                            let neg1 = bcx.ins().iconst(types::I64, -1);
+                            let inverted = bcx.ins().bxor(v_i, neg1);
+                            let res = bcx.ins().fcvt_from_sint(types::F64, inverted);
                             stack.push((res, JitTy::Float));
                         }
 

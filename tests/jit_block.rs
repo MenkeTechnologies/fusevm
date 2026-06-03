@@ -688,3 +688,131 @@ fn block_jit_awk_int_in_loop_matches_scalar() {
     let result = jit.try_run_block_eager(&chunk, &mut slots).unwrap();
     assert_eq!(result, 45);
 }
+
+// ── Block JIT tests for AwkSqrtJit / AwkLogJit / AwkLshiftJit / AwkRshiftJit /
+// AwkComplJit (the 5 ops added in 0.13.6 at interpreter tier, lowered to native
+// in 0.13.7). Each builds a 1- or 2-arg chunk, runs through
+// try_run_block_eager_kinded with SlotKind::Float, and checks the result bit
+// pattern. Negative-path tests cover the warn libcall (sqrt/log) and the trap
+// libcall (lshift/rshift/compl) — for the trap variants we read take_awk_div_trap
+// to confirm the JIT recorded the right code without going through the VM.
+
+#[test]
+fn block_jit_awk_sqrt_jit_positive_matches_libm() {
+    use fusevm::SlotKind;
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::AwkSqrtJit, 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    assert!(jit.is_block_eligible(&chunk));
+    let kinds = [SlotKind::Float];
+    let mut slots = vec![16.0f64.to_bits() as i64];
+    jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+        .expect("AwkSqrtJit chunk must compile");
+    assert_eq!(f64::from_bits(slots[0] as u64), 4.0);
+}
+
+#[test]
+fn block_jit_awk_sqrt_jit_negative_yields_nan() {
+    use fusevm::SlotKind;
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::AwkSqrtJit, 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    let kinds = [SlotKind::Float];
+    let mut slots = vec![(-1.0f64).to_bits() as i64];
+    jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+        .expect("AwkSqrtJit chunk must compile");
+    // Warn libcall printed to stderr; result is NaN.
+    assert!(f64::from_bits(slots[0] as u64).is_nan());
+}
+
+#[test]
+fn block_jit_awk_log_jit_e_yields_one() {
+    use fusevm::SlotKind;
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::AwkLogJit, 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    let kinds = [SlotKind::Float];
+    let mut slots = vec![std::f64::consts::E.to_bits() as i64];
+    jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+        .expect("AwkLogJit chunk must compile");
+    assert!((f64::from_bits(slots[0] as u64) - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn block_jit_awk_lshift_jit_computes_shift() {
+    use fusevm::SlotKind;
+    // lshift(1, 4) == 16. awkrs pushes a then n.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::AwkLshiftJit, 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    let kinds = [SlotKind::Float, SlotKind::Float];
+    let mut slots = vec![1.0f64.to_bits() as i64, 4.0f64.to_bits() as i64];
+    jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+        .expect("AwkLshiftJit chunk must compile");
+    assert_eq!(f64::from_bits(slots[0] as u64), 16.0);
+}
+
+#[test]
+fn block_jit_awk_rshift_jit_computes_shift() {
+    use fusevm::SlotKind;
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::AwkRshiftJit, 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    let kinds = [SlotKind::Float, SlotKind::Float];
+    let mut slots = vec![16.0f64.to_bits() as i64, 2.0f64.to_bits() as i64];
+    jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+        .expect("AwkRshiftJit chunk must compile");
+    assert_eq!(f64::from_bits(slots[0] as u64), 4.0);
+}
+
+#[test]
+fn block_jit_awk_compl_jit_negates_bits() {
+    use fusevm::SlotKind;
+    // compl(15) == !15_i64 == -16.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::AwkComplJit, 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    let kinds = [SlotKind::Float];
+    let mut slots = vec![15.0f64.to_bits() as i64];
+    jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+        .expect("AwkComplJit chunk must compile");
+    assert_eq!(f64::from_bits(slots[0] as u64), -16.0);
+}
