@@ -62,3 +62,12 @@ jobs:
         # Build docs with all features so intra-doc links into cfg-gated items
         # (e.g. JIT-only types behind `feature = "jit"`) resolve.
         run: cargo doc --no-deps --all-features 
+
+  docs-gates:
+    name: Docs gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash tests/docs-target-blank-rel-noopener.sh
+      - run: bash tests/docs-no-http-links.sh
+      - run: bash tests/docs-no-inline-handlers.sh
