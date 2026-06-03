@@ -1308,3 +1308,172 @@ fn disk_cache_awk_sin_float_slot_block_persists() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+// ─── SCHEMA_VERSION 14 float ops ───
+
+#[cfg(feature = "jit-disk-cache")]
+#[test]
+fn disk_cache_ceil_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("ceilfloat");
+    let chunk = build(&[(Op::LoadFloat(2.3), 1), (Op::CeilFloat, 1)]);
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig { block_threshold: 1, ..TraceJitConfig::defaults() });
+    let mut slots: Vec<i64> = vec![];
+    assert_eq!(jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]), None);
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => assert_eq!(f, 3.0),
+        other => panic!("expected Float(3.0), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jit-disk-cache")]
+#[test]
+fn disk_cache_floor_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("floorfloat");
+    let chunk = build(&[(Op::LoadFloat(2.7), 1), (Op::FloorFloat, 1)]);
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig { block_threshold: 1, ..TraceJitConfig::defaults() });
+    let mut slots: Vec<i64> = vec![];
+    assert_eq!(jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]), None);
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => assert_eq!(f, 2.0),
+        other => panic!("expected Float(2.0), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jit-disk-cache")]
+#[test]
+fn disk_cache_trunc_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("truncfloat");
+    let chunk = build(&[(Op::LoadFloat(-2.7), 1), (Op::TruncFloat, 1)]);
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig { block_threshold: 1, ..TraceJitConfig::defaults() });
+    let mut slots: Vec<i64> = vec![];
+    assert_eq!(jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]), None);
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => assert_eq!(f, -2.0),
+        other => panic!("expected Float(-2.0), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jit-disk-cache")]
+#[test]
+fn disk_cache_round_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("roundfloat");
+    let chunk = build(&[(Op::LoadFloat(0.5), 1), (Op::RoundFloat, 1)]);
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig { block_threshold: 1, ..TraceJitConfig::defaults() });
+    let mut slots: Vec<i64> = vec![];
+    assert_eq!(jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]), None);
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => assert_eq!(f, 0.0, "ties-to-even: 0.5 -> 0.0"),
+        other => panic!("expected Float(0.0), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jit-disk-cache")]
+#[test]
+fn disk_cache_tan_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("tanfloat");
+    let chunk = build(&[(Op::LoadFloat(0.0), 1), (Op::TanFloat, 1)]);
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig { block_threshold: 1, ..TraceJitConfig::defaults() });
+    let mut slots: Vec<i64> = vec![];
+    assert_eq!(jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]), None);
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => assert_eq!(f, 0.0),
+        other => panic!("expected Float(0.0), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jit-disk-cache")]
+#[test]
+fn disk_cache_asin_acos_atan_float_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("asinacosatan");
+    let chunk = build(&[
+        (Op::LoadFloat(0.0), 1), (Op::AsinFloat, 1),
+        (Op::LoadFloat(0.0), 1), (Op::AcosFloat, 1), (Op::Add, 1),
+        (Op::LoadFloat(0.0), 1), (Op::AtanFloat, 1), (Op::Add, 1),
+    ]);
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig { block_threshold: 1, ..TraceJitConfig::defaults() });
+    let mut slots: Vec<i64> = vec![];
+    assert_eq!(jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]), None);
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => {
+            let exp = std::f64::consts::FRAC_PI_2;
+            assert!((f - exp).abs() < 1e-15, "got {f}");
+        }
+        other => panic!("expected Float(π/2), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jit-disk-cache")]
+#[test]
+fn disk_cache_hyperbolic_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("hyperbolic");
+    let chunk = build(&[
+        (Op::LoadFloat(0.0), 1), (Op::SinhFloat, 1),
+        (Op::LoadFloat(0.0), 1), (Op::CoshFloat, 1), (Op::Add, 1),
+        (Op::LoadFloat(0.0), 1), (Op::TanhFloat, 1), (Op::Add, 1),
+    ]);
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig { block_threshold: 1, ..TraceJitConfig::defaults() });
+    let mut slots: Vec<i64> = vec![];
+    assert_eq!(jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]), None);
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => assert_eq!(f, 1.0),
+        other => panic!("expected Float(1.0), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jit-disk-cache")]
+#[test]
+fn disk_cache_log2_log10_block_persists() {
+    use fusevm::TraceJitConfig;
+    let _g = serial();
+    let dir = fresh_dir("log2log10");
+    let chunk = build(&[
+        (Op::LoadFloat(8.0), 1), (Op::Log2Float, 1),
+        (Op::LoadFloat(1000.0), 1), (Op::Log10Float, 1), (Op::Add, 1),
+    ]);
+    let jit = JitCompiler::new();
+    jit.set_jit_cache_dir(Some(dir.clone()));
+    jit.set_config(TraceJitConfig { block_threshold: 1, ..TraceJitConfig::defaults() });
+    let mut slots: Vec<i64> = vec![];
+    assert_eq!(jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]), None);
+    match jit.try_run_block_typed_kinded(&chunk, &mut slots, &[]) {
+        Some(fusevm::BlockNum::Float(f)) => assert!((f - 6.0).abs() < 1e-12, "got {f}"),
+        other => panic!("expected Float(6.0), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
