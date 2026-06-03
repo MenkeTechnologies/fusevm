@@ -59,4 +59,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps 
+        # Build docs with all features so intra-doc links into cfg-gated items
+        # (e.g. JIT-only types behind `feature = "jit"`) resolve.
+        run: cargo doc --no-deps --all-features 
