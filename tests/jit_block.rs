@@ -816,3 +816,100 @@ fn block_jit_awk_compl_jit_negates_bits() {
         .expect("AwkComplJit chunk must compile");
     assert_eq!(f64::from_bits(slots[0] as u64), -16.0);
 }
+
+// ── Block JIT tests for AwkGetFieldNum (the host-hook libcall variant added
+// in 0.13.9 to lower awk's `$N` field-read with constant N). Tests both the
+// "hook installed → returns hook's value" path and the "no hook → returns 0.0"
+// path. Each test uses a fresh thread to keep the thread-local hook isolated.
+
+extern "C" fn fake_field_hook(idx: i64) -> f64 {
+    // Pretend $1 = 10.0, $2 = 20.0, $3 = 30.0, ... so the test can verify
+    // both the libcall dispatch AND that the right field index is passed.
+    (idx as f64) * 10.0
+}
+
+#[test]
+fn block_jit_awk_get_field_num_calls_installed_hook() {
+    use fusevm::{set_awk_field_num_hook, SlotKind};
+    // slot0 = $3 (== 30.0 via the fake hook).
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::AwkGetFieldNum(3), 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    // Run inside a fresh thread so the thread-local hook doesn't leak.
+    std::thread::spawn(move || {
+        set_awk_field_num_hook(Some(fake_field_hook));
+        let jit = JitCompiler::new();
+        assert!(jit.is_block_eligible(&chunk));
+        let kinds = [SlotKind::Float];
+        let mut slots = vec![0i64];
+        jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+            .expect("AwkGetFieldNum chunk must compile");
+        assert_eq!(f64::from_bits(slots[0] as u64), 30.0);
+        set_awk_field_num_hook(None);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn block_jit_awk_get_field_num_no_hook_returns_zero() {
+    use fusevm::SlotKind;
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::AwkGetFieldNum(7), 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    // Fresh thread: no hook is installed in this thread, so the libcall
+    // returns 0.0 (awk's missing-field default).
+    std::thread::spawn(move || {
+        let jit = JitCompiler::new();
+        let kinds = [SlotKind::Float];
+        let mut slots = vec![999i64];
+        jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+            .expect("AwkGetFieldNum chunk must compile");
+        assert_eq!(f64::from_bits(slots[0] as u64), 0.0);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn block_jit_awk_get_field_num_sum_loop() {
+    use fusevm::{set_awk_field_num_hook, SlotKind};
+    // slot0 = $1 + $2 + $3 + $4 + $5 — the canonical `{sum += $N}` pattern
+    // expressed as straight-line code (one chunk, multiple field reads).
+    // Expected: 10 + 20 + 30 + 40 + 50 == 150.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::AwkGetFieldNum(1), 1);
+    b.emit(Op::AwkGetFieldNum(2), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::AwkGetFieldNum(3), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::AwkGetFieldNum(4), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::AwkGetFieldNum(5), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::Dup, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::Pop, 1);
+    let chunk = b.build();
+
+    std::thread::spawn(move || {
+        set_awk_field_num_hook(Some(fake_field_hook));
+        let jit = JitCompiler::new();
+        let kinds = [SlotKind::Float];
+        let mut slots = vec![0i64];
+        jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+            .expect("multi-field chunk must compile");
+        assert_eq!(f64::from_bits(slots[0] as u64), 150.0);
+        set_awk_field_num_hook(None);
+    })
+    .join()
+    .unwrap();
+}

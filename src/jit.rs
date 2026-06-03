@@ -451,6 +451,35 @@ pub(crate) extern "C" fn fusevm_jit_awk_neg_warn(op_id: i64, value: f64) {
     );
 }
 
+thread_local! {
+    /// Host hook invoked by JIT-compiled [`crate::Op::AwkGetFieldNum`] to read
+    /// the current awk record's `$N` field as a number. The host (awkrs)
+    /// installs this via [`set_awk_field_num_hook`] BEFORE invoking any chunk
+    /// containing the op, and clears it after. fusevm itself is host-agnostic
+    /// — it stores only an `extern "C" fn(i64) -> f64` pointer here.
+    static AWK_FIELD_NUM_HOOK: std::cell::Cell<Option<extern "C" fn(i64) -> f64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Install the host hook used by [`crate::Op::AwkGetFieldNum`] for the current
+/// thread. Pass `None` to clear. The function is called by the libcall on
+/// every `$N` read with the (constant-folded) field index; it must return the
+/// field's numeric value via awk's standard string→number coercion.
+pub fn set_awk_field_num_hook(hook: Option<extern "C" fn(i64) -> f64>) {
+    AWK_FIELD_NUM_HOOK.with(|c| c.set(hook));
+}
+
+/// Libcall body for [`crate::Op::AwkGetFieldNum`]. Forwards to the installed
+/// thread-local hook; returns `0.0` if no hook is set (matches awk's
+/// missing-field semantics).
+#[allow(dead_code)] // referenced by Cranelift via raw function pointer, not Rust call graph
+pub(crate) extern "C" fn fusevm_jit_awk_get_field_num(field_idx: i64) -> f64 {
+    AWK_FIELD_NUM_HOOK.with(|c| match c.get() {
+        Some(f) => f(field_idx),
+        None => 0.0,
+    })
+}
+
 /// Out-parameter the trace fn writes on every invocation.
 ///
 /// `resume_ip` is set by the trace on every exit (normal loop fallthrough
@@ -1127,6 +1156,7 @@ mod cranelift_jit_impl {
         log: Option<cranelift_module::FuncId>,
         awk_div_trap: Option<cranelift_module::FuncId>,
         awk_neg_warn: Option<cranelift_module::FuncId>,
+        awk_get_field_num: Option<cranelift_module::FuncId>,
     }
 
     /// Resolved `FuncRef`s for the awk transcendental libcalls, valid inside one
@@ -1140,6 +1170,7 @@ mod cranelift_jit_impl {
         log: Option<cranelift_codegen::ir::FuncRef>,
         awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
         awk_neg_warn: Option<cranelift_codegen::ir::FuncRef>,
+        awk_get_field_num: Option<cranelift_codegen::ir::FuncRef>,
     }
 
     fn declare_unary_f64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
@@ -1170,6 +1201,13 @@ mod cranelift_jit_impl {
         let mut ps = module.make_signature();
         ps.params.push(AbiParam::new(types::I64));
         ps.params.push(AbiParam::new(types::F64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_f64_i64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::I64));
+        ps.returns.push(AbiParam::new(types::F64));
         module.declare_function(name, Linkage::Import, &ps).ok()
     }
 
@@ -1205,6 +1243,10 @@ mod cranelift_jit_impl {
                     Op::AwkLogJit if m.log.is_none() => {
                         m.log = declare_unary_f64(module, "fusevm_jit_log_f64");
                     }
+                    Op::AwkGetFieldNum(_) if m.awk_get_field_num.is_none() => {
+                        m.awk_get_field_num =
+                            declare_f64_i64(module, "fusevm_jit_awk_get_field_num");
+                    }
                     _ => {}
                 }
                 // The warn libcall is shared between AwkSqrtJit and AwkLogJit.
@@ -1233,6 +1275,9 @@ mod cranelift_jit_impl {
                 awk_neg_warn: self
                     .awk_neg_warn
                     .map(|id| module.declare_func_in_func(id, func)),
+                awk_get_field_num: self
+                    .awk_get_field_num
+                    .map(|id| module.declare_func_in_func(id, func)),
             }
         }
     }
@@ -1256,6 +1301,10 @@ mod cranelift_jit_impl {
         builder.symbol(
             "fusevm_jit_awk_neg_warn",
             super::fusevm_jit_awk_neg_warn as *const u8,
+        );
+        builder.symbol(
+            "fusevm_jit_awk_get_field_num",
+            super::fusevm_jit_awk_get_field_num as *const u8,
         );
         for h in super::ext_helpers_snapshot() {
             builder.symbol(h.name, h.ptr as *const u8);
@@ -2670,6 +2719,7 @@ mod cranelift_jit_impl {
                     // AwkLogJit on the negative path.
                     awk_div_trap: None,
                     awk_neg_warn: None,
+                    awk_get_field_num: None,
                 };
 
                 let mut stack: Vec<(Value, JitTy)> = Vec::with_capacity(32);
@@ -3460,6 +3510,7 @@ mod cranelift_jit_impl {
                 | Op::AwkLshiftJit
                 | Op::AwkRshiftJit
                 | Op::AwkComplJit
+                | Op::AwkGetFieldNum(_)
         )
     }
 
@@ -4357,6 +4408,19 @@ mod cranelift_jit_impl {
                             let neg1 = bcx.ins().iconst(types::I64, -1);
                             let inverted = bcx.ins().bxor(v_i, neg1);
                             let res = bcx.ins().fcvt_from_sint(types::F64, inverted);
+                            stack.push((res, JitTy::Float));
+                        }
+
+                        // awk `$N` with constant N — single libcall to the host
+                        // hook, pushed onto the operand stack as F64. No trap
+                        // path; missing-field semantics ride on the hook itself
+                        // (returns 0.0 when nothing is installed). The host
+                        // (awkrs) installs the hook before chunk dispatch.
+                        Op::AwkGetFieldNum(field_idx) => {
+                            let hook_ref = math.awk_get_field_num?;
+                            let idx_v = bcx.ins().iconst(types::I64, *field_idx as i64);
+                            let call = bcx.ins().call(hook_ref, &[idx_v]);
+                            let res = bcx.inst_results(call)[0];
                             stack.push((res, JitTy::Float));
                         }
 

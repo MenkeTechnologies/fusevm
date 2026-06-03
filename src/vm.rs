@@ -2402,6 +2402,14 @@ impl VM {
                     let v = !(a as i64);
                     self.push(Value::Float(v as f64));
                 }
+                // awk `$N` numeric read — interpreter path. Calls the same
+                // host-installed hook as the JIT-compiled variant so behavior
+                // matches across tiers. Returns 0.0 when no hook is set, which
+                // matches awk's "missing field" coercion.
+                Op::AwkGetFieldNum(field_idx) => {
+                    let v = crate::jit::fusevm_jit_awk_get_field_num(*field_idx as i64);
+                    self.push(Value::Float(v));
+                }
                 Op::PowFloat => {
                     let b = self.pop();
                     let a = self.pop();

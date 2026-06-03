@@ -458,6 +458,15 @@ pub enum Op {
     /// "negative value is not allowed" when `a < 0` (trap code 5). Non-negative
     /// path computes `!(a as i64)` and pushes as float. Host-independent.
     AwkComplJit,
+    /// Block-JIT-eligible read of awk's `$N` field as a number, where `N` is a
+    /// compile-time constant (`u16`). Calls the host-installed hook
+    /// `crate::set_awk_field_num_hook`, which the host must set to an
+    /// `extern "C" fn(i64) -> f64` BEFORE invoking any chunk containing this
+    /// op. Pushes the returned `f64` onto the stack. The hook reads the active
+    /// awk record's field via a host-side thread-local Runtime pointer; fusevm
+    /// itself stays host-agnostic. If no hook is installed at chunk-run time,
+    /// the libcall returns `0.0` (matching awk's `$N` for missing fields).
+    AwkGetFieldNum(u16),
     /// Always-float exponentiation: pops `[base, exp]`, pushes
     /// `Float(base.powf(exp))`. Unlike [`Op::Pow`] (whose JIT lowering keeps an
     /// integer result for two static-`Int` operands), this op coerces BOTH
@@ -899,6 +908,7 @@ impl Hash for Op {
             | Op::AwkLshiftJit
             | Op::AwkRshiftJit
             | Op::AwkComplJit
+            | Op::AwkGetFieldNum(_)
             | Op::AwkCompl
             | Op::AwkLshift
             | Op::AwkRshift
