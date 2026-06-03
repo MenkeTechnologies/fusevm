@@ -833,6 +833,18 @@ mod cranelift_jit_impl {
                     Cell::Dyn => Cell::Dyn,
                 });
             }
+            // awk mkbool(x): `1.0` if `x` is truthy (numeric != 0, including
+            // NaN and infinities), else `0.0`. Pure compare + select, no libcall.
+            Op::AwkMkbool => {
+                let a = stack.pop()?;
+                stack.push(match a {
+                    Cell::Const(0) => Cell::ConstF(0.0),
+                    Cell::Const(_) => Cell::ConstF(1.0),
+                    Cell::ConstF(f) if f == 0.0 => Cell::ConstF(0.0),
+                    Cell::ConstF(_) => Cell::ConstF(1.0),
+                    _ => Cell::DynF,
+                });
+            }
             Op::Inc => {
                 let a = stack.pop()?;
                 stack.push(match a {
@@ -1619,6 +1631,18 @@ mod cranelift_jit_impl {
                     JitTy::Int => stack.push((a, JitTy::Int)),
                     JitTy::Float => stack.push((bcx.ins().trunc(a), JitTy::Float)),
                 }
+            }
+            // awk mkbool(x): returns 1.0 if x is truthy (non-zero), else 0.0.
+            // `FloatCC::NotEqual` is the unordered NaN-aware comparison: NaN
+            // != 0.0 → true, so NaN maps to 1.0 (awk truthy semantics — gawk
+            // and awkrs both treat NaN as truthy). Pure SSA: pop one, push one.
+            Op::AwkMkbool => {
+                let a = pop_as_f64(bcx, stack)?;
+                let zero = bcx.ins().f64const(0.0);
+                let one = bcx.ins().f64const(1.0);
+                let cmp = bcx.ins().fcmp(FloatCC::NotEqual, a, zero);
+                let result = bcx.ins().select(cmp, one, zero);
+                stack.push((result, JitTy::Float));
             }
             // awk sin/cos/exp: unary f64 transcendentals via a Rust libcall that
             // canonicalizes NaN to `+nan` (matching awkrs/gawk). Integer operands
@@ -3373,6 +3397,7 @@ mod cranelift_jit_impl {
                 | Op::PushFrame
                 | Op::PopFrame
                 | Op::AwkInt
+                | Op::AwkMkbool
                 | Op::AwkSin
                 | Op::AwkCos
                 | Op::AwkExp

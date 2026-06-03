@@ -610,6 +610,50 @@ fn block_jit_awk_int_truncates_float() {
 }
 
 #[test]
+fn block_jit_awk_mkbool_returns_one_or_zero() {
+    use fusevm::SlotKind;
+    // slot0 = mkbool(3.7)  → 1.0
+    // slot1 = mkbool(0.0)  → 0.0
+    // slot2 = mkbool(-1.5) → 1.0 (nonzero)
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::PushFrame, 1);
+    b.emit(Op::LoadFloat(3.7), 1);
+    b.emit(Op::AwkMkbool, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::LoadFloat(0.0), 1);
+    b.emit(Op::AwkMkbool, 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::LoadFloat(-1.5), 1);
+    b.emit(Op::AwkMkbool, 1);
+    b.emit(Op::SetSlot(2), 1);
+    b.emit(Op::GetSlot(0), 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    assert!(
+        jit.is_block_eligible(&chunk),
+        "AwkMkbool must be block-eligible"
+    );
+
+    let kinds = [
+        SlotKind::Float,
+        SlotKind::Float,
+        SlotKind::Float,
+        SlotKind::Float,
+    ];
+    let mut slots = vec![0i64; 4];
+    jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+        .expect("block JIT must compile");
+    assert_eq!(f64::from_bits(slots[0] as u64), 1.0, "mkbool(3.7) == 1.0");
+    assert_eq!(f64::from_bits(slots[1] as u64), 0.0, "mkbool(0.0) == 0.0");
+    assert_eq!(
+        f64::from_bits(slots[2] as u64),
+        1.0,
+        "mkbool(-1.5) == 1.0 (nonzero)"
+    );
+}
+
+#[test]
 fn block_jit_awk_int_in_loop_matches_scalar() {
     // s = 0; for (i = 0; i < 10; i++) s += int(i + 0.9); → s = 0+1+..+9 = 45
     let mut b = ChunkBuilder::new();
