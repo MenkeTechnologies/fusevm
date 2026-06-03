@@ -2448,6 +2448,19 @@ impl VM {
                     let a = self.pop();
                     self.push(Value::Int(a.to_int()));
                 }
+                Op::CeilFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().ceil())); }
+                Op::FloorFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().floor())); }
+                Op::TruncFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().trunc())); }
+                Op::RoundFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().round_ties_even())); }
+                Op::TanFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().tan())); }
+                Op::AsinFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().asin())); }
+                Op::AcosFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().acos())); }
+                Op::AtanFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().atan())); }
+                Op::SinhFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().sinh())); }
+                Op::CoshFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().cosh())); }
+                Op::TanhFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().tanh())); }
+                Op::Log2Float => { let a = self.pop(); self.push(Value::Float(a.to_float().log2())); }
+                Op::Log10Float => { let a = self.pop(); self.push(Value::Float(a.to_float().log10())); }
                 Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
                 Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
                 Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),

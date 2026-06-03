@@ -521,6 +521,32 @@ pub enum Op {
     /// (which keeps awk's float result), this yields a genuine integer — intended
     /// for frontends whose `int` returns an integer (e.g. strykelang/Perl).
     TruncInt,
+    /// Ceiling (always-float). Native Cranelift `ceil`.
+    CeilFloat,
+    /// Floor (always-float). Native Cranelift `floor`.
+    FloorFloat,
+    /// Truncate toward zero (always-float). Native Cranelift `trunc`.
+    TruncFloat,
+    /// Round to nearest, ties to even (always-float). Native Cranelift `nearest`.
+    RoundFloat,
+    /// Tangent. Host helper `fusevm_jit_tan_f64`.
+    TanFloat,
+    /// Arcsine. Host helper `fusevm_jit_asin_f64`.
+    AsinFloat,
+    /// Arccosine. Host helper `fusevm_jit_acos_f64`.
+    AcosFloat,
+    /// 1-arg arctangent. Host helper `fusevm_jit_atan_f64`.
+    AtanFloat,
+    /// Hyperbolic sine. Host helper `fusevm_jit_sinh_f64`.
+    SinhFloat,
+    /// Hyperbolic cosine. Host helper `fusevm_jit_cosh_f64`.
+    CoshFloat,
+    /// Hyperbolic tangent. Host helper `fusevm_jit_tanh_f64`.
+    TanhFloat,
+    /// Base-2 logarithm. Host helper `fusevm_jit_log2_f64`.
+    Log2Float,
+    /// Base-10 logarithm. Host helper `fusevm_jit_log10_f64`.
+    Log10Float,
     /// `arr[k]` — stack `[key]`; pushes the element (auto-vivifies to "").
     /// `u16` = name-pool index of the array variable.
     AwkArrayGet(u16),
@@ -831,6 +857,19 @@ impl Hash for Op {
             | Op::LogFloat
             | Op::AbsFloat
             | Op::TruncInt
+            | Op::CeilFloat
+            | Op::FloorFloat
+            | Op::TruncFloat
+            | Op::RoundFloat
+            | Op::TanFloat
+            | Op::AsinFloat
+            | Op::AcosFloat
+            | Op::AtanFloat
+            | Op::SinhFloat
+            | Op::CoshFloat
+            | Op::TanhFloat
+            | Op::Log2Float
+            | Op::Log10Float
             | Op::Negate
             | Op::Inc
             | Op::Dec
