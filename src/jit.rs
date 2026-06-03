@@ -2665,8 +2665,11 @@ mod cranelift_jit_impl {
                     // block-only ops handled in `build_block_function`), so the
                     // linear native path imports no trap ref. The block native
                     // path *does* carry them and registers the trap libcall under
-                    // `H_AWK_DIV_TRAP`, so div/mod chunks persist to disk.
+                    // `H_AWK_DIV_TRAP`, so div/mod chunks persist to disk. Same
+                    // reasoning applies to the warn libcall used by AwkSqrtJit /
+                    // AwkLogJit on the negative path.
                     awk_div_trap: None,
+                    awk_neg_warn: None,
                 };
 
                 let mut stack: Vec<(Value, JitTy)> = Vec::with_capacity(32);
