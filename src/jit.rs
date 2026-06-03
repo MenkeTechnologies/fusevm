@@ -6334,7 +6334,7 @@ impl JitCompiler {
         cranelift_jit_impl::try_run_block(chunk, slots)
     }
 
-    /// Slot-kind-aware [`try_run_block`]: `slot_kinds[i]` is the runtime kind of
+    /// Slot-kind-aware [`Self::try_run_block`]: `slot_kinds[i]` is the runtime kind of
     /// slot `i`. Float slots (awk numeric vars) are stored as i64 bit patterns
     /// and bit-cast through f64 in the compiled native code. The slot kinds are
     /// part of the cache key, so Int- and Float-specialized blocks never alias.
@@ -6367,7 +6367,7 @@ impl JitCompiler {
         cranelift_jit_impl::try_run_block_eager_kinded(chunk, slots, slot_kinds)
     }
 
-    /// Typed slot-kind-aware [`try_run_block_kinded`]: returns the chunk result
+    /// Typed slot-kind-aware [`Self::try_run_block_kinded`]: returns the chunk result
     /// as a [`BlockNum`], preserving float results exactly instead of truncating
     /// them to `i64`. Use this when the chunk's result may be a float value (the
     /// plain `i64` entry points truncate floats for backward compatibility).
@@ -6393,7 +6393,7 @@ impl JitCompiler {
     }
 
     /// Reads and clears the JIT zero-divisor trap channel set by a compiled
-    /// [`Op::AwkDivJit`]/[`Op::AwkModJit`] that hit a `b == 0` divisor.
+    /// [`crate::Op::AwkDivJit`]/[`crate::Op::AwkModJit`] that hit a `b == 0` divisor.
     ///
     /// Returns `true` if a trap fired since the last call (the JIT-returned
     /// result for that segment is a sentinel and must be discarded). Front-ends
