@@ -110,7 +110,11 @@ fn cpair(a: &str, b: &str) -> CPair {
     let ca = std::ffi::CString::new(a).unwrap();
     let cb = std::ffi::CString::new(b).unwrap();
     let slots = [ca.as_ptr() as i64, cb.as_ptr() as i64];
-    CPair { _a: ca, _b: cb, slots }
+    CPair {
+        _a: ca,
+        _b: cb,
+        slots,
+    }
 }
 
 fn run_eq(a: &str, b: &str) -> i64 {
@@ -205,8 +209,16 @@ fn host_helper_chunk_is_disk_cached_and_reloads() {
         )
     });
     let (same, diff) = handle.join().unwrap();
-    assert_eq!(same, Some(1), "reloaded cached host-helper code: equal strings");
-    assert_eq!(diff, Some(0), "reloaded cached host-helper code: unequal strings");
+    assert_eq!(
+        same,
+        Some(1),
+        "reloaded cached host-helper code: equal strings"
+    );
+    assert_eq!(
+        diff,
+        Some(0),
+        "reloaded cached host-helper code: unequal strings"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

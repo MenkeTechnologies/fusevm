@@ -45,7 +45,7 @@ pub const AWK_OP_END: u16 = 41_000;
 /// True when `id` falls in the reserved AWK op range.
 #[inline]
 pub fn is_awk_op(id: u16) -> bool {
-    id >= AWK_OP_BASE && id < AWK_OP_END
+    (AWK_OP_BASE..AWK_OP_END).contains(&id)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -23,9 +23,9 @@
 //! - **Pre-allocated collections**: Range, MakeHash, HashKeys/Values use exact
 //!   or estimated capacity. ConcatConstLoop pre-sizes the string buffer.
 
+use crate::awk_host::AwkHost;
 use crate::chunk::Chunk;
 use crate::host::ShellHost;
-use crate::awk_host::AwkHost;
 #[cfg(feature = "jit")]
 use crate::jit::{DeoptInfo, JitCompiler, SlotKind, TraceLookup};
 use crate::op::Op;
@@ -780,10 +780,11 @@ impl VM {
             };
             if eligible {
                 self.refresh_slot_buffers();
-                if let Some(result_i64) =
-                    self.jit
-                        .try_run_block_kinded(&self.chunk, &mut self.slot_buf, &self.slot_kinds_buf)
-                {
+                if let Some(result_i64) = self.jit.try_run_block_kinded(
+                    &self.chunk,
+                    &mut self.slot_buf,
+                    &self.slot_kinds_buf,
+                ) {
                     // A JIT-compiled AwkDivJit/AwkModJit may have hit a zero
                     // divisor and set the thread-local trap code before
                     // returning. Honor it as the awk fatal, discarding the
@@ -791,9 +792,7 @@ impl VM {
                     match crate::jit::take_awk_div_trap() {
                         1 => return VMResult::Error("division by zero attempted".to_string()),
                         2 => {
-                            return VMResult::Error(
-                                "division by zero attempted in `%'".to_string(),
-                            )
+                            return VMResult::Error("division by zero attempted in `%'".to_string())
                         }
                         _ => {}
                     }
@@ -2295,9 +2294,7 @@ impl VM {
                     let a = self.pop();
                     let divisor = b.to_float();
                     if divisor == 0.0 {
-                        return VMResult::Error(
-                            "division by zero attempted in `%'".to_string(),
-                        );
+                        return VMResult::Error("division by zero attempted in `%'".to_string());
                     }
                     self.push(Value::Float(a.to_float() % divisor));
                 }
@@ -2318,9 +2315,7 @@ impl VM {
                     let a = self.pop();
                     let divisor = b.to_float();
                     if divisor == 0.0 {
-                        return VMResult::Error(
-                            "division by zero attempted in `%'".to_string(),
-                        );
+                        return VMResult::Error("division by zero attempted in `%'".to_string());
                     }
                     self.push(Value::Float(a.to_float() % divisor));
                 }
@@ -2862,7 +2857,9 @@ impl VM {
             ab::AWK_ATAN2 => {
                 let x = self.pop();
                 let y = self.pop();
-                self.push(Value::Float(awk_canon_nan(y.to_float().atan2(x.to_float()))));
+                self.push(Value::Float(awk_canon_nan(
+                    y.to_float().atan2(x.to_float()),
+                )));
             }
             // Host-independent bitwise builtins (gawk): pure integer math.
             ab::AWK_AND => {
@@ -3002,9 +2999,7 @@ impl VM {
                 self.pop();
                 self.pop();
             }
-            ab::AWK_SET_RECORD
-            | ab::AWK_SPECIAL_SET
-            | ab::AWK_ARRAY_DELETE => {
+            ab::AWK_SET_RECORD | ab::AWK_SPECIAL_SET | ab::AWK_ARRAY_DELETE => {
                 self.pop();
             }
             ab::AWK_PRINT | ab::AWK_PRINTF => {
@@ -3748,8 +3743,10 @@ mod tests {
             b.build()
         };
         let mut vm = VM::new(chunk);
-        let mut host = RecordingAwkHost::default();
-        host.fields = vec!["a".into(), "b".into(), "c".into()];
+        let host = RecordingAwkHost {
+            fields: vec!["a".into(), "b".into(), "c".into()],
+            ..Default::default()
+        };
         vm.set_awk_host(Box::new(host));
         match vm.run() {
             VMResult::Ok(v) => assert_eq!(v.to_str(), "c"),
@@ -3783,7 +3780,10 @@ mod tests {
         let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         vm.set_awk_host(Box::new(H(sink.clone())));
         let _ = vm.run();
-        assert_eq!(sink.lock().unwrap().as_slice(), &[vec!["x".to_string(), "y".to_string()]]);
+        assert_eq!(
+            sink.lock().unwrap().as_slice(),
+            &[vec!["x".to_string(), "y".to_string()]]
+        );
     }
 
     #[test]
@@ -3867,8 +3867,10 @@ mod tests {
             b.build()
         };
         let mut vm = VM::new(chunk);
-        let mut host = RecordingAwkHost::default();
-        host.fields = vec!["a".into(), "b".into(), "c".into()];
+        let host = RecordingAwkHost {
+            fields: vec!["a".into(), "b".into(), "c".into()],
+            ..Default::default()
+        };
         vm.set_awk_host(Box::new(host));
         match vm.run() {
             VMResult::Ok(v) => assert_eq!(v.to_str(), "c"),
@@ -4050,10 +4052,7 @@ mod tests {
     fn awk_native_string_ops_match_host_path() {
         // The no-host native result must equal the DefaultAwkHost result.
         use crate::awk_host::{awk_index, awk_substr, awk_tolower};
-        assert_eq!(
-            awk_substr(&Value::str("hello"), 2, Some(3)).to_str(),
-            "ell"
-        );
+        assert_eq!(awk_substr(&Value::str("hello"), 2, Some(3)).to_str(), "ell");
         assert_eq!(awk_index(&Value::str("hello"), &Value::str("z")), 0);
         assert_eq!(awk_tolower(&Value::str("ABC")).to_str(), "abc");
     }
@@ -4498,7 +4497,10 @@ mod tests {
             awk_intdiv(&Value::Int(1), &Value::Int(0)),
             Value::Undef
         ));
-        assert_eq!(awk_intdiv0(&Value::Int(-7), &Value::Int(2)).to_float(), -3.0);
+        assert_eq!(
+            awk_intdiv0(&Value::Int(-7), &Value::Int(2)).to_float(),
+            -3.0
+        );
         assert_eq!(awk_intdiv0(&Value::Int(1), &Value::Int(0)).to_float(), 0.0);
     }
 
@@ -4512,7 +4514,10 @@ mod tests {
         };
         let v = run_native(chunk).to_float();
         assert!((0.0..1.0).contains(&v), "rand() = {v} out of [0,1)");
-        assert_eq!(v, 0.51385498046875, "first rand() from seed=1 must be stable");
+        assert_eq!(
+            v, 0.51385498046875,
+            "first rand() from seed=1 must be stable"
+        );
     }
 
     #[test]

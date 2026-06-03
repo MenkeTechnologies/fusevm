@@ -94,7 +94,11 @@ fn block_jit_typed_returns_exact_float_result() {
     let truncated = jit
         .try_run_block_eager_kinded(&chunk, &mut slots2, &kinds)
         .expect("compile");
-    assert_eq!(truncated, (4.0 * 1.5 + 2.0) as i64, "i64 entry truncates float");
+    assert_eq!(
+        truncated,
+        (4.0 * 1.5 + 2.0) as i64,
+        "i64 entry truncates float"
+    );
 }
 
 #[test]
@@ -169,7 +173,10 @@ fn block_jit_awk_and_or_xor_float_slots_match_scalar() {
         let chunk = b.build();
 
         let jit = JitCompiler::new();
-        assert!(jit.is_block_eligible(&chunk), "{op:?} must be block-eligible");
+        assert!(
+            jit.is_block_eligible(&chunk),
+            "{op:?} must be block-eligible"
+        );
 
         let kinds = [SlotKind::Float, SlotKind::Float];
         let mut slots = vec![12.0f64.to_bits() as i64, 10.0f64.to_bits() as i64];
@@ -590,7 +597,10 @@ fn block_jit_awk_int_truncates_float() {
     let chunk = b.build();
 
     let jit = JitCompiler::new();
-    assert!(jit.is_block_eligible(&chunk), "AwkInt must be block-eligible");
+    assert!(
+        jit.is_block_eligible(&chunk),
+        "AwkInt must be block-eligible"
+    );
 
     let mut slots = vec![0i64; 4];
     let result = jit.try_run_block_eager(&chunk, &mut slots).unwrap();
@@ -608,7 +618,7 @@ fn block_jit_awk_int_in_loop_matches_scalar() {
     b.emit(Op::SetSlot(0), 1); // s = 0.0
     b.emit(Op::LoadFloat(0.0), 1);
     b.emit(Op::SetSlot(1), 1); // i = 0.0
-    // ip=5: body
+                               // ip=5: body
     b.emit(Op::GetSlot(0), 1);
     b.emit(Op::GetSlot(1), 1);
     b.emit(Op::LoadFloat(0.9), 1);

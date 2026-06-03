@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use fusevm::{ChunkBuilder, JitCompiler, Op, Value, VMResult, VM};
+use fusevm::{ChunkBuilder, JitCompiler, Op, VMResult, Value, VM};
 
 /// The cache directory is a process-global override, so tests that configure it
 /// must not run concurrently. Each such test holds this lock for its duration.
@@ -131,11 +131,7 @@ fn disk_cache_roundtrip_second_load_from_disk() {
     // and produce the identical result, proving the file path works without
     // any in-memory state.
     let dir = fresh_dir("roundtrip");
-    let chunk = build(&[
-        (Op::LoadInt(7), 1),
-        (Op::LoadInt(6), 1),
-        (Op::Mul, 1),
-    ]);
+    let chunk = build(&[(Op::LoadInt(7), 1), (Op::LoadInt(6), 1), (Op::Mul, 1)]);
 
     let first = run_with_cache(&chunk, &dir, &[]);
     assert_eq!(first, Some(Value::Int(42)));
@@ -195,8 +191,7 @@ fn disk_cache_on_by_default_and_opt_out() {
     std::env::remove_var("FUSEVM_JIT_CACHE_DIR");
     let def = jit.jit_cache_dir();
     assert!(
-        def.as_ref()
-            .map_or(false, |p| p.ends_with("fusevm-jit")),
+        def.as_ref().map_or(false, |p| p.ends_with("fusevm-jit")),
         "expected default dir ending in fusevm-jit, got {def:?}"
     );
 
@@ -266,11 +261,8 @@ fn has_tagged_file(dir: &PathBuf, tag: &str) -> bool {
     let needle = format!(".{tag}.fjit");
     std::fs::read_dir(dir)
         .map(|rd| {
-            rd.flatten().any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .ends_with(needle.as_str())
-            })
+            rd.flatten()
+                .any(|e| e.file_name().to_string_lossy().ends_with(needle.as_str()))
         })
         .unwrap_or(false)
 }
@@ -422,7 +414,10 @@ fn cache_size_clear_and_max_bytes_api() {
     // Force a tiny cap and prune: size must drop to at most the cap.
     jit.set_jit_cache_max_bytes(Some(200));
     let freed = jit.prune_jit_cache();
-    assert!(freed > 0, "prune should have evicted blobs to meet the 200B cap");
+    assert!(
+        freed > 0,
+        "prune should have evicted blobs to meet the 200B cap"
+    );
     let after = jit.jit_cache_size_bytes().unwrap();
     assert!(after <= 200, "expected ≤200B after prune, got {after}");
 
@@ -457,7 +452,7 @@ fn new_slot_ops_block_jit_matches_interp() {
         (PostIncSlot(0), 1), // push old i, i++
         (GetSlot(1), 1),
         (Add, 1),
-        (SetSlot(1), 1), // acc += old_i
+        (SetSlot(1), 1),                     // acc += old_i
         (SlotLtIntJumpIfFalse(0, 5, 14), 1), // if i<5 fallthrough else jump exit(14)
         (Jump(5), 1),
         (Nop, 1),
@@ -515,11 +510,7 @@ fn disk_cache_awk_div_block_persists() {
 
     // `$x / $y` with x = slot 0, y = slot 1: GetSlot(0); GetSlot(1); AwkDivJit.
     // Always-float division: 7 / 2 == 3.5 (not integer 3).
-    let chunk = build(&[
-        (Op::GetSlot(0), 1),
-        (Op::GetSlot(1), 1),
-        (Op::AwkDivJit, 1),
-    ]);
+    let chunk = build(&[(Op::GetSlot(0), 1), (Op::GetSlot(1), 1), (Op::AwkDivJit, 1)]);
 
     let jit = JitCompiler::new();
     jit.set_jit_cache_dir(Some(dir.clone()));
@@ -605,11 +596,7 @@ fn disk_cache_pow_float_block_persists() {
 
     // `$x ** $y` with x = slot 0, y = slot 1: GetSlot(0); GetSlot(1); PowFloat.
     // Always-float power: 2 ** 10 == 1024.0 (Float, not integer 1024).
-    let chunk = build(&[
-        (Op::GetSlot(0), 1),
-        (Op::GetSlot(1), 1),
-        (Op::PowFloat, 1),
-    ]);
+    let chunk = build(&[(Op::GetSlot(0), 1), (Op::GetSlot(1), 1), (Op::PowFloat, 1)]);
 
     let jit = JitCompiler::new();
     jit.set_jit_cache_dir(Some(dir.clone()));
@@ -1026,11 +1013,7 @@ fn disk_cache_trunc_int_block_persists() {
 
     // `int(sqrt($x))` with x = slot 0: GetSlot(0); SqrtFloat; TruncInt.
     // int(sqrt(16)) == int(4.0) == 4.
-    let chunk = build(&[
-        (Op::GetSlot(0), 1),
-        (Op::SqrtFloat, 1),
-        (Op::TruncInt, 1),
-    ]);
+    let chunk = build(&[(Op::GetSlot(0), 1), (Op::SqrtFloat, 1), (Op::TruncInt, 1)]);
 
     let jit = JitCompiler::new();
     jit.set_jit_cache_dir(Some(dir.clone()));
@@ -1134,7 +1117,11 @@ fn disk_cache_awk_int_block_persists() {
     });
 
     let mut slots = vec![0i64; 1];
-    assert_eq!(jit.try_run_block(&chunk, &mut slots), None, "below threshold");
+    assert_eq!(
+        jit.try_run_block(&chunk, &mut slots),
+        None,
+        "below threshold"
+    );
     let _native = jit
         .try_run_block(&chunk, &mut slots)
         .expect("AwkInt chunk must block-JIT compile");

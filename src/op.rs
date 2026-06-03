@@ -354,7 +354,6 @@ pub enum Op {
     // routes them to the same `dispatch_awk` path as the reserved
     // `ExtendedWide` AWK range, so behavior is identical; these just give
     // frontends a typed, self-documenting alternative to hand-rolled ids.
-
     /// `$i` — read field `i`; index popped from stack, pushes the field value.
     AwkFieldGet,
     /// `$i = v` — assign field `i`. Stack `[value, index]`; rebuilds `$0`/`NF`.

@@ -113,7 +113,11 @@ pub fn register_global_extension(ext: std::sync::Arc<dyn JitExtension>) {
     if reg.iter().any(|e| e.name() == ext.name()) {
         return;
     }
-    tracing::info!(name = ext.name(), ops = ext.op_count(), "JIT extension registered (global)");
+    tracing::info!(
+        name = ext.name(),
+        ops = ext.op_count(),
+        "JIT extension registered (global)"
+    );
     reg.push(ext);
 }
 
@@ -132,6 +136,7 @@ pub(crate) fn global_extension_for(ext_id: u16) -> Option<std::sync::Arc<dyn Jit
 /// helper takes `n_args` `i64` arguments and returns one value (`i64`, or `f64`
 /// when `ret_float`). String/pointer operands are passed as `i64` handles.
 #[derive(Clone)]
+#[allow(dead_code)] // fields read via Cranelift codegen indirection, not direct Rust access
 pub(crate) struct ExtHelper {
     pub name: &'static str,
     pub ptr: usize,
@@ -181,8 +186,18 @@ pub unsafe fn register_jit_helper(
 ) -> u32 {
     let mut reg = ext_helper_registry().write().unwrap();
     if !reg.iter().any(|h| h.name == name) {
-        reg.push(ExtHelper { name, ptr: ptr as usize, n_args, ret_float });
-        tracing::info!(name, n_args, ret_float, "JIT host helper registered (global)");
+        reg.push(ExtHelper {
+            name,
+            ptr: ptr as usize,
+            n_args,
+            ret_float,
+        });
+        tracing::info!(
+            name,
+            n_args,
+            ret_float,
+            "JIT host helper registered (global)"
+        );
     }
     jit_helper_id(name)
 }
@@ -410,12 +425,14 @@ thread_local! {
 /// Libcall invoked by JIT-compiled `AwkDivJit`/`AwkModJit` on a zero divisor.
 /// `kind` is `1` for division, `2` for modulo. Records the trap so the VM can
 /// raise the awk fatal after the block returns.
+#[allow(dead_code)] // referenced by Cranelift via raw function pointer, not Rust call graph
 pub(crate) extern "C" fn fusevm_jit_awk_div_trap(kind: i64) {
     AWK_DIV_TRAP.with(|c| c.set(kind as u8));
 }
 
 /// Read and clear the pending div/mod trap code (`0` = none, `1` = div,
 /// `2` = mod) set by [`fusevm_jit_awk_div_trap`].
+#[allow(dead_code)] // used by JIT trap-drain path conditionally compiled out
 pub(crate) fn take_awk_div_trap() -> u8 {
     AWK_DIV_TRAP.with(|c| c.replace(0))
 }
@@ -1149,7 +1166,11 @@ mod cranelift_jit_impl {
         }
 
         /// Bind the declared `FuncId`s into a function builder's namespace.
-        fn resolve(&self, module: &mut JITModule, func: &mut cranelift_codegen::ir::Function) -> MathRefs {
+        fn resolve(
+            &self,
+            module: &mut JITModule,
+            func: &mut cranelift_codegen::ir::Function,
+        ) -> MathRefs {
             MathRefs {
                 sin: self.sin.map(|id| module.declare_func_in_func(id, func)),
                 cos: self.cos.map(|id| module.declare_func_in_func(id, func)),
@@ -1422,8 +1443,6 @@ mod cranelift_jit_impl {
             self.bcx.ins().select(cond, a, b)
         }
     }
-
-
 
     // ── Cranelift IR emission per op ──
 
@@ -2124,9 +2143,7 @@ mod cranelift_jit_impl {
     pub(crate) mod disk_cache {
         use super::*;
         use cranelift_codegen::binemit::Reloc;
-        use cranelift_codegen::ir::{
-            ExtFuncData, ExternalName, Signature, UserExternalName,
-        };
+        use cranelift_codegen::ir::{ExtFuncData, ExternalName, Signature, UserExternalName};
         use cranelift_codegen::Context;
         use std::hash::{Hash, Hasher};
         use std::path::{Path, PathBuf};
@@ -2261,7 +2278,13 @@ mod cranelift_jit_impl {
             index: u32,
         ) -> Option<u32> {
             const HOST_IDS: [u32; 8] = [
-                H_POW_I64, H_POW_F64, H_FMOD_F64, H_LOGNOT, H_SIN_F64, H_COS_F64, H_EXP_F64,
+                H_POW_I64,
+                H_POW_F64,
+                H_FMOD_F64,
+                H_LOGNOT,
+                H_SIN_F64,
+                H_COS_F64,
+                H_EXP_F64,
                 H_ATAN2_F64,
             ];
             for (slot, id) in helper_ids.iter().zip(HOST_IDS.iter()) {
@@ -2539,12 +2562,24 @@ mod cranelift_jit_impl {
                     })
                 };
 
-                let pow_i64_ref =
-                    Some(import(&mut bcx, H_POW_I64, &[types::I64, types::I64], types::I64));
-                let pow_f64_ref =
-                    Some(import(&mut bcx, H_POW_F64, &[types::F64, types::F64], types::F64));
-                let fmod_f64_ref =
-                    Some(import(&mut bcx, H_FMOD_F64, &[types::F64, types::F64], types::F64));
+                let pow_i64_ref = Some(import(
+                    &mut bcx,
+                    H_POW_I64,
+                    &[types::I64, types::I64],
+                    types::I64,
+                ));
+                let pow_f64_ref = Some(import(
+                    &mut bcx,
+                    H_POW_F64,
+                    &[types::F64, types::F64],
+                    types::F64,
+                ));
+                let fmod_f64_ref = Some(import(
+                    &mut bcx,
+                    H_FMOD_F64,
+                    &[types::F64, types::F64],
+                    types::F64,
+                ));
                 let lognot_ref = Some(import(&mut bcx, H_LOGNOT, &[types::I64], types::I64));
                 let math = MathRefs {
                     sin: Some(import(&mut bcx, H_SIN_F64, &[types::F64], types::F64)),
@@ -2745,9 +2780,8 @@ mod cranelift_jit_impl {
                 return None;
             }
             let (loaded, entry) = map_relocate(blob)?;
-            let run = BlockRun::SlotsI(unsafe {
-                std::mem::transmute::<*const u8, BlockFnSlotsI>(entry)
-            });
+            let run =
+                BlockRun::SlotsI(unsafe { std::mem::transmute::<*const u8, BlockFnSlotsI>(entry) });
             Some(CompiledBlock {
                 backing: BlockBacking::Native(loaded),
                 run,
@@ -2985,12 +3019,18 @@ mod cranelift_jit_impl {
                 // Cap 500 → low-water 400; evict oldest until ≤ 400.
                 let freed = prune(&dir, 500);
                 let remaining = cache_size_bytes(&dir);
-                assert!(remaining <= 400, "expected ≤400 after prune, got {remaining}");
+                assert!(
+                    remaining <= 400,
+                    "expected ≤400 after prune, got {remaining}"
+                );
                 assert_eq!(freed, 1000 - remaining);
 
                 // The newest blob (09) must survive; the oldest (00) must not.
                 assert!(dir.join("09.fjit").exists(), "newest blob should be kept");
-                assert!(!dir.join("00.fjit").exists(), "oldest blob should be evicted");
+                assert!(
+                    !dir.join("00.fjit").exists(),
+                    "oldest blob should be evicted"
+                );
 
                 // max == 0 is unlimited: no-op.
                 assert_eq!(prune(&dir, 0), 0);
@@ -6231,9 +6271,10 @@ impl JitCompiler {
     #[cfg(feature = "jit-disk-cache")]
     pub fn prune_jit_cache(&self) -> u64 {
         match cranelift_jit_impl::disk_cache::cache_dir() {
-            Some(d) => {
-                cranelift_jit_impl::disk_cache::prune(&d, cranelift_jit_impl::disk_cache::max_bytes())
-            }
+            Some(d) => cranelift_jit_impl::disk_cache::prune(
+                &d,
+                cranelift_jit_impl::disk_cache::max_bytes(),
+            ),
             None => 0,
         }
     }
@@ -6838,7 +6879,10 @@ mod awk_div_trap_tests {
         let chunk = b.build();
 
         let jit = JitCompiler::new();
-        assert!(jit.is_block_eligible(&chunk), "{op:?} must be block-eligible");
+        assert!(
+            jit.is_block_eligible(&chunk),
+            "{op:?} must be block-eligible"
+        );
 
         let _ = take_awk_div_trap(); // clear any prior state
         let kinds = [SlotKind::Float, SlotKind::Float];
@@ -6851,15 +6895,31 @@ mod awk_div_trap_tests {
     #[test]
     fn awk_div_jit_traps_on_zero_divisor() {
         // Zero divisor → guarded early-exit fires the trap libcall (code 1 = div).
-        assert_eq!(run_div_mod(Op::AwkDivJit, 7.0, 0.0), 1, "div-by-zero must trap (code 1)");
+        assert_eq!(
+            run_div_mod(Op::AwkDivJit, 7.0, 0.0),
+            1,
+            "div-by-zero must trap (code 1)"
+        );
         // Nonzero divisor → no trap.
-        assert_eq!(run_div_mod(Op::AwkDivJit, 7.0, 2.0), 0, "nonzero div must not trap");
+        assert_eq!(
+            run_div_mod(Op::AwkDivJit, 7.0, 2.0),
+            0,
+            "nonzero div must not trap"
+        );
     }
 
     #[test]
     fn awk_mod_jit_traps_on_zero_divisor() {
         // Zero divisor → guarded early-exit fires the trap libcall (code 2 = mod).
-        assert_eq!(run_div_mod(Op::AwkModJit, 7.0, 0.0), 2, "mod-by-zero must trap (code 2)");
-        assert_eq!(run_div_mod(Op::AwkModJit, 7.0, 3.0), 0, "nonzero mod must not trap");
+        assert_eq!(
+            run_div_mod(Op::AwkModJit, 7.0, 0.0),
+            2,
+            "mod-by-zero must trap (code 2)"
+        );
+        assert_eq!(
+            run_div_mod(Op::AwkModJit, 7.0, 3.0),
+            0,
+            "nonzero mod must not trap"
+        );
     }
 }
