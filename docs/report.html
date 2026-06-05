@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="fusevm — Engineering report. Language-agnostic bytecode VM in Rust: 16,432 production lines, 122,800 test lines, 201 opcodes, 8 fused superinstructions, three-tier Cranelift JIT (linear/block/tracing with side-exits + frame materialization). The shared execution engine behind strykelang, zshrs, and awkrs.">
+  <meta name="description" content="fusevm — Engineering report. Language-agnostic bytecode VM in Rust: 17,304 production lines, 123,238 test lines, 224 opcodes, 8 fused superinstructions, three-tier Cranelift JIT (linear/block/tracing with side-exits + frame materialization). The shared execution engine behind strykelang, zshrs, and awkrs.">
   <title>fusevm &mdash; Engineering Report</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -94,13 +94,13 @@
       <!-- SECTION 1: EXECUTIVE SUMMARY           -->
       <!-- ═══════════════════════════════════════ -->
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>EXECUTIVE SUMMARY</h2>
-      <p class="tutorial-subtitle">fusevm is a language-agnostic bytecode virtual machine written in Rust. Any frontend compiles to the same 201-variant <code>Op</code> enum and gets fused hot-loop dispatch, extension opcode tables, stack+slot execution, and an optional three-tier Cranelift JIT &mdash; for free. Tier&nbsp;1 is a straight-line linear JIT (compile on first call). Tier&nbsp;2 is a block-level JIT over the chunk's CFG (warmup threshold 10). Tier&nbsp;3 is a tracing JIT (loop-header threshold 50) with full side-exit machinery: cross-call inlining (depth &le;&nbsp;4), caller- and callee-frame branches, frame materialization on deopt, abstract-stack reconstruction (Int + Float), per-trace side-exit counters with auto-blacklist, persistent <code>TraceMetadata</code> export/import, and side-trace stitching from hot deopt sites. Auto-dispatched from <code>VM::run()</code> when tracing is enabled &mdash; the interpreter and the JIT are one execution path, not two. <strong>16,432 production Rust lines + 7,488 <code>#[test]</code> functions + 7,266 integration tests + 222 inline tests + 8 fused superinstructions + 29 first-class shell ops + 140 shell builtin IDs</strong> &mdash; one shared engine, three live frontends.</p>
+      <p class="tutorial-subtitle">fusevm is a language-agnostic bytecode virtual machine written in Rust. Any frontend compiles to the same 224-variant <code>Op</code> enum and gets fused hot-loop dispatch, extension opcode tables, stack+slot execution, and an optional three-tier Cranelift JIT &mdash; for free. Tier&nbsp;1 is a straight-line linear JIT (compile on first call). Tier&nbsp;2 is a block-level JIT over the chunk's CFG (warmup threshold 10). Tier&nbsp;3 is a tracing JIT (loop-header threshold 50) with full side-exit machinery: cross-call inlining (depth &le;&nbsp;4), caller- and callee-frame branches, frame materialization on deopt, abstract-stack reconstruction (Int + Float), per-trace side-exit counters with auto-blacklist, persistent <code>TraceMetadata</code> export/import, and side-trace stitching from hot deopt sites. Auto-dispatched from <code>VM::run()</code> when tracing is enabled &mdash; the interpreter and the JIT are one execution path, not two. <strong>17,304 production Rust lines + 7,514 <code>#[test]</code> functions + 7,283 integration tests + 231 inline tests + 8 fused superinstructions + 29 first-class shell ops + 140 shell builtin IDs</strong> &mdash; one shared engine, three live frontends.</p>
 
       <div class="stat-grid">
-        <div class="stat-card"><div class="stat-val">16,432</div><div class="stat-label">Production Rust</div></div>
-        <div class="stat-card"><div class="stat-val">122,800</div><div class="stat-label">Test Lines</div></div>
+        <div class="stat-card"><div class="stat-val">17,304</div><div class="stat-label">Production Rust</div></div>
+        <div class="stat-card"><div class="stat-val">123,238</div><div class="stat-label">Test Lines</div></div>
         <div class="stat-card"><div class="stat-val accent">201</div><div class="stat-label">Opcodes</div></div>
-        <div class="stat-card"><div class="stat-val green">7,488</div><div class="stat-label">#[test] Functions</div></div>
+        <div class="stat-card"><div class="stat-val green">7,514</div><div class="stat-label">#[test] Functions</div></div>
         <div class="stat-card"><div class="stat-val">3</div><div class="stat-label">JIT Tiers</div></div>
         <div class="stat-card"><div class="stat-val">8</div><div class="stat-label">Fused Superinstructions</div></div>
         <div class="stat-card"><div class="stat-val">29</div><div class="stat-label">Shell Ops</div></div>
@@ -113,9 +113,9 @@
         <p style="font-size:11px;color:var(--text-muted);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:4px;font-family:'Orbitron',sans-serif;font-weight:700;">Source Distribution &mdash; 131,654 total lines</p>
         <div class="bar-wrap" style="height:26px;">
           <div class="bar-fill cyan" style="width:7.3%;"></div>
-          <span class="bar-pct" style="font-size:12px;">16,432 production / 122,800 tests / 1,630 benches &middot; 7.3% production</span>
+          <span class="bar-pct" style="font-size:12px;">17,304 production / 123,238 tests / 1,789 benches &middot; 7.3% production</span>
         </div>
-        <p style="font-size:10px;color:var(--text-muted);margin-top:4px;">Production: 10 files under <code>src/</code>. Tests: 52 integration modules under <code>tests/</code> (7,266 <code>#[test]</code> fns) plus 222 inline <code>#[cfg(test)]</code> fns in <code>src/</code>. Benches: 5 Criterion harnesses under <code>benches/</code>. Test-to-production ratio: <strong>7.5&times;</strong> &mdash; every production line is shadowed by &gt;7&times; its weight in test code.</p>
+        <p style="font-size:10px;color:var(--text-muted);margin-top:4px;">Production: 10 files under <code>src/</code>. Tests: 52 integration modules under <code>tests/</code> (7,283 <code>#[test]</code> fns) plus 231 inline <code>#[cfg(test)]</code> fns in <code>src/</code>. Benches: 5 Criterion harnesses under <code>benches/</code>. Test-to-production ratio: <strong>7.5&times;</strong> &mdash; every production line is shadowed by &gt;7&times; its weight in test code.</p>
       </div>
 
       <hr class="section-rule">
@@ -141,7 +141,7 @@
           <tr style="background:rgba(57,255,20,0.05);">
             <td style="color:var(--green);"><strong>fusevm</strong></td>
             <td>Rust</td>
-            <td class="num">16,432 (10 files)</td>
+            <td class="num">17,304 (10 files)</td>
             <td>Cranelift 0.130 (3-tier)</td>
             <td>crate (<code>cargo add fusevm</code>)</td>
             <td><strong>yes &mdash; 3 live</strong></td>
@@ -216,7 +216,7 @@
         </div>
         <div class="feature-card">
           <h4>By Test Surface</h4>
-          <p><code>7,266</code> integration tests in <code>tests/</code> + <code>222</code> inline tests in <code>src/</code> = <strong>7,488 <code>#[test]</code> functions</strong> against 16,432 production lines. <code>tests/jit_trace.rs</code> alone is 1,940 lines pinning the tracing-JIT recorder, deopt path, frame materialization, side-trace stitching, and the persistent-metadata round-trip. A separate differential-fuzz harness (<code>tests/jit_fuzz.rs</code>) generates random valid bytecode and asserts interpreter and tracing-JIT produce identical results on every chunk.</p>
+          <p><code>7,283</code> integration tests in <code>tests/</code> + <code>231</code> inline tests in <code>src/</code> = <strong>7,514 <code>#[test]</code> functions</strong> against 17,304 production lines. <code>tests/jit_trace.rs</code> alone is 1,948 lines pinning the tracing-JIT recorder, deopt path, frame materialization, side-trace stitching, and the persistent-metadata round-trip. A separate differential-fuzz harness (<code>tests/jit_fuzz.rs</code>) generates random valid bytecode and asserts interpreter and tracing-JIT produce identical results on every chunk.</p>
         </div>
         <div class="feature-card">
           <h4>Op Density</h4>
@@ -245,10 +245,10 @@
           <tr><td style="color:var(--accent);">Shell Host Trait</td><td><code>src/host.rs</code></td><td class="num">420</td><td class="num">2.6%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:2.6%"></div></div></td><td><code>trait ShellHost: Send</code> with ~25 methods covering everything the VM can't do itself: glob, tilde / brace / word / parameter expansion, command + process substitution, redirects, here-docs, here-strings, pipelines, subshells, traps, scoped redirection blocks, function call dispatch, <code>exec</code> / <code>exec_bg</code>, regex / glob match. <code>DefaultHost</code> ships sensible no-op defaults so a frontend without shell ambitions doesn't have to implement them.</td></tr>
           <tr><td style="color:var(--accent);">awk Builtins</td><td><code>src/awk_builtins.rs</code></td><td class="num">269</td><td class="num">1.6%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:1.6%"></div></div></td><td>awkrs-specific builtin handlers wired through fusevm's builtin-ID table for the offloaded JIT path.</td></tr>
           <tr><td style="color:var(--accent);">Public API Roof</td><td><code>src/lib.rs</code></td><td class="num">71</td><td class="num">0.4%</td><td><div class="bar-wrap"><div class="bar-fill cyan" style="width:0.4%"></div></div></td><td>Module declarations + the public re-export set: <code>Chunk</code>, <code>ChunkBuilder</code>, <code>DefaultHost</code>, <code>ShellHost</code>, <code>Op</code>, <code>Value</code>, <code>VM</code>, <code>VMPool</code>, <code>VMResult</code>, <code>Frame</code>, plus the JIT surface (<code>JitCompiler</code>, <code>JitExtension</code>, <code>NativeCode</code>, <code>SlotKind</code>, <code>TraceJitConfig</code>, <code>TraceLookup</code>, <code>TraceMetadata</code>, <code>DeoptFrame</code>, <code>DeoptInfo</code>).</td></tr>
-          <tr><td style="color:var(--green);">Tests</td><td><code>tests/*.rs + src/*.rs</code></td><td class="num">122,800</td><td class="num">&mdash;</td><td><div class="bar-wrap"><div class="bar-fill green" style="width:91.5%"></div></div></td><td>52 integration modules (<code>7,266</code> <code>#[test]</code> fns) + inline <code>#[cfg(test)]</code> in <code>src/</code> (<code>222</code> fns) = <strong>7,488 total <code>#[test]</code> functions</strong>. Differential-fuzz harness (<code>tests/jit_fuzz.rs</code>) compares interpreter and tracing JIT op-by-op on randomized chunks. The 122,800-line test corpus is excluded from the 16,432 production total.</td></tr>
-          <tr><td style="color:var(--text-muted);">Benches</td><td><code>benches/*.rs</code></td><td class="num">1,630</td><td class="num">&mdash;</td><td><div class="bar-wrap"><div class="bar-fill yellow" style="width:1.2%"></div></div></td><td>5 Criterion harnesses: <code>vm_bench</code> (560), <code>classic</code> (471), <code>jit_vs_interp</code> (247, requires <code>jit</code>), <code>jit_trace</code> (216, requires <code>jit</code>), <code>jit_crossover</code> (136, requires <code>jit</code>). HTML reports via Criterion's built-in renderer.</td></tr>
+          <tr><td style="color:var(--green);">Tests</td><td><code>tests/*.rs + src/*.rs</code></td><td class="num">123,238</td><td class="num">&mdash;</td><td><div class="bar-wrap"><div class="bar-fill green" style="width:91.5%"></div></div></td><td>52 integration modules (<code>7,283</code> <code>#[test]</code> fns) + inline <code>#[cfg(test)]</code> in <code>src/</code> (<code>231</code> fns) = <strong>7,514 total <code>#[test]</code> functions</strong>. Differential-fuzz harness (<code>tests/jit_fuzz.rs</code>) compares interpreter and tracing JIT op-by-op on randomized chunks. The 123,238-line test corpus is excluded from the 17,304 production total.</td></tr>
+          <tr><td style="color:var(--text-muted);">Benches</td><td><code>benches/*.rs</code></td><td class="num">1,789</td><td class="num">&mdash;</td><td><div class="bar-wrap"><div class="bar-fill yellow" style="width:1.2%"></div></div></td><td>5 Criterion harnesses: <code>vm_bench</code> (560), <code>classic</code> (471), <code>jit_vs_interp</code> (247, requires <code>jit</code>), <code>jit_trace</code> (216, requires <code>jit</code>), <code>jit_crossover</code> (136, requires <code>jit</code>). HTML reports via Criterion's built-in renderer.</td></tr>
         </tbody>
-        <tfoot><tr class="total-row"><td colspan="2" style="font-family:'Orbitron',sans-serif;font-size:10px;letter-spacing:1px;">PRODUCTION TOTAL</td><td class="num">16,432</td><td class="num">100%</td><td></td><td>Tests and benches counted separately (122,800 + 1,630 lines, 132,715 total).</td></tr></tfoot>
+        <tfoot><tr class="total-row"><td colspan="2" style="font-family:'Orbitron',sans-serif;font-size:10px;letter-spacing:1px;">PRODUCTION TOTAL</td><td class="num">17,304</td><td class="num">100%</td><td></td><td>Tests and benches counted separately (123,238 + 1,789 lines, 132,715 total).</td></tr></tfoot>
       </table>
 
       <hr class="section-rule">
@@ -257,12 +257,12 @@
       <!-- SECTION 3: TOP TEST FILES                -->
       <!-- ═══════════════════════════════════════ -->
       <h2 class="tutorial-title"><span class="step-hash">$</span>TOP TEST MODULES</h2>
-      <p class="tutorial-subtitle">The integration-test corpus partitioned by file. JIT-tracing tests are the single biggest module (1,940 lines, 56 <code>#[test]</code> fns); the rest splits between VM behavior, host routing, shell-op dispatch, and op-by-op exhaustive coverage. Every fused superinstruction has dedicated coverage in <code>fused_ops.rs</code> / <code>slot_and_fused_ops.rs</code>.</p>
+      <p class="tutorial-subtitle">The integration-test corpus partitioned by file. JIT-tracing tests are the single biggest module (1,948 lines, 56 <code>#[test]</code> fns); the rest splits between VM behavior, host routing, shell-op dispatch, and op-by-op exhaustive coverage. Every fused superinstruction has dedicated coverage in <code>fused_ops.rs</code> / <code>slot_and_fused_ops.rs</code>.</p>
 
       <table class="file-table">
         <thead><tr><th>File</th><th class="num">Lines</th><th class="num">#[test]</th><th>Role</th></tr></thead>
         <tbody>
-          <tr><td>tests/jit_trace.rs</td><td class="num">1,940</td><td class="num">56</td><td>Tracing JIT: header detection, recorder, deopt, frame materialization, abstract-stack reconstruction, side-trace stitching, <code>TraceMetadata</code> round-trip</td></tr>
+          <tr><td>tests/jit_trace.rs</td><td class="num">1,948</td><td class="num">56</td><td>Tracing JIT: header detection, recorder, deopt, frame materialization, abstract-stack reconstruction, side-trace stitching, <code>TraceMetadata</code> round-trip</td></tr>
           <tr><td>tests/vm_integration.rs</td><td class="num">1,050</td><td class="num">65</td><td>End-to-end programs: arithmetic, control flow, function calls, scope, higher-order blocks (<code>MapBlock</code> / <code>GrepBlock</code> / <code>SortBlock</code> / <code>ForEachBlock</code>)</td></tr>
           <tr><td>tests/host_ext_and_more_ops.rs</td><td class="num">907</td><td class="num">34</td><td>Host trait method coverage, extension dispatch (narrow + wide), default-host fallthroughs</td></tr>
           <tr><td>tests/edge_cases.rs</td><td class="num">864</td><td class="num">52</td><td>Edge cases: empty stack, type coercion at op boundaries, undef propagation, divide-by-zero, out-of-range index, jump-target validation</td></tr>
@@ -278,7 +278,7 @@
           <tr><td>tests/collections_and_concat.rs</td><td class="num">543</td><td class="num">41</td><td>Array / hash construction (<code>MakeArray</code> / <code>MakeHash</code>), <code>Range</code> / <code>RangeStep</code>, <code>Concat</code> / <code>StringRepeat</code></td></tr>
           <tr><td>tests/jit_fuzz.rs</td><td class="num">&mdash;</td><td class="num">diff</td><td>Differential fuzz: random valid chunks compared interpreter vs tracing JIT, asserts identical results. Gated behind <code>--features jit</code>. Catches latent recorder / deopt / IR bugs that curated tests miss.</td></tr>
         </tbody>
-        <tfoot><tr class="total-row"><td>TOP 15 MODULES SUBTOTAL</td><td class="num">11,012</td><td class="num">&mdash;</td><td>9.2% of 122,800-line test corpus</td></tr></tfoot>
+        <tfoot><tr class="total-row"><td>TOP 15 MODULES SUBTOTAL</td><td class="num">11,012</td><td class="num">&mdash;</td><td>9.2% of 123,238-line test corpus</td></tr></tfoot>
       </table>
 
       <hr class="section-rule">
@@ -509,7 +509,7 @@
           <tr><td>benches/jit_trace.rs</td><td class="num">216</td><td><code>jit</code></td><td>Tracing-specific: hot-loop trace latency, deopt cost, side-trace stitching overhead, <code>TraceMetadata</code> import speedup</td></tr>
           <tr><td>benches/jit_crossover.rs</td><td class="num">136</td><td><code>jit</code></td><td>Crossover: the chunk size / hot-count where JIT compile + execution starts to beat pure interpretation. Calibrates the <code>trace_threshold</code> default.</td></tr>
         </tbody>
-        <tfoot><tr class="total-row"><td>TOTAL</td><td class="num">1,630</td><td>&mdash;</td><td>Run with <code>cargo bench</code> (interpreter benches) or <code>cargo bench --features jit</code> (all)</td></tr></tfoot>
+        <tfoot><tr class="total-row"><td>TOTAL</td><td class="num">1,789</td><td>&mdash;</td><td>Run with <code>cargo bench</code> (interpreter benches) or <code>cargo bench --features jit</code> (all)</td></tr></tfoot>
       </table>
 
       <hr class="section-rule">
@@ -583,7 +583,7 @@
     </main>
 
     <footer style="text-align:center;padding:2rem;font-size:10px;color:var(--text-muted);font-family:'Orbitron',sans-serif;letter-spacing:2px;">
-      FUSEVM ENGINEERING REPORT &middot; 16,432 PRODUCTION RUST &middot; 122,800 TEST LINES &middot; 7,488 #[TEST] FUNCTIONS &middot; 201 OPCODES &middot; 8 FUSED SUPERINSTRUCTIONS &middot; 29 SHELL OPS &middot; 3 JIT TIERS &middot; CRANELIFT 0.130 &middot; STRYKELANG / ZSHRS / AWKRS &middot; MENKETECHNOLOGIES
+      FUSEVM ENGINEERING REPORT &middot; 17,304 PRODUCTION RUST &middot; 123,238 TEST LINES &middot; 7,514 #[TEST] FUNCTIONS &middot; 224 OPCODES &middot; 8 FUSED SUPERINSTRUCTIONS &middot; 29 SHELL OPS &middot; 3 JIT TIERS &middot; CRANELIFT 0.130 &middot; STRYKELANG / ZSHRS / AWKRS &middot; MENKETECHNOLOGIES
     </footer>
   </div>
 
