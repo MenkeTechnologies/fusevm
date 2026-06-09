@@ -20,7 +20,7 @@
 
 ## `[PATENT PENDING]`
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 189 opcodes across 21 sections, 8 fused superinstructions, 29 first-class shell ops, 55 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 224 opcodes across 21 sections, 11 fused superinstructions, 29 first-class shell ops, 87 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -161,7 +161,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-189 opcodes across 20 sections in `src/op.rs`:
+224 opcodes across 21 sections in `src/op.rs`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -177,10 +177,10 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 | I/O | 3 | `Print`, `PrintLn`, `ReadLine` |
 | Collections | 2 | `Range`, `RangeStep` |
 | Higher-Order | 5 | `MapBlock`, `GrepBlock`, `SortBlock`, `ForEachBlock` |
-| **Fused** | **8** | `AccumSumLoop`, `SlotIncLtIntJumpBack`, `ConcatConstLoop` |
+| **Fused** | **11** | `AccumSumLoop`, `SlotIncLtIntJumpBack`, `ConcatConstLoop`, `PreIncSlot`, `PostIncSlot`, `PreDecSlot`, `PostDecSlot` |
 | Builtins | 1 | `CallBuiltin(id, argc)` (140 IDs in `shell_builtins.rs`) |
 | Shell Ops | 29 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile`, `RegexMatch` |
-| AWK Ops | 55 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkDivJit`, `AwkModJit`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
+| AWK Ops | 87 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkDivJit`, `AwkModJit`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
 ---
