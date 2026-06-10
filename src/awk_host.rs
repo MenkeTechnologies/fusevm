@@ -542,11 +542,27 @@ pub fn awk_strtonum(s: &str) -> f64 {
 
 /// Longest leading substring of `s` that parses as `f64` under gawk's numeric
 /// coercion rule. Ported from awkrs `runtime::longest_f64_prefix`.
+///
+/// Pre-fix this iterated byte indices via `(1..=s.len()).rev()` and sliced
+/// `&s[..end]`. If `end` landed in the middle of a multi-byte UTF-8 codepoint
+/// the slice panicked. Now we iterate CHAR boundaries via `char_indices`, so
+/// every slice endpoint is valid UTF-8.
 fn awk_longest_f64_prefix(s: &str) -> Option<&str> {
     if s.is_empty() {
         return None;
     }
-    for end in (1..=s.len()).rev() {
+    // Collect char boundary byte indices in descending order, then evaluate
+    // each candidate prefix. The longest match wins. `char_indices().next_back()`
+    // gives us the END of the last char; we also need s.len() as the final
+    // boundary (one past the last byte).
+    let mut bounds: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    bounds.push(s.len());
+    // Skip index 0 (empty prefix never matches) and iterate in reverse so
+    // longer prefixes win.
+    for &end in bounds.iter().rev() {
+        if end == 0 {
+            continue;
+        }
         let p = &s[..end];
         if !awk_numeric_prefix_acceptable(p, end < s.len() && awk_next_byte_is_alnum(s, end)) {
             continue;

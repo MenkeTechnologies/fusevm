@@ -288,3 +288,27 @@ fn awk_intdiv0_float_b_that_truncates_to_zero_still_safe() {
         "b=0.5 truncates to 0 → safe-zero branch"
     );
 }
+
+/// `awk_strtonum` previously panicked when the trailing portion of the input
+/// landed on a non-char-boundary byte. `awk_longest_f64_prefix` iterated
+/// byte indices via `(1..=s.len()).rev()` and sliced `&s[..end]`, which
+/// panics inside a multi-byte UTF-8 codepoint. Inputs like `"42€"` (€ = 3
+/// bytes), `"1e2🦀"` (🦀 = 4 bytes), or `"3.14αβγ"` triggered it.
+#[test]
+fn awk_strtonum_no_panic_on_trailing_multi_byte_utf8() {
+    // 2-byte: NBSP
+    let _ = awk_strtonum("42\u{00A0}");
+    // 3-byte: euro sign
+    let _ = awk_strtonum("42€");
+    // 3-byte: CJK ideograph
+    let _ = awk_strtonum("3.14中文");
+    // 4-byte: crab emoji
+    let _ = awk_strtonum("1e2🦀");
+    // Lone surrogate-like multi-byte at boundary
+    let _ = awk_strtonum("0xFF日本語");
+    // Numeric prefix followed immediately by multi-byte
+    assert_eq!(awk_strtonum("42€"), 42.0);
+    #[allow(clippy::approx_constant)]
+    let pi_approx: f64 = 3.14;
+    assert_eq!(awk_strtonum("3.14中文"), pi_approx);
+}
