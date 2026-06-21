@@ -128,7 +128,7 @@
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.14.1 · 224 opcodes · 8 fused superinstructions · 29 shell ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · 17,320 lines Rust · 7,561 #[test] fns</p>
+          <p class="docs-build-line">fusevm v0.14.1 · 224 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · 17,320 lines Rust · 7,561 #[test] fns</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -159,9 +159,10 @@
 
         <div class="stat-grid">
           <div><div class="stat">224</div><div class="stat-label">opcodes</div></div>
-          <div><div class="stat">20</div><div class="stat-label">op sections</div></div>
-          <div><div class="stat">8</div><div class="stat-label">fused superinstructions</div></div>
+          <div><div class="stat">17</div><div class="stat-label">op sections</div></div>
+          <div><div class="stat">11</div><div class="stat-label">fused superinstructions</div></div>
           <div><div class="stat">29</div><div class="stat-label">shell ops</div></div>
+          <div><div class="stat">61</div><div class="stat-label">AWK ops</div></div>
           <div><div class="stat">17,320</div><div class="stat-label">production lines</div></div>
           <!-- production lines derived from: find src -name '*.rs' | xargs wc -l | tail -1 -->
           <div><div class="stat">7,561</div><div class="stat-label">#[test] fns</div></div>
@@ -233,6 +234,20 @@
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
         <h2><span class="section-num">[0x01]</span> QUICK START</h2>
+
+        <div class="code-block"><span class="comment"># interpreter only</span>
+cargo add fusevm
+<span class="comment"># with Cranelift JIT (linear, block, tracing tiers)</span>
+cargo add fusevm --features jit
+<span class="comment"># JIT + persistent on-disk native-code cache</span>
+cargo add fusevm --features jit-disk-cache</div>
+
+        <table class="arch-table">
+          <tr><th>Feature</th><th>Effect</th></tr>
+          <tr><td><code>default</code></td><td>None &mdash; pure-Rust interpreter, runtime deps <code>serde</code> / <code>tracing</code> / <code>glob</code> / <code>chrono</code></td></tr>
+          <tr><td><code>jit</code></td><td>Cranelift-backed native JIT (linear, block, and tracing tiers). Pulls in Cranelift 0.130</td></tr>
+          <tr><td><code>jit-disk-cache</code></td><td>Persists compiled native code to <code>~/.cache/fusevm-jit</code> so codegen is skipped across process restarts. Implies <code>jit</code>; on by default once enabled. Pulls in <code>libc</code> for executable memory mapping</td></tr>
+        </table>
 
         <div class="code-block"><span class="keyword">use</span> fusevm::{Op, ChunkBuilder, VM, VMResult, Value};
 
@@ -318,7 +333,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         <h2><span class="section-num">[0x03]</span> OP CATEGORIES</h2>
 
         <p style="font-size: 14px; color: var(--text); margin-bottom: 0.8rem;">
-        224 opcodes across 20 sections in <code>src/op.rs</code>. Every op is &le;24 bytes for cache-friendly dispatch.</p>
+        224 opcodes across 17 sections in <code>src/op.rs</code>. Every op is &le;24 bytes for cache-friendly dispatch.</p>
 
         <div class="cat-grid">
           <div class="cat-card">
@@ -381,6 +396,31 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
             <p>2 ops &mdash; range generation</p>
             <p><code>Range</code> <code>RangeStep</code></p>
           </div>
+          <div class="cat-card">
+            <h4>Fused</h4>
+            <p>11 ops &mdash; hot-loop superinstructions (see [0x02] Fused Superinstructions)</p>
+            <p><code>AccumSumLoop</code> <code>SlotIncLtIntJumpBack</code> <code>ConcatConstLoop</code> <code>PushIntRangeLoop</code> <code>PreIncSlot</code> <code>PostIncSlot</code> <code>PreDecSlot</code> <code>PostDecSlot</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Builtins</h4>
+            <p>1 op &mdash; <code>CallBuiltin(id, argc)</code> dispatches 140 builtin IDs in <code>shell_builtins.rs</code></p>
+            <p><code>CallBuiltin</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Shell Ops</h4>
+            <p>29 ops &mdash; first-class process control (see [0x04])</p>
+            <p><code>Exec</code> <code>PipelineBegin</code> <code>Redirect</code> <code>Glob</code> <code>TestFile</code> <code>CmdSubst</code> <code>RegexMatch</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>AWK Ops</h4>
+            <p>61 ops &mdash; first-class <code>Op::Awk*</code> variants (see [0x05])</p>
+            <p><code>AwkFieldGet</code> <code>AwkPrint</code> <code>AwkStrtonum</code> <code>AwkDivJit</code> <code>AwkModJit</code> <code>AwkGensub</code> <code>AwkOrd</code> <code>AwkChr</code> <code>AwkMkbool</code> <code>AwkIntdiv</code></p>
+          </div>
+          <div class="cat-card">
+            <h4>Extension</h4>
+            <p>2 ops &mdash; frontend-specific dispatch (see [0x06])</p>
+            <p><code>Extended(u16, u8)</code> <code>ExtendedWide(u16, usize)</code></p>
+          </div>
         </div>
       </section>
 
@@ -410,11 +450,97 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
           <tr><td><code>ExpandParam(mod)</code></td><td>18 parameter expansion modifiers: <code>${:-}</code> <code>${:=}</code> <code>${:?}</code> <code>${:+}</code> <code>${#}</code> <code>${/}</code> <code>${^^}</code> etc.</td></tr>
           <tr><td><code>WordSplit</code> / <code>BraceExpand</code> / <code>TildeExpand</code></td><td>IFS word split, brace expansion, tilde expansion</td></tr>
         </table>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Shell Host trait</h3>
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Shell-specific runtime ops (<code>Glob</code>, <code>TildeExpand</code>, <code>BraceExpand</code>, <code>WordSplit</code>,
+        <code>ExpandParam</code>, <code>CmdSubst</code>, <code>ProcessSubIn</code>/<code>Out</code>, <code>Redirect</code>,
+        <code>HereDoc</code>, <code>HereString</code>, <code>PipelineBegin</code>/<code>Stage</code>/<code>End</code>,
+        <code>SubshellBegin</code>/<code>End</code>, <code>TrapSet</code>/<code>TrapCheck</code>,
+        <code>WithRedirectsBegin</code>/<code>End</code>, <code>CallFunction</code>, <code>StrMatch</code>, <code>RegexMatch</code>)
+        dispatch through the <code>ShellHost</code> trait. The frontend (zshrs) provides a real implementation;
+        without one the VM uses minimal stubs that keep stack discipline correct. Sub-execution (command
+        substitution, process substitution, trap handlers) is delivered to the host as <code>&amp;Chunk</code>
+        references taken from the parent's <code>sub_chunks</code> table &mdash; build them with
+        <code>ChunkBuilder::add_sub_chunk(sub) -&gt; u16</code> and reference by index in
+        <code>Op::CmdSubst(idx)</code>, <code>Op::ProcessSubIn(idx)</code>, <code>Op::ProcessSubOut(idx)</code>,
+        <code>Op::TrapSet(idx)</code>.</p>
+
+        <div class="code-block"><span class="keyword">use</span> fusevm::{ShellHost, VM, Chunk, Value};
+
+<span class="keyword">struct</span> MyHost;
+<span class="keyword">impl</span> ShellHost <span class="keyword">for</span> MyHost {
+    <span class="keyword">fn</span> glob(&amp;<span class="keyword">mut</span> self, pattern: &amp;str, _recursive: bool) -&gt; Vec&lt;String&gt; { vec![] }
+    <span class="keyword">fn</span> tilde_expand(&amp;<span class="keyword">mut</span> self, s: &amp;str) -&gt; String { s.into() }
+    <span class="keyword">fn</span> cmd_subst(&amp;<span class="keyword">mut</span> self, sub: &amp;Chunk) -&gt; String { String::new() }
+    <span class="comment">// … other methods have default impls</span>
+}
+
+<span class="keyword">let</span> <span class="keyword">mut</span> vm = VM::new(chunk);
+vm.set_shell_host(Box::new(MyHost));</div>
       </section>
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
-        <h2><span class="section-num">[0x05]</span> EXTENSION MECHANISM</h2>
+        <h2><span class="section-num">[0x05]</span> AWK OPS</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        61 first-class <code>Op::Awk*</code> variants dispatch through the <code>AwkHost</code> trait. AWK's data
+        model (numeric-string duality, <code>CONVFMT</code>/<code>OFMT</code> coercion,
+        <code>$0</code>/<code>$n</code>/<code>NF</code> field coupling, <code>SUBSEP</code> arrays, regex,
+        <code>getline</code>/<code>printf</code> I/O) lives in the frontend (awkrs), so most AWK ops require a
+        registered host; without one they stay inert but stack-balanced.</p>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Twenty-nine builtins are the exception &mdash; they execute natively <span class="highlight">even with no
+        host registered</span>. Most are pure on <code>fusevm::Value</code>; <code>rand</code>/<code>srand</code> run
+        against a VM-owned PRNG seed, and <code>strftime</code>/<code>mktime</code> read the system timezone but
+        need no AWK runtime state.</p>
+
+        <table class="arch-table">
+          <tr><th>Group</th><th>Host-free builtins</th></tr>
+          <tr><td>Strings</td><td><code>substr</code> <code>index</code> <code>tolower</code> <code>toupper</code> scalar <code>length(s)</code></td></tr>
+          <tr><td>Characters (gawk)</td><td><code>ord</code> (first char &rarr; codepoint), <code>chr</code> (codepoint &rarr; char)</td></tr>
+          <tr><td>Math</td><td><code>int</code> <code>sqrt</code> <code>sin</code> <code>cos</code> <code>exp</code> <code>log</code> <code>atan2</code> <code>intdiv</code> <code>intdiv0</code> <code>mkbool</code></td></tr>
+          <tr><td>Bitwise (gawk)</td><td><code>and</code> <code>or</code> <code>xor</code> <code>compl</code> <code>lshift</code> <code>rshift</code></td></tr>
+          <tr><td>Conversion (gawk)</td><td><code>strtonum</code> (<code>0x…</code> hex, <code>0…</code> octal, else longest decimal/float prefix)</td></tr>
+          <tr><td>Time (gawk)</td><td><code>systime</code> <code>strftime</code> <code>mktime</code> (<code>chrono</code>-backed; local-tz + UTC)</td></tr>
+          <tr><td>PRNG (POSIX/gawk)</td><td><code>rand</code> <code>srand</code> (glibc LCG over a VM-owned seed, deterministic without a host)</td></tr>
+        </table>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        <code>AwkDiv</code> / <code>AwkMod</code> are POSIX awk float divide/modulo that raise a fatal
+        <em>"division by zero attempted"</em> error on a zero divisor (vs the shell-arithmetic
+        <code>Op::Div</code>/<code>Op::Mod</code>, which yield <code>Undef</code>/<code>0</code>); they are
+        interpreter-only. <code>AwkDivJit</code> / <code>AwkModJit</code> are block-JIT-eligible variants with
+        byte-identical interpreter semantics: the block JIT emits a guarded early-exit (compare divisor to
+        <code>0.0</code>, call the <code>fusevm_jit_awk_div_trap</code> libcall on equality and return a sentinel,
+        else <code>fdiv</code>/<code>fmod</code>). Because the trap libcall is not a registered host-helper id,
+        these chunks skip on-disk cache persistence (in-process JIT only) &mdash; frontends that emit only
+        <code>Op::Div</code>/<code>Op::Mod</code> (zshrs/stryke) get byte-identical native code.</p>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        AWK control flow has no <code>Value</code> representation (<code>next</code>/<code>nextfile</code>/<code>exit</code>
+        are statements, not expressions). <code>Op::AwkSignal(code)</code> carries it host-free: it halts the current
+        chunk and stashes <code>code</code> in the VM, which the frontend driver reads via <code>VM::awk_signal()</code>
+        after <code>run()</code>. zshrs/stryke never emit it, so <code>awk_signal()</code> stays <code>None</code> for
+        them and <code>Halted</code> is byte-identical.</p>
+
+        <div class="code-block"><span class="keyword">use</span> fusevm::{VM, ChunkBuilder, Op, Value};
+
+<span class="keyword">let</span> <span class="keyword">mut</span> b = ChunkBuilder::new();
+<span class="keyword">let</span> s = b.add_constant(Value::str(<span class="string">"hello"</span>));
+b.emit(Op::LoadConst(s), <span class="var">1</span>);
+b.emit(Op::LoadInt(<span class="var">2</span>), <span class="var">1</span>);
+b.emit(Op::LoadInt(<span class="var">3</span>), <span class="var">1</span>);
+b.emit(Op::AwkSubstr(<span class="var">3</span>), <span class="var">1</span>);          <span class="comment">// substr("hello", 2, 3)</span>
+<span class="keyword">let</span> <span class="keyword">mut</span> vm = VM::new(b.build());      <span class="comment">// no set_awk_host needed</span>
+<span class="comment">// vm.run() → "ell"</span></div>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x06]</span> EXTENSION MECHANISM</h2>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         Language-specific opcodes use <code>Extended(u16, u8)</code> which dispatches through a handler
@@ -455,7 +581,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
-        <h2><span class="section-num">[0x06]</span> JIT COMPILATION</h2>
+        <h2><span class="section-num">[0x07]</span> JIT COMPILATION</h2>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         The <code>JitCompiler</code> runs three tiers in increasing order of optimization power and
@@ -604,7 +730,82 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
-        <h2><span class="section-num">[0x07]</span> VALUE REPRESENTATION</h2>
+        <h2><span class="section-num">[0x08]</span> VMPOOL</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        <code>VMPool</code> recycles <code>VM</code> instances so callers running many short-lived chunks
+        (REPL, eval loops, batch evaluation) can skip the per-call <code>VM::new()</code> cost.
+        <code>acquire</code> pops a recycled VM and resets its state via <code>VM::reset</code>;
+        <code>release</code> returns it for reuse.</p>
+
+        <div class="code-block"><span class="keyword">use</span> fusevm::{ChunkBuilder, Op, VMPool, VMResult, Value};
+
+<span class="keyword">let</span> <span class="keyword">mut</span> pool = VMPool::new();
+<span class="keyword">for</span> _ <span class="keyword">in</span> 0..1000 {
+    <span class="keyword">let</span> <span class="keyword">mut</span> b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(<span class="var">40</span>), <span class="var">1</span>);
+    b.emit(Op::LoadInt(<span class="var">2</span>), <span class="var">1</span>);
+    b.emit(Op::Add, <span class="var">1</span>);
+    pool.with(b.build(), |vm| {
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Int(<span class="var">42</span>))));
+    });
+}</div>
+
+        <p style="font-size: 13px; line-height: 1.7; color: var(--text-dim);">
+        The pool wins for chunks where <code>VM::new()</code> cost dominates the run &mdash; large globals/name
+        pools (&gt;16 entries, where reset's resize amortizes), many slots (frame Vec capacity is preserved
+        across reuse), or multi-chunk evaluation loops with non-trivial chunk shapes. For uniform tight loops
+        on tiny chunks the pool is actually <em>slower</em> (<code>reset</code> does more bookkeeping than
+        <code>VM::new</code> skips), so the API is shipped to let callers choose. All three sibling frontends
+        (strykelang, awkrs, zshrs) drive <code>fusevm::VM</code> through bridge layers backed by a frontend-owned
+        <code>VMPool</code>.</p>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x09]</span> BENCHMARKS</h2>
+
+        <p style="font-size: 13px; line-height: 1.7; color: var(--text-dim);">
+        criterion on Apple M-series. <code>cargo bench</code> for all; <code>cargo bench --features jit --bench
+        jit_vs_interp</code> for JIT comparisons. HTML report at <code>target/criterion/report/index.html</code>.
+        Microbenchmarks measure tight loops in isolation &mdash; best case for any JIT; real-world script
+        speedup is Amdahl-bounded by host calls (fork/exec, I/O, glob) which no JIT tier touches.</p>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1rem;">Classic algorithms</h3>
+        <table class="arch-table">
+          <tr><th>Benchmark</th><th>Time</th><th>Ops/sec</th></tr>
+          <tr><td><code>fib_iterative(35)</code></td><td>2.7 µs</td><td>374k</td></tr>
+          <tr><td><code>fib_recursive(20)</code> &mdash; 21,891 calls</td><td>1.28 ms</td><td>783</td></tr>
+          <tr><td><code>ackermann(3,4)</code> &mdash; 10,547 calls</td><td>774 µs</td><td>1.3k</td></tr>
+          <tr><td><code>sum(1..1M)</code> fused <code>AccumSumLoop</code></td><td>142 ns</td><td>7.0M</td></tr>
+          <tr><td><code>sum(1..1M)</code> unfused loop ops</td><td>31.0 ms</td><td>32</td></tr>
+          <tr><td><code>nested_loop(100×100)</code></td><td>352 µs</td><td>2.8k</td></tr>
+          <tr><td><code>dispatch_nop_1M</code> &mdash; raw dispatch overhead</td><td>819 µs</td><td><span class="highlight">1.22 Gops/sec</span></td></tr>
+          <tr><td><code>string_build(10k)</code> via <code>ConcatConstLoop</code></td><td>11.9 µs</td><td>84k</td></tr>
+        </table>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Interpreter vs Cranelift JIT vs native Rust</h3>
+        <p style="font-size: 13px; line-height: 1.7; color: var(--text-dim);">
+        Slot-based inputs prevent constant folding &mdash; apples-to-apples. The linear JIT is consistently
+        ~1.8x slower than LLVM <code>-O3</code> on real computation and 13&ndash;51x faster than the interpreter.</p>
+        <table class="arch-table">
+          <tr><th>Workload</th><th>Interpreter</th><th>JIT (cached)</th><th>Native Rust</th><th>JIT vs interp</th></tr>
+          <tr><td><code>slot_mixed × 100</code></td><td>2.2 µs</td><td><span class="highlight">75 ns</span></td><td>42 ns</td><td><span class="highlight">29x</span></td></tr>
+          <tr><td><code>slot_bitwise × 200</code></td><td>6.6 µs</td><td><span class="highlight">130 ns</span></td><td>74 ns</td><td><span class="highlight">51x</span></td></tr>
+          <tr><td><code>slot_float × 200</code></td><td>3.1 µs</td><td><span class="highlight">246 ns</span></td><td>137 ns</td><td><span class="highlight">13x</span></td></tr>
+        </table>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Block JIT &mdash; loops and branches</h3>
+        <table class="arch-table">
+          <tr><th>Benchmark</th><th>Interpreter</th><th>Block JIT</th><th>Speedup</th></tr>
+          <tr><td><code>sum(1..1M)</code> unfused loop</td><td>30.0 ms</td><td><span class="highlight">315 µs</span></td><td><span class="highlight">95x</span></td></tr>
+          <tr><td><code>nested_loop(100×100)</code></td><td>340 µs</td><td><span class="highlight">9.5 µs</span></td><td><span class="highlight">36x</span></td></tr>
+        </table>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x0A]</span> VALUE REPRESENTATION</h2>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         <code>Value</code> is a tagged enum with fast-path immediates for numbers and booleans,
@@ -629,7 +830,7 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
-        <h2><span class="section-num">[0x08]</span> CHUNK STRUCTURE</h2>
+        <h2><span class="section-num">[0x0B]</span> CHUNK STRUCTURE</h2>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         A <code>Chunk</code> is the unit of compiled bytecodes. It contains everything the VM needs

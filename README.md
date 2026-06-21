@@ -20,7 +20,7 @@
 
 ## `[PATENT PENDING]`
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 224 opcodes across 17 sections, 11 fused superinstructions, 29 first-class shell ops, 87 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 224 opcodes across 17 sections, 11 fused superinstructions, 29 first-class shell ops, 61 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -180,7 +180,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 | **Fused** | **11** | `AccumSumLoop`, `SlotIncLtIntJumpBack`, `ConcatConstLoop`, `PreIncSlot`, `PostIncSlot`, `PreDecSlot`, `PostDecSlot` |
 | Builtins | 1 | `CallBuiltin(id, argc)` (140 IDs in `shell_builtins.rs`) |
 | Shell Ops | 29 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile`, `RegexMatch` |
-| AWK Ops | 87 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkDivJit`, `AwkModJit`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
+| AWK Ops | 61 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkDivJit`, `AwkModJit`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
 ---
