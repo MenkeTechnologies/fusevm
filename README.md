@@ -20,7 +20,7 @@
 
 ## `[PATENT PENDING]`
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 224 opcodes across 21 sections, 11 fused superinstructions, 29 first-class shell ops, 87 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 224 opcodes across 17 sections, 11 fused superinstructions, 29 first-class shell ops, 87 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -161,7 +161,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-224 opcodes across 21 sections in `src/op.rs`:
+224 opcodes across 17 sections in `src/op.rs`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
