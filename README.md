@@ -41,8 +41,9 @@ cargo add fusevm                  # interpreter only
 - [\[0x05\] Op Categories](#0x05-op-categories)
 - [\[0x06\] Extension Mechanism](#0x06-extension-mechanism)
 - [\[0x07\] JIT Compilation](#0x07-jit-compilation)
-- [\[0x08\] Value Representation](#0x08-value-representation)
-- [\[0x09\] Benchmarks](#0x09-benchmarks)
+- [\[0x08\] Ahead-of-Time Compilation](#0x08-ahead-of-time-compilation)
+- [\[0x09\] Value Representation](#0x09-value-representation)
+- [\[0x0A\] Benchmarks](#0x0a-benchmarks)
 - [\[0xFF\] License](#0xff-license)
 
 ---
@@ -353,7 +354,32 @@ Cache files are tier-tagged (`.lin.` / `.blk.` / `.trc.`) and keyed by the chunk
 
 ---
 
-## [0x08] VALUE REPRESENTATION
+## [0x08] AHEAD-OF-TIME COMPILATION
+
+The `aot` feature compiles a whole `Chunk` to a native object file via
+Cranelift's `ObjectModule`, then links it against the fusevm runtime into a
+standalone executable — with no interpreter dispatch loop at run time.
+
+The closed-world compiler lowers every op to native code: one basic block per
+op that calls the shared per-op runtime step (`VM::exec_op` — the same code the
+interpreter uses, so semantics never fork) and branches on the returned next
+instruction index. Control flow — jumps, the `JumpIf*` family, and intra-chunk
+calls/returns — is native; op semantics live in the linked-in runtime.
+Specializing hot ops to inline IR is layered on top of this foundation.
+
+| API | Purpose |
+|---|---|
+| `aot::compile_object(&chunk, path)` | Emit a relocatable `.o` exporting `fusevm_aot_entry` plus the serialized chunk (`fusevm_aot_chunk_blob` / `…_len`). |
+| `aot::run_chunk_native(&chunk, register)` | Compile in-process via Cranelift and run it — validates codegen end to end. |
+| `aot::fusevm_aot_run_embedded()` | Runtime entry for a linked binary: rebuilds the VM from the embedded chunk, calls the frontend's `fusevm_aot_register_builtins`, runs the native entry, and maps the result to an exit code. |
+
+Link the emitted object against a frontend runtime (which provides
+`fusevm_aot_register_builtins`) to produce the standalone binary. On macOS the
+link needs `-framework CoreFoundation`.
+
+---
+
+## [0x09] VALUE REPRESENTATION
 
 `Value` is a tagged enum with fast-path immediates:
 
@@ -376,7 +402,7 @@ Array and hash mutations (`ArrayPush`, `ArrayPop`, `ArrayShift`, `ArraySet`, `Ha
 
 ---
 
-## [0x09] BENCHMARKS
+## [0x0A] BENCHMARKS
 
 All benchmarks run via [criterion](https://crates.io/crates/criterion) on Apple M-series. `cargo bench` for all, `cargo bench --features jit --bench jit_vs_interp` for JIT comparisons. HTML report at `target/criterion/report/index.html`.
 

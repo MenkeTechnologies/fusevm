@@ -1,6 +1,6 @@
 [package]
 name = "fusevm"
-version = "0.14.1"
+version = "0.14.2"
 edition = "2021"
 description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear/block/tracing)"
 license = "MIT"
@@ -12,6 +12,12 @@ readme = "README.md"
 keywords = ["bytecode", "vm", "jit", "interpreter", "fusevm"]
 categories = ["compilers"]
 
+[lib]
+# `staticlib` produces libfusevm.a so AOT-compiled objects (fusevm::aot) can be
+# linked against the runtime into a standalone native binary. `lib` keeps the
+# normal rlib for frontends that depend on fusevm as a crate.
+crate-type = ["lib", "staticlib"]
+
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 tracing = "0.1"
@@ -22,6 +28,8 @@ cranelift-codegen = { version = "0.130", optional = true }
 cranelift-frontend = { version = "0.130", optional = true }
 cranelift-native = { version = "0.130", optional = true }
 cranelift-module = { version = "0.130", optional = true }
+cranelift-object = { version = "0.130", optional = true }
+bincode = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 
 [features]
@@ -32,6 +40,14 @@ jit = ["cranelift-jit", "cranelift-codegen", "cranelift-frontend", "cranelift-na
 # (override with FUSEVM_JIT_CACHE_DIR or JitCompiler::set_jit_cache_dir, disable
 # with FUSEVM_JIT_CACHE_DIR=off). Pulls in `libc` for executable memory mapping.
 jit-disk-cache = ["jit", "dep:libc"]
+# Ahead-of-time compilation of a whole program to a native object file via
+# cranelift-object (ObjectModule). The closed-world compiler lowers every op of
+# a frontend's fusevm::Chunk to native code — specialized where possible, a call
+# to the shared per-op runtime (`VM::exec_op`) otherwise — emits a relocatable
+# `.o`, and links it against the frontend runtime to a standalone executable.
+# Shared by all fusevm frontends (stryke/zshrs/awkrs/vimlrs) so AOT lives here
+# once. Pulls in `libc` for the same executable-memory/runtime support.
+aot = ["jit", "dep:cranelift-object", "dep:bincode", "dep:libc"]
 
 [dev-dependencies]
 serde_json = "1"

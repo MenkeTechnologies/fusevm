@@ -182,6 +182,11 @@ pub struct VM {
     /// perform on every run.
     #[cfg(feature = "jit")]
     block_eligible_cached: Option<bool>,
+    /// Result captured by the AOT closed-world driver (`fusevm::aot`). The
+    /// native entry function stores the terminating [`VMResult`] here via
+    /// [`VM::aot_finish`]; the caller takes it after the driver returns.
+    #[cfg(feature = "aot")]
+    aot_result: Option<VMResult>,
 }
 
 /// Result of VM execution
@@ -192,6 +197,16 @@ pub enum VMResult {
     Halted,
     /// Runtime error
     Error(String),
+}
+
+/// Outcome of executing one op via [`VM::exec_op`]. `Cont` means the dispatch
+/// loop proceeds to the next op (running its recorder-finalize step); `Ret`
+/// means the op terminated the run and the loop returns the wrapped
+/// [`VMResult`]. This is the control-flow contract shared by the interpreter
+/// loop and the AOT closed-world compiler (`fusevm::aot`).
+pub(crate) enum ExecFlow {
+    Cont,
+    Ret(VMResult),
 }
 
 impl VM {
@@ -237,6 +252,8 @@ impl VM {
             deopt_info: DeoptInfo::zeroed(),
             #[cfg(feature = "jit")]
             block_eligible_cached: None,
+            #[cfg(feature = "aot")]
+            aot_result: None,
         }
     }
 
@@ -752,7 +769,6 @@ impl VM {
     /// compete on the same chunk: block-eligible chunks short-circuit
     /// before tracing JIT records anything.
     pub fn run(&mut self) -> VMResult {
-        use crate::awk_builtins as ab;
         // A fresh execution: clear any AWK signal raised by a prior run on a
         // reused VM. (zshrs/stryke never emit `Op::AwkSignal`, so this stays
         // `None` for them.)
@@ -837,6 +853,8 @@ impl VM {
             // step that armed it would also close it with an empty op list.
             #[cfg(feature = "jit")]
             let recorder_was_armed = self.recorder.is_some();
+            #[cfg(not(feature = "jit"))]
+            let recorder_was_armed = false;
             #[cfg(feature = "jit")]
             if self.recorder.is_some() {
                 let cfg = self.jit.get_config();
@@ -961,6 +979,29 @@ impl VM {
                 }
             }
 
+            match self.exec_op(ops, ip, recorder_was_armed) {
+                ExecFlow::Cont => {}
+                ExecFlow::Ret(r) => return r,
+            }
+        }
+
+        if let Some(val) = self.stack.pop() {
+            VMResult::Ok(val)
+        } else {
+            VMResult::Halted
+        }
+    }
+
+    /// Execute the single op at `ops[ip]` — the **single source of truth** for op
+    /// semantics, shared by the interpreter loop ([`VM::run`]) and the AOT
+    /// closed-world compiler (`fusevm::aot`), which emits native code that calls
+    /// this for every op it does not specialize. Returns [`ExecFlow::Ret`] when
+    /// an op terminates the run, else [`ExecFlow::Cont`]. Arms that previously
+    /// `continue`d the dispatch loop now `return ExecFlow::Cont`, which skips the
+    /// trailing recorder-finalize step exactly as `continue` did.
+    #[cfg_attr(not(feature = "jit"), allow(unused_variables))]
+    pub(crate) fn exec_op(&mut self, ops: &[Op], ip: usize, recorder_was_armed: bool) -> ExecFlow {
+        use crate::awk_builtins as ab;
             match &ops[ip] {
                 Op::Nop => {}
 
@@ -1322,14 +1363,14 @@ impl VM {
                         });
                         self.ip = entry_ip;
                     } else {
-                        return VMResult::Error(format!(
+                        return ExecFlow::Ret(VMResult::Error(format!(
                             "undefined function: {}",
                             self.chunk
                                 .names
                                 .get(*name_idx as usize)
                                 .map(|s| s.as_str())
                                 .unwrap_or("?")
-                        ));
+                        )));
                     }
                 }
                 Op::Return => {
@@ -1348,7 +1389,7 @@ impl VM {
                         self.push(val);
                     } else {
                         self.halted = true;
-                        return VMResult::Ok(val);
+                        return ExecFlow::Ret(VMResult::Ok(val));
                     }
                 }
 
@@ -1845,7 +1886,7 @@ impl VM {
                                     slots: Vec::with_capacity(8),
                                 });
                                 self.ip = entry_ip;
-                                continue;
+                                return ExecFlow::Cont;
                             }
                         }
 
@@ -2199,7 +2240,7 @@ impl VM {
                                 slots: Vec::with_capacity(8),
                             });
                             self.ip = entry_ip;
-                            continue;
+                            return ExecFlow::Cont;
                         }
                         let mut full = Vec::with_capacity(args.len() + 1);
                         full.push(name);
@@ -2305,7 +2346,7 @@ impl VM {
                     let a = self.pop();
                     let divisor = b.to_float();
                     if divisor == 0.0 {
-                        return VMResult::Error("division by zero attempted".to_string());
+                        return ExecFlow::Ret(VMResult::Error("division by zero attempted".to_string()));
                     }
                     self.push(Value::Float(a.to_float() / divisor));
                 }
@@ -2314,7 +2355,7 @@ impl VM {
                     let a = self.pop();
                     let divisor = b.to_float();
                     if divisor == 0.0 {
-                        return VMResult::Error("division by zero attempted in `%'".to_string());
+                        return ExecFlow::Ret(VMResult::Error("division by zero attempted in `%'".to_string()));
                     }
                     self.push(Value::Float(a.to_float() % divisor));
                 }
@@ -2326,7 +2367,7 @@ impl VM {
                     let a = self.pop();
                     let divisor = b.to_float();
                     if divisor == 0.0 {
-                        return VMResult::Error("division by zero attempted".to_string());
+                        return ExecFlow::Ret(VMResult::Error("division by zero attempted".to_string()));
                     }
                     self.push(Value::Float(a.to_float() / divisor));
                 }
@@ -2335,7 +2376,7 @@ impl VM {
                     let a = self.pop();
                     let divisor = b.to_float();
                     if divisor == 0.0 {
-                        return VMResult::Error("division by zero attempted in `%'".to_string());
+                        return ExecFlow::Ret(VMResult::Error("division by zero attempted in `%'".to_string()));
                     }
                     self.push(Value::Float(a.to_float() % divisor));
                 }
@@ -2372,9 +2413,9 @@ impl VM {
                     let n = self.pop().to_float();
                     let a = self.pop().to_float();
                     if a < 0.0 || n < 0.0 {
-                        return VMResult::Error(
+                        return ExecFlow::Ret(VMResult::Error(
                             "lshift: negative values are not allowed".to_string(),
-                        );
+                        ));
                     }
                     let shifted = (a as i64).wrapping_shl((n as u32) & 0x3f);
                     self.push(Value::Float(shifted as f64));
@@ -2384,9 +2425,9 @@ impl VM {
                     let n = self.pop().to_float();
                     let a = self.pop().to_float();
                     if a < 0.0 || n < 0.0 {
-                        return VMResult::Error(
+                        return ExecFlow::Ret(VMResult::Error(
                             "rshift: negative values are not allowed".to_string(),
-                        );
+                        ));
                     }
                     let shifted = ((a as i64) as u64).wrapping_shr((n as u32) & 0x3f);
                     self.push(Value::Float(shifted as f64));
@@ -2397,7 +2438,7 @@ impl VM {
                 Op::AwkComplJit => {
                     let a = self.pop().to_float();
                     if a < 0.0 {
-                        return VMResult::Error("compl: negative value is not allowed".to_string());
+                        return ExecFlow::Ret(VMResult::Error("compl: negative value is not allowed".to_string()));
                     }
                     let v = !(a as i64);
                     self.push(Value::Float(v as f64));
@@ -2553,13 +2594,55 @@ impl VM {
                     self.finalize_recorder();
                 }
             }
-        }
+        ExecFlow::Cont
+    }
 
-        if let Some(val) = self.stack.pop() {
-            VMResult::Ok(val)
-        } else {
-            VMResult::Halted
+    /// AOT closed-world per-op step. Mirrors one iteration of the [`VM::run`]
+    /// dispatch loop for the op at `ip`: advances `self.ip` to `ip + 1`, runs
+    /// the op via [`VM::exec_op`], and returns the **next instruction index**
+    /// for the native driver to branch to — or `-1` when the run terminates
+    /// (an op returned [`ExecFlow::Ret`] or set the halted flag). On terminate,
+    /// any explicit result is stashed in `self.aot_result`. The returned index
+    /// is `ip + 1` for ordinary ops and the jump/call/return target for
+    /// control-flow ops, so the native driver branches without ever reading the
+    /// `VM` struct layout.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_exec_op(&mut self, ip: usize) -> i64 {
+        // SAFETY: chunk.ops is not mutated during execution; alias it past the
+        // borrow checker exactly as VM::run does.
+        let ops = &self.chunk.ops as *const Vec<Op>;
+        let ops = unsafe { &*ops };
+        self.ip = ip + 1;
+        match self.exec_op(ops, ip, false) {
+            ExecFlow::Ret(r) => {
+                self.aot_result = Some(r);
+                return -1;
+            }
+            ExecFlow::Cont => {}
         }
+        if self.halted {
+            return -1;
+        }
+        self.ip as i64
+    }
+
+    /// Finalize an AOT run: if no op stored an explicit result, apply the same
+    /// tail logic as [`VM::run`] (pop the stack top as the value, else
+    /// `Halted`). Called once by the native driver's return path.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_finish(&mut self) {
+        if self.aot_result.is_none() {
+            self.aot_result = Some(match self.stack.pop() {
+                Some(v) => VMResult::Ok(v),
+                None => VMResult::Halted,
+            });
+        }
+    }
+
+    /// Take the result captured by the AOT driver, leaving `None` behind.
+    #[cfg(feature = "aot")]
+    pub(crate) fn take_aot_result(&mut self) -> VMResult {
+        self.aot_result.take().unwrap_or(VMResult::Halted)
     }
 
     // ── Helpers ──

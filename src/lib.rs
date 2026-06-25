@@ -49,6 +49,8 @@
 //! }
 //! ```
 
+#[cfg(feature = "aot")]
+pub mod aot;
 pub mod awk_builtins;
 pub mod awk_host;
 pub mod chunk;
