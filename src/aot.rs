@@ -8,9 +8,9 @@
 //!
 //! The bytecode dispatch loop ([`VM::run`]) is replaced by a native function
 //! with one Cranelift block per op. Each op block calls the per-op runtime
-//! step ([`VM::aot_exec_op`], reached through the `extern "C"`
+//! step (`VM::aot_exec_op`, reached through the `extern "C"`
 //! [`fusevm_aot_exec_op`] shim), which runs that op's semantics via the same
-//! [`VM::exec_op`] the interpreter uses — the single source of truth — and
+//! `VM::exec_op` the interpreter uses — the single source of truth — and
 //! returns the **next instruction index** (or `-1` to terminate). The native
 //! code branches on that:
 //!
@@ -64,7 +64,7 @@ pub const AOT_CHUNK_LEN_SYMBOL: &str = "fusevm_aot_chunk_len";
 pub const AOT_ENTRY_SYMBOL: &str = "fusevm_aot_entry";
 
 /// Per-op runtime step, called by the native driver once per op. Runs the op at
-/// `ip` via the shared [`VM::aot_exec_op`] and returns the next instruction
+/// `ip` via the shared `VM::aot_exec_op` and returns the next instruction
 /// index, or `-1` when the run terminates.
 ///
 /// # Safety
