@@ -30,7 +30,10 @@ use fusevm::value::Value;
 #[test]
 fn awk_substr_negative_start_with_overlap_returns_clamped_prefix() {
     let v = awk_substr(&Value::str("abcdef"), -5, Some(10)).to_str();
-    assert_eq!(v, "abcd", "negative m with m+n>1 must return clamped prefix");
+    assert_eq!(
+        v, "abcd",
+        "negative m with m+n>1 must return clamped prefix"
+    );
 }
 
 /// Multi-byte UTF-8: `substr("héllo", 2, 3)` must return "éll" — three CHARS
@@ -131,7 +134,10 @@ fn awk_chr_returns_empty_for_surrogate_codepoint() {
 #[test]
 fn awk_ord_returns_scalar_value_of_first_char_not_first_byte() {
     let v = awk_ord(&Value::str("ñoño")).to_float();
-    assert_eq!(v, 241.0, "ord must read first char's scalar, not first byte");
+    assert_eq!(
+        v, 241.0,
+        "ord must read first char's scalar, not first byte"
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────

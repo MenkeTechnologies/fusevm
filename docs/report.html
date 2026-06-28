@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="fusevm — Engineering report. Language-agnostic bytecode VM in Rust: 17,320 production lines, 124,039 test lines, 224 opcodes, 11 fused superinstructions, 61 first-class AWK ops, three-tier Cranelift JIT (linear/block/tracing with side-exits + frame materialization). The shared execution engine behind strykelang, zshrs, and awkrs.">
+  <meta name="description" content="fusevm — Engineering report. Language-agnostic bytecode VM in Rust: 17,320 production lines, 124,039 test lines, 224 opcodes, 11 fused superinstructions, 61 first-class AWK ops, three-tier Cranelift JIT (linear/block/tracing with side-exits + frame materialization). The shared execution engine behind five language frontends: zshrs, strykelang, awkrs, vimlrs, and elisprs.">
   <title>fusevm &mdash; Engineering Report</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -209,7 +209,7 @@
       <div class="feature-grid" style="margin-top:1.2rem;">
         <div class="feature-card">
           <h4>Multi-Frontend by Design</h4>
-          <p>Every other entry in the table above grew its VM as the runtime for exactly one language. fusevm inverts the relationship: the <code>Op</code> enum is the spec, frontends register language-specific ops through <code>Extended(u16, u8)</code> + <code>ExtendedWide(u16, usize)</code> against a handler table. Three frontends ship today &mdash; <a href="https://github.com/MenkeTechnologies/strykelang" style="color:var(--cyan);">strykelang</a> (~450 ext ops), <a href="https://github.com/MenkeTechnologies/zshrs" style="color:var(--cyan);">zshrs</a> (~20 ext ops), <a href="https://github.com/MenkeTechnologies/awkrs" style="color:var(--cyan);">awkrs</a> (~95 ext ops) &mdash; and they don't conflict.</p>
+          <p>Every other entry in the table above grew its VM as the runtime for exactly one language. fusevm inverts the relationship: the <code>Op</code> enum is the spec, frontends register language-specific ops through <code>Extended(u16, u8)</code> + <code>ExtendedWide(u16, usize)</code> against a handler table. Five frontends ship today &mdash; <a href="https://github.com/MenkeTechnologies/strykelang" style="color:var(--cyan);">strykelang</a> (~450 ext ops), <a href="https://github.com/MenkeTechnologies/zshrs" style="color:var(--cyan);">zshrs</a> (~20 ext ops), <a href="https://github.com/MenkeTechnologies/awkrs" style="color:var(--cyan);">awkrs</a> (~95 ext ops), plus <a href="https://github.com/MenkeTechnologies/vimlrs" style="color:var(--cyan);">vimlrs</a> and <a href="https://github.com/MenkeTechnologies/elisprs" style="color:var(--cyan);">elisprs</a> &mdash; and they don't conflict.</p>
         </div>
         <div class="feature-card">
           <h4>By Per-File Density</h4>

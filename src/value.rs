@@ -36,6 +36,12 @@ pub enum Value {
     Ref(Box<Value>),
     /// Native function pointer (builtin dispatch)
     NativeFn(u16),
+    /// Opaque handle into a frontend object heap (e.g. elisp cons/symbol/vector
+    /// cells). The frontend's extension handler/host owns the pointed-to object;
+    /// fusevm just carries the handle through the stack, slots, and globals.
+    /// Identity-comparable (the handle is the identity), which is what elisp
+    /// `eq`/`setcar` need and `Array` could not provide.
+    Obj(u32),
 }
 
 impl Value {
@@ -94,6 +100,9 @@ impl Value {
             Value::Status(c) => *c == 0, // shell: 0 = success = true
             Value::Ref(_) => true,
             Value::NativeFn(_) => true,
+            // A heap-object handle is always non-nil from fusevm's view; elisp
+            // nil maps to `Undef`, and elisp truthiness is decided frontend-side.
+            Value::Obj(_) => true,
         }
     }
 
@@ -143,6 +152,7 @@ impl Value {
             Value::Hash(_) => Cow::Borrowed("(hash)"),
             Value::Ref(_) => Cow::Borrowed("(ref)"),
             Value::NativeFn(id) => Cow::Owned(format!("(builtin:{})", id)),
+            Value::Obj(id) => Cow::Owned(format!("(obj:{})", id)),
         }
     }
 
@@ -182,6 +192,7 @@ impl Hash for Value {
             Value::Status(c) => c.hash(state),
             Value::Ref(b) => b.hash(state),
             Value::NativeFn(id) => id.hash(state),
+            Value::Obj(id) => id.hash(state),
         }
     }
 }

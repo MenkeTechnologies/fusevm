@@ -278,7 +278,12 @@ pub fn compile_object(chunk: &Chunk, out_path: &Path) -> Result<(), String> {
         .declare_data(AOT_CHUNK_LEN_SYMBOL, Linkage::Export, false, false)
         .map_err(|e| format!("aot: declare len: {e}"))?;
     let mut len_desc = DataDescription::new();
-    len_desc.define((blob.len() as u64).to_le_bytes().to_vec().into_boxed_slice());
+    len_desc.define(
+        (blob.len() as u64)
+            .to_le_bytes()
+            .to_vec()
+            .into_boxed_slice(),
+    );
     module
         .define_data(len_id, &len_desc)
         .map_err(|e| format!("aot: define len: {e}"))?;
@@ -439,13 +444,28 @@ mod tests {
         let chunk = b.build();
         let obj = std::env::temp_dir().join(format!("fusevm_aot_t_{}.o", std::process::id()));
         compile_object(&chunk, &obj).expect("emit object");
-        assert!(std::fs::metadata(&obj).map(|m| m.len() > 0).unwrap_or(false), "non-empty .o");
+        assert!(
+            std::fs::metadata(&obj)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false),
+            "non-empty .o"
+        );
         // The driver + embedded-chunk symbols must be exported in the real object.
-        if let Ok(o) = std::process::Command::new("nm").arg("-g").arg(&obj).output() {
+        if let Ok(o) = std::process::Command::new("nm")
+            .arg("-g")
+            .arg(&obj)
+            .output()
+        {
             let syms = String::from_utf8_lossy(&o.stdout);
             assert!(syms.contains("fusevm_aot_entry"), "entry exported:\n{syms}");
-            assert!(syms.contains("fusevm_aot_chunk_blob"), "chunk blob exported:\n{syms}");
-            assert!(syms.contains("fusevm_aot_chunk_len"), "chunk len exported:\n{syms}");
+            assert!(
+                syms.contains("fusevm_aot_chunk_blob"),
+                "chunk blob exported:\n{syms}"
+            );
+            assert!(
+                syms.contains("fusevm_aot_chunk_len"),
+                "chunk len exported:\n{syms}"
+            );
         }
         let _ = std::fs::remove_file(&obj);
     }

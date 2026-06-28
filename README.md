@@ -50,14 +50,14 @@ cargo add fusevm                  # interpreter only
 
 ## [0x00] OVERVIEW
 
-fusevm is the shared execution engine behind [strykelang](https://github.com/MenkeTechnologies/strykelang), [zshrs](https://github.com/MenkeTechnologies/zshrs), and [awkrs](https://github.com/MenkeTechnologies/awkrs). All three compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
+fusevm is the shared execution engine behind five language frontends — [zshrs](https://github.com/MenkeTechnologies/zshrs), [strykelang](https://github.com/MenkeTechnologies/strykelang), [awkrs](https://github.com/MenkeTechnologies/awkrs), [vimlrs](https://github.com/MenkeTechnologies/vimlrs), and [elisprs](https://github.com/MenkeTechnologies/elisprs). All five compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
 
 ```
-stryke source ──► stryke compiler ──┐
-                                     │
-zshrs source  ──► shell compiler  ──┼──► fusevm::Op ──► VM::run() ─────┐
-                                     │                                  │
-awkrs source  ──► awk compiler    ──┘                                   │
+zshrs  source ──► shell compiler  ──┐
+stryke source ──► stryke compiler ──┤
+awk    source ──► awk compiler    ──┼──► fusevm::Op ──► VM::run() ─────┐
+viml   source ──► viml compiler   ──┤                                  │
+elisp  source ──► elisp compiler  ──┘                                  │
                                                                         ▼
                                               JitCompiler tiers (Cranelift 0.130)
                                               ├── Linear JIT (straight-line, instant)

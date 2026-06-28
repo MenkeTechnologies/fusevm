@@ -1002,285 +1002,299 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(unused_variables))]
     pub(crate) fn exec_op(&mut self, ops: &[Op], ip: usize, recorder_was_armed: bool) -> ExecFlow {
         use crate::awk_builtins as ab;
-            match &ops[ip] {
-                Op::Nop => {}
+        match &ops[ip] {
+            Op::Nop => {}
 
-                // ── Constants ──
-                Op::LoadInt(n) => self.push(Value::Int(*n)),
-                Op::LoadFloat(f) => self.push(Value::Float(*f)),
-                Op::LoadConst(idx) => {
-                    let val = match self.chunk.constants.get(*idx as usize) {
-                        Some(Value::Int(n)) => Value::Int(*n),
-                        Some(Value::Float(f)) => Value::Float(*f),
-                        Some(Value::Bool(b)) => Value::Bool(*b),
-                        Some(other) => other.clone(),
-                        None => Value::Undef,
-                    };
-                    self.push(val);
-                }
-                Op::LoadTrue => self.push(Value::Bool(true)),
-                Op::LoadFalse => self.push(Value::Bool(false)),
-                Op::LoadUndef => self.push(Value::Undef),
+            // ── Constants ──
+            Op::LoadInt(n) => self.push(Value::Int(*n)),
+            Op::LoadFloat(f) => self.push(Value::Float(*f)),
+            Op::LoadConst(idx) => {
+                let val = match self.chunk.constants.get(*idx as usize) {
+                    Some(Value::Int(n)) => Value::Int(*n),
+                    Some(Value::Float(f)) => Value::Float(*f),
+                    Some(Value::Bool(b)) => Value::Bool(*b),
+                    Some(other) => other.clone(),
+                    None => Value::Undef,
+                };
+                self.push(val);
+            }
+            Op::LoadTrue => self.push(Value::Bool(true)),
+            Op::LoadFalse => self.push(Value::Bool(false)),
+            Op::LoadUndef => self.push(Value::Undef),
 
-                // ── Stack ──
-                Op::Pop => {
-                    self.pop();
+            // ── Stack ──
+            Op::Pop => {
+                self.pop();
+            }
+            Op::Dup => {
+                let val = self.peek().clone();
+                self.push(val);
+            }
+            Op::Dup2 => {
+                let len = self.stack.len();
+                if len >= 2 {
+                    let a = self.stack[len - 2].clone();
+                    let b = self.stack[len - 1].clone();
+                    self.push(a);
+                    self.push(b);
                 }
-                Op::Dup => {
-                    let val = self.peek().clone();
-                    self.push(val);
+            }
+            Op::Swap => {
+                let len = self.stack.len();
+                if len >= 2 {
+                    self.stack.swap(len - 1, len - 2);
                 }
-                Op::Dup2 => {
-                    let len = self.stack.len();
-                    if len >= 2 {
-                        let a = self.stack[len - 2].clone();
-                        let b = self.stack[len - 1].clone();
-                        self.push(a);
-                        self.push(b);
+            }
+            Op::Rot => {
+                let len = self.stack.len();
+                if len >= 3 {
+                    // [a, b, c] → [b, c, a] via two swaps instead of O(n) remove
+                    self.stack.swap(len - 3, len - 2);
+                    self.stack.swap(len - 2, len - 1);
+                }
+            }
+
+            // ── Variables ──
+            Op::GetVar(idx) => {
+                let val = self.get_var(*idx);
+                self.push(val);
+            }
+            Op::SetVar(idx) => {
+                let val = self.pop();
+                self.set_var(*idx, val);
+            }
+            Op::DeclareVar(idx) => {
+                let val = self.pop();
+                self.set_var(*idx, val);
+            }
+            Op::GetSlot(slot) => {
+                let val = self.get_slot(*slot);
+                self.push(val);
+            }
+            Op::SetSlot(slot) => {
+                let val = self.pop();
+                self.set_slot(*slot, val);
+            }
+            Op::SlotArrayGet(slot) => {
+                let index = self.pop().to_int() as usize;
+                let val = self.get_slot(*slot);
+                let result = if let Value::Array(ref arr) = val {
+                    arr.get(index).cloned().unwrap_or(Value::Undef)
+                } else {
+                    Value::Undef
+                };
+                self.push(result);
+            }
+            Op::SlotArraySet(slot) => {
+                let index = self.pop().to_int() as usize;
+                let val = self.pop();
+                let arr_val = self.get_slot(*slot);
+                if let Value::Array(mut arr) = arr_val {
+                    if index >= arr.len() {
+                        arr.resize(index + 1, Value::Undef);
                     }
+                    arr[index] = val;
+                    self.set_slot(*slot, Value::Array(arr));
                 }
-                Op::Swap => {
-                    let len = self.stack.len();
-                    if len >= 2 {
-                        self.stack.swap(len - 1, len - 2);
-                    }
-                }
-                Op::Rot => {
-                    let len = self.stack.len();
-                    if len >= 3 {
-                        // [a, b, c] → [b, c, a] via two swaps instead of O(n) remove
-                        self.stack.swap(len - 3, len - 2);
-                        self.stack.swap(len - 2, len - 1);
-                    }
-                }
+            }
 
-                // ── Variables ──
-                Op::GetVar(idx) => {
-                    let val = self.get_var(*idx);
-                    self.push(val);
-                }
-                Op::SetVar(idx) => {
-                    let val = self.pop();
-                    self.set_var(*idx, val);
-                }
-                Op::DeclareVar(idx) => {
-                    let val = self.pop();
-                    self.set_var(*idx, val);
-                }
-                Op::GetSlot(slot) => {
-                    let val = self.get_slot(*slot);
-                    self.push(val);
-                }
-                Op::SetSlot(slot) => {
-                    let val = self.pop();
-                    self.set_slot(*slot, val);
-                }
-                Op::SlotArrayGet(slot) => {
-                    let index = self.pop().to_int() as usize;
-                    let val = self.get_slot(*slot);
-                    let result = if let Value::Array(ref arr) = val {
-                        arr.get(index).cloned().unwrap_or(Value::Undef)
-                    } else {
-                        Value::Undef
-                    };
-                    self.push(result);
-                }
-                Op::SlotArraySet(slot) => {
-                    let index = self.pop().to_int() as usize;
-                    let val = self.pop();
-                    let arr_val = self.get_slot(*slot);
-                    if let Value::Array(mut arr) = arr_val {
-                        if index >= arr.len() {
-                            arr.resize(index + 1, Value::Undef);
-                        }
-                        arr[index] = val;
-                        self.set_slot(*slot, Value::Array(arr));
-                    }
-                }
+            // ── Arithmetic (type-specialized: Int×Int avoids to_float) ──
+            Op::Add => self.arith_int_fast(i64::wrapping_add, |a, b| a + b),
+            Op::Sub => self.arith_int_fast(i64::wrapping_sub, |a, b| a - b),
+            Op::Mul => self.arith_int_fast(i64::wrapping_mul, |a, b| a * b),
+            Op::Div => {
+                let b = self.pop();
+                let a = self.pop();
+                let divisor = b.to_float();
+                self.push(if divisor == 0.0 {
+                    Value::Undef
+                } else {
+                    Value::Float(a.to_float() / divisor)
+                });
+            }
+            Op::Mod => self.arith_int_fast(|x, y| if y != 0 { x % y } else { 0 }, |a, b| a % b),
+            Op::Pow => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().powf(b.to_float())));
+            }
+            Op::Negate => {
+                let val = self.pop();
+                self.push(match val {
+                    Value::Int(n) => Value::Int(n.wrapping_neg()),
+                    _ => Value::Float(-val.to_float()),
+                });
+            }
+            Op::Inc => {
+                let val = self.pop();
+                self.push(match val {
+                    Value::Int(n) => Value::Int(n.wrapping_add(1)),
+                    _ => Value::Int(val.to_int().wrapping_add(1)),
+                });
+            }
+            Op::Dec => {
+                let val = self.pop();
+                self.push(match val {
+                    Value::Int(n) => Value::Int(n.wrapping_sub(1)),
+                    _ => Value::Int(val.to_int().wrapping_sub(1)),
+                });
+            }
 
-                // ── Arithmetic (type-specialized: Int×Int avoids to_float) ──
-                Op::Add => self.arith_int_fast(i64::wrapping_add, |a, b| a + b),
-                Op::Sub => self.arith_int_fast(i64::wrapping_sub, |a, b| a - b),
-                Op::Mul => self.arith_int_fast(i64::wrapping_mul, |a, b| a * b),
-                Op::Div => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let divisor = b.to_float();
-                    self.push(if divisor == 0.0 {
-                        Value::Undef
-                    } else {
-                        Value::Float(a.to_float() / divisor)
-                    });
-                }
-                Op::Mod => self.arith_int_fast(|x, y| if y != 0 { x % y } else { 0 }, |a, b| a % b),
-                Op::Pow => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Float(a.to_float().powf(b.to_float())));
-                }
-                Op::Negate => {
-                    let val = self.pop();
-                    self.push(match val {
-                        Value::Int(n) => Value::Int(n.wrapping_neg()),
-                        _ => Value::Float(-val.to_float()),
-                    });
-                }
-                Op::Inc => {
-                    let val = self.pop();
-                    self.push(match val {
-                        Value::Int(n) => Value::Int(n.wrapping_add(1)),
-                        _ => Value::Int(val.to_int().wrapping_add(1)),
-                    });
-                }
-                Op::Dec => {
-                    let val = self.pop();
-                    self.push(match val {
-                        Value::Int(n) => Value::Int(n.wrapping_sub(1)),
-                        _ => Value::Int(val.to_int().wrapping_sub(1)),
-                    });
-                }
+            // ── String ──
+            Op::Concat => {
+                let b = self.pop();
+                let a = self.pop();
+                let a_s = a.as_str_cow();
+                let b_s = b.as_str_cow();
+                let mut s = String::with_capacity(a_s.len() + b_s.len());
+                s.push_str(&a_s);
+                s.push_str(&b_s);
+                self.push(Value::str(s));
+            }
+            Op::StringRepeat => {
+                let count = self.pop().to_int();
+                let s = self.pop().to_str();
+                self.push(Value::str(s.repeat(count.max(0) as usize)));
+            }
+            Op::StringLen => {
+                let s = self.pop();
+                self.push(Value::Int(s.len() as i64));
+            }
 
-                // ── String ──
-                Op::Concat => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let a_s = a.as_str_cow();
-                    let b_s = b.as_str_cow();
-                    let mut s = String::with_capacity(a_s.len() + b_s.len());
-                    s.push_str(&a_s);
-                    s.push_str(&b_s);
-                    self.push(Value::str(s));
-                }
-                Op::StringRepeat => {
-                    let count = self.pop().to_int();
-                    let s = self.pop().to_str();
-                    self.push(Value::str(s.repeat(count.max(0) as usize)));
-                }
-                Op::StringLen => {
-                    let s = self.pop();
-                    self.push(Value::Int(s.len() as i64));
-                }
-
-                // ── Comparison (type-specialized: Int×Int avoids to_float) ──
-                Op::NumEq => self.cmp_int_fast(|x, y| x == y, |a, b| a == b),
-                Op::NumNe => self.cmp_int_fast(|x, y| x != y, |a, b| a != b),
-                Op::NumLt => self.cmp_int_fast(|x, y| x < y, |a, b| a < b),
-                Op::NumGt => self.cmp_int_fast(|x, y| x > y, |a, b| a > b),
-                Op::NumLe => self.cmp_int_fast(|x, y| x <= y, |a, b| a <= b),
-                Op::NumGe => self.cmp_int_fast(|x, y| x >= y, |a, b| a >= b),
-                Op::Spaceship => {
-                    let len = self.stack.len();
-                    if len >= 2 {
-                        let b = &self.stack[len - 1];
-                        let a = &self.stack[len - 2];
-                        let result = match (a, b) {
-                            (Value::Int(x), Value::Int(y)) => x.cmp(y) as i64,
-                            _ => {
-                                let af = a.to_float();
-                                let bf = b.to_float();
-                                if af < bf {
-                                    -1
-                                } else if af > bf {
-                                    1
-                                } else {
-                                    0
-                                }
+            // ── Comparison (type-specialized: Int×Int avoids to_float) ──
+            Op::NumEq => self.cmp_int_fast(|x, y| x == y, |a, b| a == b),
+            Op::NumNe => self.cmp_int_fast(|x, y| x != y, |a, b| a != b),
+            Op::NumLt => self.cmp_int_fast(|x, y| x < y, |a, b| a < b),
+            Op::NumGt => self.cmp_int_fast(|x, y| x > y, |a, b| a > b),
+            Op::NumLe => self.cmp_int_fast(|x, y| x <= y, |a, b| a <= b),
+            Op::NumGe => self.cmp_int_fast(|x, y| x >= y, |a, b| a >= b),
+            Op::Spaceship => {
+                let len = self.stack.len();
+                if len >= 2 {
+                    let b = &self.stack[len - 1];
+                    let a = &self.stack[len - 2];
+                    let result = match (a, b) {
+                        (Value::Int(x), Value::Int(y)) => x.cmp(y) as i64,
+                        _ => {
+                            let af = a.to_float();
+                            let bf = b.to_float();
+                            if af < bf {
+                                -1
+                            } else if af > bf {
+                                1
+                            } else {
+                                0
                             }
-                        };
-                        self.stack.truncate(len - 2);
-                        self.stack.push(Value::Int(result));
-                    }
+                        }
+                    };
+                    self.stack.truncate(len - 2);
+                    self.stack.push(Value::Int(result));
                 }
+            }
 
-                // ── Comparison (string — borrow via Cow to avoid allocation) ──
-                Op::StrEq => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Bool(a.as_str_cow() == b.as_str_cow()));
-                }
-                Op::StrNe => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Bool(a.as_str_cow() != b.as_str_cow()));
-                }
-                Op::StrLt => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Bool(a.as_str_cow() < b.as_str_cow()));
-                }
-                Op::StrGt => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Bool(a.as_str_cow() > b.as_str_cow()));
-                }
-                Op::StrLe => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Bool(a.as_str_cow() <= b.as_str_cow()));
-                }
-                Op::StrGe => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Bool(a.as_str_cow() >= b.as_str_cow()));
-                }
-                Op::StrCmp => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Int(match a.as_str_cow().cmp(&b.as_str_cow()) {
-                        std::cmp::Ordering::Less => -1,
-                        std::cmp::Ordering::Equal => 0,
-                        std::cmp::Ordering::Greater => 1,
-                    }));
-                }
+            // ── Comparison (string — borrow via Cow to avoid allocation) ──
+            Op::StrEq => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Bool(a.as_str_cow() == b.as_str_cow()));
+            }
+            Op::StrNe => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Bool(a.as_str_cow() != b.as_str_cow()));
+            }
+            Op::StrLt => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Bool(a.as_str_cow() < b.as_str_cow()));
+            }
+            Op::StrGt => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Bool(a.as_str_cow() > b.as_str_cow()));
+            }
+            Op::StrLe => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Bool(a.as_str_cow() <= b.as_str_cow()));
+            }
+            Op::StrGe => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Bool(a.as_str_cow() >= b.as_str_cow()));
+            }
+            Op::StrCmp => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Int(match a.as_str_cow().cmp(&b.as_str_cow()) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                }));
+            }
 
-                // ── Logical / Bitwise ──
-                Op::LogNot => {
-                    let val = self.pop();
-                    self.push(Value::Bool(!val.is_truthy()));
-                }
-                Op::LogAnd => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Bool(a.is_truthy() && b.is_truthy()));
-                }
-                Op::LogOr => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Bool(a.is_truthy() || b.is_truthy()));
-                }
-                Op::BitAnd => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Int(a.to_int() & b.to_int()));
-                }
-                Op::BitOr => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Int(a.to_int() | b.to_int()));
-                }
-                Op::BitXor => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Int(a.to_int() ^ b.to_int()));
-                }
-                Op::BitNot => {
-                    let val = self.pop();
-                    self.push(Value::Int(!val.to_int()));
-                }
-                Op::Shl => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Int(a.to_int() << (b.to_int() as u32 & 63)));
-                }
-                Op::Shr => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Int(a.to_int() >> (b.to_int() as u32 & 63)));
-                }
+            // ── Logical / Bitwise ──
+            Op::LogNot => {
+                let val = self.pop();
+                self.push(Value::Bool(!val.is_truthy()));
+            }
+            Op::LogAnd => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Bool(a.is_truthy() && b.is_truthy()));
+            }
+            Op::LogOr => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Bool(a.is_truthy() || b.is_truthy()));
+            }
+            Op::BitAnd => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Int(a.to_int() & b.to_int()));
+            }
+            Op::BitOr => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Int(a.to_int() | b.to_int()));
+            }
+            Op::BitXor => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Int(a.to_int() ^ b.to_int()));
+            }
+            Op::BitNot => {
+                let val = self.pop();
+                self.push(Value::Int(!val.to_int()));
+            }
+            Op::Shl => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Int(a.to_int() << (b.to_int() as u32 & 63)));
+            }
+            Op::Shr => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Int(a.to_int() >> (b.to_int() as u32 & 63)));
+            }
 
-                // ── Control flow ──
-                Op::Jump(target) => {
-                    let target = *target;
+            // ── Control flow ──
+            Op::Jump(target) => {
+                let target = *target;
+                #[cfg(feature = "jit")]
+                if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                    self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                } else {
+                    self.ip = target;
+                }
+                #[cfg(not(feature = "jit"))]
+                {
+                    self.ip = target;
+                }
+            }
+            Op::JumpIfTrue(target) => {
+                let target = *target;
+                if self.pop().is_truthy() {
                     #[cfg(feature = "jit")]
                     if self.tracing_jit && self.recorder.is_none() && target <= ip {
                         self.ip = self.lookup_trace_for_backward(target, ip + 1);
@@ -1292,1308 +1306,1356 @@ impl VM {
                         self.ip = target;
                     }
                 }
-                Op::JumpIfTrue(target) => {
-                    let target = *target;
-                    if self.pop().is_truthy() {
-                        #[cfg(feature = "jit")]
-                        if self.tracing_jit && self.recorder.is_none() && target <= ip {
-                            self.ip = self.lookup_trace_for_backward(target, ip + 1);
-                        } else {
-                            self.ip = target;
-                        }
-                        #[cfg(not(feature = "jit"))]
-                        {
-                            self.ip = target;
-                        }
+            }
+            Op::JumpIfFalse(target) => {
+                let target = *target;
+                if !self.pop().is_truthy() {
+                    #[cfg(feature = "jit")]
+                    if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                        self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                    } else {
+                        self.ip = target;
+                    }
+                    #[cfg(not(feature = "jit"))]
+                    {
+                        self.ip = target;
                     }
                 }
-                Op::JumpIfFalse(target) => {
-                    let target = *target;
-                    if !self.pop().is_truthy() {
-                        #[cfg(feature = "jit")]
-                        if self.tracing_jit && self.recorder.is_none() && target <= ip {
-                            self.ip = self.lookup_trace_for_backward(target, ip + 1);
-                        } else {
-                            self.ip = target;
-                        }
-                        #[cfg(not(feature = "jit"))]
-                        {
-                            self.ip = target;
-                        }
+            }
+            Op::JumpIfTrueKeep(target) => {
+                let target = *target;
+                if self.peek().is_truthy() {
+                    #[cfg(feature = "jit")]
+                    if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                        self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                    } else {
+                        self.ip = target;
+                    }
+                    #[cfg(not(feature = "jit"))]
+                    {
+                        self.ip = target;
                     }
                 }
-                Op::JumpIfTrueKeep(target) => {
-                    let target = *target;
-                    if self.peek().is_truthy() {
-                        #[cfg(feature = "jit")]
-                        if self.tracing_jit && self.recorder.is_none() && target <= ip {
-                            self.ip = self.lookup_trace_for_backward(target, ip + 1);
-                        } else {
-                            self.ip = target;
-                        }
-                        #[cfg(not(feature = "jit"))]
-                        {
-                            self.ip = target;
-                        }
+            }
+            Op::JumpIfFalseKeep(target) => {
+                let target = *target;
+                if !self.peek().is_truthy() {
+                    #[cfg(feature = "jit")]
+                    if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                        self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                    } else {
+                        self.ip = target;
+                    }
+                    #[cfg(not(feature = "jit"))]
+                    {
+                        self.ip = target;
                     }
                 }
-                Op::JumpIfFalseKeep(target) => {
-                    let target = *target;
-                    if !self.peek().is_truthy() {
-                        #[cfg(feature = "jit")]
-                        if self.tracing_jit && self.recorder.is_none() && target <= ip {
-                            self.ip = self.lookup_trace_for_backward(target, ip + 1);
-                        } else {
-                            self.ip = target;
-                        }
-                        #[cfg(not(feature = "jit"))]
-                        {
-                            self.ip = target;
-                        }
-                    }
-                }
+            }
 
-                // ── Functions ──
-                Op::Call(name_idx, argc) => {
-                    if let Some(entry_ip) = self.chunk.find_sub(*name_idx) {
-                        self.frames.push(Frame {
-                            return_ip: self.ip,
-                            stack_base: self.stack.len() - *argc as usize,
-                            slots: Vec::new(),
-                        });
-                        self.ip = entry_ip;
-                    } else {
-                        return ExecFlow::Ret(VMResult::Error(format!(
-                            "undefined function: {}",
-                            self.chunk
-                                .names
-                                .get(*name_idx as usize)
-                                .map(|s| s.as_str())
-                                .unwrap_or("?")
-                        )));
-                    }
-                }
-                Op::Return => {
-                    if let Some(frame) = self.frames.pop() {
-                        self.stack.truncate(frame.stack_base);
-                        self.ip = frame.return_ip;
-                    } else {
-                        self.halted = true;
-                    }
-                }
-                Op::ReturnValue => {
-                    let val = self.pop();
-                    if let Some(frame) = self.frames.pop() {
-                        self.stack.truncate(frame.stack_base);
-                        self.ip = frame.return_ip;
-                        self.push(val);
-                    } else {
-                        self.halted = true;
-                        return ExecFlow::Ret(VMResult::Ok(val));
-                    }
-                }
-
-                // ── Scope ──
-                Op::PushFrame => {
+            // ── Functions ──
+            Op::Call(name_idx, argc) => {
+                if let Some(entry_ip) = self.chunk.find_sub(*name_idx) {
                     self.frames.push(Frame {
                         return_ip: self.ip,
-                        stack_base: self.stack.len(),
+                        stack_base: self.stack.len() - *argc as usize,
                         slots: Vec::new(),
                     });
+                    self.ip = entry_ip;
+                } else {
+                    return ExecFlow::Ret(VMResult::Error(format!(
+                        "undefined function: {}",
+                        self.chunk
+                            .names
+                            .get(*name_idx as usize)
+                            .map(|s| s.as_str())
+                            .unwrap_or("?")
+                    )));
                 }
-                Op::PopFrame => {
-                    if let Some(frame) = self.frames.pop() {
-                        self.stack.truncate(frame.stack_base);
-                    }
+            }
+            Op::Return => {
+                if let Some(frame) = self.frames.pop() {
+                    self.stack.truncate(frame.stack_base);
+                    self.ip = frame.return_ip;
+                } else {
+                    self.halted = true;
                 }
-
-                // ── I/O (write directly, no intermediate Vec) ──
-                Op::Print(n) => {
-                    let n = *n;
-                    let start = self.stack.len().saturating_sub(n as usize);
-                    use std::io::Write;
-                    let stdout = std::io::stdout();
-                    let mut lock = stdout.lock();
-                    for v in &self.stack[start..] {
-                        let _ = write!(lock, "{}", v.as_str_cow());
-                    }
-                    self.stack.truncate(start);
-                }
-                Op::PrintLn(n) => {
-                    let n = *n;
-                    let start = self.stack.len().saturating_sub(n as usize);
-                    use std::io::Write;
-                    let stdout = std::io::stdout();
-                    let mut lock = stdout.lock();
-                    for v in &self.stack[start..] {
-                        let _ = write!(lock, "{}", v.as_str_cow());
-                    }
-                    let _ = writeln!(lock);
-                    self.stack.truncate(start);
-                }
-                Op::ReadLine => {
-                    let mut line = String::new();
-                    let _ = std::io::stdin().read_line(&mut line);
-                    self.push(Value::str(line.trim_end_matches('\n')));
-                }
-
-                // ── Fused superinstructions ──
-                Op::PreIncSlot(slot) => {
-                    let val = self.get_slot(*slot).to_int() + 1;
-                    self.set_slot(*slot, Value::Int(val));
-                    self.push(Value::Int(val));
-                }
-                Op::PreIncSlotVoid(slot) => {
-                    let val = self.get_slot(*slot).to_int() + 1;
-                    self.set_slot(*slot, Value::Int(val));
-                }
-                Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
-                    if self.get_slot(*slot).to_int() >= *limit as i64 {
-                        self.ip = *target;
-                    }
-                }
-                Op::SlotIncLtIntJumpBack(slot, limit, target) => {
-                    let val = self.get_slot(*slot).to_int() + 1;
-                    self.set_slot(*slot, Value::Int(val));
-                    if val < *limit as i64 {
-                        self.ip = *target;
-                    }
-                }
-                Op::AccumSumLoop(sum_slot, i_slot, limit) => {
-                    let mut sum = self.get_slot(*sum_slot).to_int();
-                    let mut i = self.get_slot(*i_slot).to_int();
-                    let lim = *limit as i64;
-                    while i < lim {
-                        sum += i;
-                        i += 1;
-                    }
-                    self.set_slot(*sum_slot, Value::Int(sum));
-                    self.set_slot(*i_slot, Value::Int(i));
-                }
-                Op::AddAssignSlotVoid(a, b) => {
-                    let sum = self.get_slot(*a).to_int() + self.get_slot(*b).to_int();
-                    self.set_slot(*a, Value::Int(sum));
-                }
-                Op::PreDecSlot(slot) => {
-                    let val = self.get_slot(*slot).to_int() - 1;
-                    self.set_slot(*slot, Value::Int(val));
-                    self.push(Value::Int(val));
-                }
-                Op::PostIncSlot(slot) => {
-                    let old = self.get_slot(*slot).to_int();
-                    self.set_slot(*slot, Value::Int(old + 1));
-                    self.push(Value::Int(old));
-                }
-                Op::PostDecSlot(slot) => {
-                    let old = self.get_slot(*slot).to_int();
-                    self.set_slot(*slot, Value::Int(old - 1));
-                    self.push(Value::Int(old));
-                }
-
-                // ── Status ──
-                Op::SetStatus => {
-                    self.last_status = self.pop().to_int() as i32;
-                }
-                Op::GetStatus => {
-                    self.push(Value::Status(self.last_status));
-                }
-
-                // ── Extension dispatch ──
-                Op::Extended(id, arg) => {
-                    let (id, arg) = (*id, *arg);
-                    if let Some(mut handler) = self.ext_handler.take() {
-                        handler(self, id, arg);
-                        self.ext_handler = Some(handler);
-                    }
-                }
-                Op::ExtendedWide(id, payload) => {
-                    let (id, payload) = (*id, *payload);
-                    if crate::awk_builtins::is_awk_op(id) {
-                        self.dispatch_awk(id, payload);
-                    } else if let Some(mut handler) = self.ext_wide_handler.take() {
-                        handler(self, id, payload);
-                        self.ext_wide_handler = Some(handler);
-                    }
-                }
-
-                // ── Arrays ──
-                Op::GetArray(idx) => {
-                    let val = self.get_var(*idx);
+            }
+            Op::ReturnValue => {
+                let val = self.pop();
+                if let Some(frame) = self.frames.pop() {
+                    self.stack.truncate(frame.stack_base);
+                    self.ip = frame.return_ip;
                     self.push(val);
+                } else {
+                    self.halted = true;
+                    return ExecFlow::Ret(VMResult::Ok(val));
                 }
-                Op::SetArray(idx) => {
-                    let val = self.pop();
-                    self.set_var(*idx, val);
+            }
+
+            // ── Scope ──
+            Op::PushFrame => {
+                self.frames.push(Frame {
+                    return_ip: self.ip,
+                    stack_base: self.stack.len(),
+                    slots: Vec::new(),
+                });
+            }
+            Op::PopFrame => {
+                if let Some(frame) = self.frames.pop() {
+                    self.stack.truncate(frame.stack_base);
                 }
-                Op::DeclareArray(idx) => {
-                    self.set_var(*idx, Value::Array(Vec::new()));
+            }
+
+            // ── I/O (write directly, no intermediate Vec) ──
+            Op::Print(n) => {
+                let n = *n;
+                let start = self.stack.len().saturating_sub(n as usize);
+                use std::io::Write;
+                let stdout = std::io::stdout();
+                let mut lock = stdout.lock();
+                for v in &self.stack[start..] {
+                    let _ = write!(lock, "{}", v.as_str_cow());
                 }
-                Op::ArrayGet(arr_idx) => {
-                    let index = self.pop().to_int() as usize;
-                    let idx = *arr_idx as usize;
-                    let val = if idx < self.globals.len() {
-                        if let Value::Array(ref arr) = self.globals[idx] {
-                            arr.get(index).cloned().unwrap_or(Value::Undef)
-                        } else {
-                            Value::Undef
-                        }
+                self.stack.truncate(start);
+            }
+            Op::PrintLn(n) => {
+                let n = *n;
+                let start = self.stack.len().saturating_sub(n as usize);
+                use std::io::Write;
+                let stdout = std::io::stdout();
+                let mut lock = stdout.lock();
+                for v in &self.stack[start..] {
+                    let _ = write!(lock, "{}", v.as_str_cow());
+                }
+                let _ = writeln!(lock);
+                self.stack.truncate(start);
+            }
+            Op::ReadLine => {
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                self.push(Value::str(line.trim_end_matches('\n')));
+            }
+
+            // ── Fused superinstructions ──
+            Op::PreIncSlot(slot) => {
+                let val = self.get_slot(*slot).to_int() + 1;
+                self.set_slot(*slot, Value::Int(val));
+                self.push(Value::Int(val));
+            }
+            Op::PreIncSlotVoid(slot) => {
+                let val = self.get_slot(*slot).to_int() + 1;
+                self.set_slot(*slot, Value::Int(val));
+            }
+            Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
+                if self.get_slot(*slot).to_int() >= *limit as i64 {
+                    self.ip = *target;
+                }
+            }
+            Op::SlotIncLtIntJumpBack(slot, limit, target) => {
+                let val = self.get_slot(*slot).to_int() + 1;
+                self.set_slot(*slot, Value::Int(val));
+                if val < *limit as i64 {
+                    self.ip = *target;
+                }
+            }
+            Op::AccumSumLoop(sum_slot, i_slot, limit) => {
+                let mut sum = self.get_slot(*sum_slot).to_int();
+                let mut i = self.get_slot(*i_slot).to_int();
+                let lim = *limit as i64;
+                while i < lim {
+                    sum += i;
+                    i += 1;
+                }
+                self.set_slot(*sum_slot, Value::Int(sum));
+                self.set_slot(*i_slot, Value::Int(i));
+            }
+            Op::AddAssignSlotVoid(a, b) => {
+                let sum = self.get_slot(*a).to_int() + self.get_slot(*b).to_int();
+                self.set_slot(*a, Value::Int(sum));
+            }
+            Op::PreDecSlot(slot) => {
+                let val = self.get_slot(*slot).to_int() - 1;
+                self.set_slot(*slot, Value::Int(val));
+                self.push(Value::Int(val));
+            }
+            Op::PostIncSlot(slot) => {
+                let old = self.get_slot(*slot).to_int();
+                self.set_slot(*slot, Value::Int(old + 1));
+                self.push(Value::Int(old));
+            }
+            Op::PostDecSlot(slot) => {
+                let old = self.get_slot(*slot).to_int();
+                self.set_slot(*slot, Value::Int(old - 1));
+                self.push(Value::Int(old));
+            }
+
+            // ── Status ──
+            Op::SetStatus => {
+                self.last_status = self.pop().to_int() as i32;
+            }
+            Op::GetStatus => {
+                self.push(Value::Status(self.last_status));
+            }
+
+            // ── Extension dispatch ──
+            Op::Extended(id, arg) => {
+                let (id, arg) = (*id, *arg);
+                if let Some(mut handler) = self.ext_handler.take() {
+                    handler(self, id, arg);
+                    self.ext_handler = Some(handler);
+                }
+            }
+            Op::ExtendedWide(id, payload) => {
+                let (id, payload) = (*id, *payload);
+                if crate::awk_builtins::is_awk_op(id) {
+                    self.dispatch_awk(id, payload);
+                } else if let Some(mut handler) = self.ext_wide_handler.take() {
+                    handler(self, id, payload);
+                    self.ext_wide_handler = Some(handler);
+                }
+            }
+
+            // ── Arrays ──
+            Op::GetArray(idx) => {
+                let val = self.get_var(*idx);
+                self.push(val);
+            }
+            Op::SetArray(idx) => {
+                let val = self.pop();
+                self.set_var(*idx, val);
+            }
+            Op::DeclareArray(idx) => {
+                self.set_var(*idx, Value::Array(Vec::new()));
+            }
+            Op::ArrayGet(arr_idx) => {
+                let index = self.pop().to_int() as usize;
+                let idx = *arr_idx as usize;
+                let val = if idx < self.globals.len() {
+                    if let Value::Array(ref arr) = self.globals[idx] {
+                        arr.get(index).cloned().unwrap_or(Value::Undef)
                     } else {
                         Value::Undef
-                    };
-                    self.push(val);
-                }
-                Op::ArraySet(arr_idx) => {
-                    let index = self.pop().to_int() as usize;
-                    let val = self.pop();
-                    let idx = *arr_idx as usize;
-                    if idx >= self.globals.len() {
-                        self.globals.resize(idx + 1, Value::Undef);
                     }
+                } else {
+                    Value::Undef
+                };
+                self.push(val);
+            }
+            Op::ArraySet(arr_idx) => {
+                let index = self.pop().to_int() as usize;
+                let val = self.pop();
+                let idx = *arr_idx as usize;
+                if idx >= self.globals.len() {
+                    self.globals.resize(idx + 1, Value::Undef);
+                }
+                if let Value::Array(ref mut vec) = self.globals[idx] {
+                    if index >= vec.len() {
+                        vec.resize(index + 1, Value::Undef);
+                    }
+                    vec[index] = val;
+                }
+            }
+            Op::ArrayPush(arr_idx) => {
+                let val = self.pop();
+                let idx = *arr_idx as usize;
+                if idx >= self.globals.len() {
+                    self.globals.resize(idx + 1, Value::Undef);
+                }
+                if let Value::Array(ref mut vec) = self.globals[idx] {
+                    vec.push(val);
+                }
+            }
+            Op::ArrayPop(arr_idx) => {
+                let idx = *arr_idx as usize;
+                let val = if idx < self.globals.len() {
                     if let Value::Array(ref mut vec) = self.globals[idx] {
-                        if index >= vec.len() {
-                            vec.resize(index + 1, Value::Undef);
-                        }
-                        vec[index] = val;
+                        vec.pop().unwrap_or(Value::Undef)
+                    } else {
+                        Value::Undef
                     }
-                }
-                Op::ArrayPush(arr_idx) => {
-                    let val = self.pop();
-                    let idx = *arr_idx as usize;
-                    if idx >= self.globals.len() {
-                        self.globals.resize(idx + 1, Value::Undef);
-                    }
+                } else {
+                    Value::Undef
+                };
+                self.push(val);
+            }
+            Op::ArrayShift(arr_idx) => {
+                let idx = *arr_idx as usize;
+                let val = if idx < self.globals.len() {
                     if let Value::Array(ref mut vec) = self.globals[idx] {
-                        vec.push(val);
+                        if vec.is_empty() {
+                            Value::Undef
+                        } else {
+                            vec.remove(0)
+                        }
+                    } else {
+                        Value::Undef
                     }
-                }
-                Op::ArrayPop(arr_idx) => {
-                    let idx = *arr_idx as usize;
-                    let val = if idx < self.globals.len() {
-                        if let Value::Array(ref mut vec) = self.globals[idx] {
-                            vec.pop().unwrap_or(Value::Undef)
-                        } else {
-                            Value::Undef
-                        }
-                    } else {
-                        Value::Undef
-                    };
-                    self.push(val);
-                }
-                Op::ArrayShift(arr_idx) => {
-                    let idx = *arr_idx as usize;
-                    let val = if idx < self.globals.len() {
-                        if let Value::Array(ref mut vec) = self.globals[idx] {
-                            if vec.is_empty() {
-                                Value::Undef
-                            } else {
-                                vec.remove(0)
-                            }
-                        } else {
-                            Value::Undef
-                        }
-                    } else {
-                        Value::Undef
-                    };
-                    self.push(val);
-                }
-                Op::ArrayLen(arr_idx) => {
-                    let idx = *arr_idx as usize;
-                    let len = if idx < self.globals.len() {
-                        if let Value::Array(ref vec) = self.globals[idx] {
-                            vec.len() as i64
-                        } else {
-                            0
-                        }
+                } else {
+                    Value::Undef
+                };
+                self.push(val);
+            }
+            Op::ArrayLen(arr_idx) => {
+                let idx = *arr_idx as usize;
+                let len = if idx < self.globals.len() {
+                    if let Value::Array(ref vec) = self.globals[idx] {
+                        vec.len() as i64
                     } else {
                         0
-                    };
-                    self.push(Value::Int(len));
-                }
-                Op::MakeArray(n) => {
-                    let n = *n;
-                    let start = self.stack.len().saturating_sub(n as usize);
-                    let elements: Vec<Value> = self.stack.drain(start..).collect();
-                    self.push(Value::Array(elements));
-                }
+                    }
+                } else {
+                    0
+                };
+                self.push(Value::Int(len));
+            }
+            Op::MakeArray(n) => {
+                let n = *n;
+                let start = self.stack.len().saturating_sub(n as usize);
+                let elements: Vec<Value> = self.stack.drain(start..).collect();
+                self.push(Value::Array(elements));
+            }
 
-                // ── Hashes ──
-                Op::GetHash(idx) => {
-                    let val = self.get_var(*idx);
-                    self.push(val);
-                }
-                Op::SetHash(idx) => {
-                    let val = self.pop();
-                    self.set_var(*idx, val);
-                }
-                Op::DeclareHash(idx) => {
-                    self.set_var(*idx, Value::Hash(std::collections::HashMap::new()));
-                }
-                Op::HashGet(hash_idx) => {
-                    let key_val = self.pop();
-                    let key = key_val.as_str_cow();
-                    let idx = *hash_idx as usize;
-                    let val = if idx < self.globals.len() {
-                        if let Value::Hash(ref map) = self.globals[idx] {
-                            map.get(key.as_ref()).cloned().unwrap_or(Value::Undef)
-                        } else {
-                            Value::Undef
-                        }
+            // ── Hashes ──
+            Op::GetHash(idx) => {
+                let val = self.get_var(*idx);
+                self.push(val);
+            }
+            Op::SetHash(idx) => {
+                let val = self.pop();
+                self.set_var(*idx, val);
+            }
+            Op::DeclareHash(idx) => {
+                self.set_var(*idx, Value::Hash(std::collections::HashMap::new()));
+            }
+            Op::HashGet(hash_idx) => {
+                let key_val = self.pop();
+                let key = key_val.as_str_cow();
+                let idx = *hash_idx as usize;
+                let val = if idx < self.globals.len() {
+                    if let Value::Hash(ref map) = self.globals[idx] {
+                        map.get(key.as_ref()).cloned().unwrap_or(Value::Undef)
                     } else {
                         Value::Undef
-                    };
-                    self.push(val);
-                }
-                Op::HashSet(hash_idx) => {
-                    let key = self.pop().to_str();
-                    let val = self.pop();
-                    let idx = *hash_idx as usize;
-                    if idx >= self.globals.len() {
-                        self.globals.resize(idx + 1, Value::Undef);
                     }
+                } else {
+                    Value::Undef
+                };
+                self.push(val);
+            }
+            Op::HashSet(hash_idx) => {
+                let key = self.pop().to_str();
+                let val = self.pop();
+                let idx = *hash_idx as usize;
+                if idx >= self.globals.len() {
+                    self.globals.resize(idx + 1, Value::Undef);
+                }
+                if let Value::Hash(ref mut map) = self.globals[idx] {
+                    map.insert(key, val);
+                }
+            }
+            Op::HashDelete(hash_idx) => {
+                let key_val = self.pop();
+                let key = key_val.as_str_cow();
+                let idx = *hash_idx as usize;
+                let val = if idx < self.globals.len() {
                     if let Value::Hash(ref mut map) = self.globals[idx] {
-                        map.insert(key, val);
-                    }
-                }
-                Op::HashDelete(hash_idx) => {
-                    let key_val = self.pop();
-                    let key = key_val.as_str_cow();
-                    let idx = *hash_idx as usize;
-                    let val = if idx < self.globals.len() {
-                        if let Value::Hash(ref mut map) = self.globals[idx] {
-                            map.remove(key.as_ref()).unwrap_or(Value::Undef)
-                        } else {
-                            Value::Undef
-                        }
+                        map.remove(key.as_ref()).unwrap_or(Value::Undef)
                     } else {
                         Value::Undef
-                    };
-                    self.push(val);
-                }
-                Op::HashExists(hash_idx) => {
-                    let key_val = self.pop();
-                    let key = key_val.as_str_cow();
-                    let idx = *hash_idx as usize;
-                    let val = if idx < self.globals.len() {
-                        if let Value::Hash(ref map) = self.globals[idx] {
-                            map.contains_key(key.as_ref())
-                        } else {
-                            false
-                        }
+                    }
+                } else {
+                    Value::Undef
+                };
+                self.push(val);
+            }
+            Op::HashExists(hash_idx) => {
+                let key_val = self.pop();
+                let key = key_val.as_str_cow();
+                let idx = *hash_idx as usize;
+                let val = if idx < self.globals.len() {
+                    if let Value::Hash(ref map) = self.globals[idx] {
+                        map.contains_key(key.as_ref())
                     } else {
                         false
-                    };
-                    self.push(Value::Bool(val));
-                }
-                Op::HashKeys(hash_idx) => {
-                    let idx = *hash_idx as usize;
-                    let arr = if idx < self.globals.len() {
-                        if let Value::Hash(ref map) = self.globals[idx] {
-                            let mut keys = Vec::with_capacity(map.len());
-                            keys.extend(map.keys().map(|k| Value::str(k.as_str())));
-                            keys
-                        } else {
-                            Vec::new()
-                        }
+                    }
+                } else {
+                    false
+                };
+                self.push(Value::Bool(val));
+            }
+            Op::HashKeys(hash_idx) => {
+                let idx = *hash_idx as usize;
+                let arr = if idx < self.globals.len() {
+                    if let Value::Hash(ref map) = self.globals[idx] {
+                        let mut keys = Vec::with_capacity(map.len());
+                        keys.extend(map.keys().map(|k| Value::str(k.as_str())));
+                        keys
                     } else {
                         Vec::new()
-                    };
-                    self.push(Value::Array(arr));
-                }
-                Op::HashValues(hash_idx) => {
-                    let idx = *hash_idx as usize;
-                    let arr = if idx < self.globals.len() {
-                        if let Value::Hash(ref map) = self.globals[idx] {
-                            let mut vals = Vec::with_capacity(map.len());
-                            vals.extend(map.values().cloned());
-                            vals
-                        } else {
-                            Vec::new()
-                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                self.push(Value::Array(arr));
+            }
+            Op::HashValues(hash_idx) => {
+                let idx = *hash_idx as usize;
+                let arr = if idx < self.globals.len() {
+                    if let Value::Hash(ref map) = self.globals[idx] {
+                        let mut vals = Vec::with_capacity(map.len());
+                        vals.extend(map.values().cloned());
+                        vals
                     } else {
                         Vec::new()
-                    };
-                    self.push(Value::Array(arr));
-                }
-                Op::MakeHash(n) => {
-                    let n = *n;
-                    let start = self.stack.len().saturating_sub(n as usize);
-                    let pairs: Vec<Value> = self.stack.drain(start..).collect();
-                    let mut map = std::collections::HashMap::with_capacity(pairs.len() / 2);
-                    let mut iter = pairs.into_iter();
-                    while let Some(key) = iter.next() {
-                        if let Some(val) = iter.next() {
-                            map.insert(key.to_str(), val);
-                        }
                     }
-                    self.push(Value::Hash(map));
-                }
-
-                // ── Range ──
-                Op::Range => {
-                    let to = self.pop().to_int();
-                    let from = self.pop().to_int();
-                    let cap = (to - from + 1).max(0) as usize;
-                    let mut arr = Vec::with_capacity(cap);
-                    arr.extend((from..=to).map(Value::Int));
-                    self.push(Value::Array(arr));
-                }
-                Op::RangeStep => {
-                    let step = self.pop().to_int();
-                    let to = self.pop().to_int();
-                    let from = self.pop().to_int();
-                    let cap = if step > 0 {
-                        ((to - from) / step + 1).max(0) as usize
-                    } else if step < 0 {
-                        ((from - to) / (-step) + 1).max(0) as usize
-                    } else {
-                        0
-                    };
-                    let mut arr = Vec::with_capacity(cap);
-                    if step > 0 {
-                        let mut i = from;
-                        while i <= to {
-                            arr.push(Value::Int(i));
-                            i += step;
-                        }
-                    } else if step < 0 {
-                        let mut i = from;
-                        while i >= to {
-                            arr.push(Value::Int(i));
-                            i += step;
-                        }
+                } else {
+                    Vec::new()
+                };
+                self.push(Value::Array(arr));
+            }
+            Op::MakeHash(n) => {
+                let n = *n;
+                let start = self.stack.len().saturating_sub(n as usize);
+                let pairs: Vec<Value> = self.stack.drain(start..).collect();
+                let mut map = std::collections::HashMap::with_capacity(pairs.len() / 2);
+                let mut iter = pairs.into_iter();
+                while let Some(key) = iter.next() {
+                    if let Some(val) = iter.next() {
+                        map.insert(key.to_str(), val);
                     }
-                    self.push(Value::Array(arr));
                 }
+                self.push(Value::Hash(map));
+            }
 
-                // ── Shell ops ──
-                Op::TestFile(test_type) => {
-                    let test_type = *test_type;
-                    let path = self.pop().to_str();
-                    let result = match test_type {
-                        crate::op::file_test::EXISTS => std::path::Path::new(&path).exists(),
-                        crate::op::file_test::IS_FILE => std::path::Path::new(&path).is_file(),
-                        crate::op::file_test::IS_DIR => std::path::Path::new(&path).is_dir(),
-                        crate::op::file_test::IS_SYMLINK => {
-                            std::path::Path::new(&path).is_symlink()
+            // ── Range ──
+            Op::Range => {
+                let to = self.pop().to_int();
+                let from = self.pop().to_int();
+                let cap = (to - from + 1).max(0) as usize;
+                let mut arr = Vec::with_capacity(cap);
+                arr.extend((from..=to).map(Value::Int));
+                self.push(Value::Array(arr));
+            }
+            Op::RangeStep => {
+                let step = self.pop().to_int();
+                let to = self.pop().to_int();
+                let from = self.pop().to_int();
+                let cap = if step > 0 {
+                    ((to - from) / step + 1).max(0) as usize
+                } else if step < 0 {
+                    ((from - to) / (-step) + 1).max(0) as usize
+                } else {
+                    0
+                };
+                let mut arr = Vec::with_capacity(cap);
+                if step > 0 {
+                    let mut i = from;
+                    while i <= to {
+                        arr.push(Value::Int(i));
+                        i += step;
+                    }
+                } else if step < 0 {
+                    let mut i = from;
+                    while i >= to {
+                        arr.push(Value::Int(i));
+                        i += step;
+                    }
+                }
+                self.push(Value::Array(arr));
+            }
+
+            // ── Shell ops ──
+            Op::TestFile(test_type) => {
+                let test_type = *test_type;
+                let path = self.pop().to_str();
+                let result = match test_type {
+                    crate::op::file_test::EXISTS => std::path::Path::new(&path).exists(),
+                    crate::op::file_test::IS_FILE => std::path::Path::new(&path).is_file(),
+                    crate::op::file_test::IS_DIR => std::path::Path::new(&path).is_dir(),
+                    crate::op::file_test::IS_SYMLINK => std::path::Path::new(&path).is_symlink(),
+                    crate::op::file_test::IS_READABLE | crate::op::file_test::IS_WRITABLE => {
+                        std::path::Path::new(&path).exists()
+                    }
+                    crate::op::file_test::IS_EXECUTABLE => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            std::fs::metadata(&path)
+                                .map(|m| m.permissions().mode() & 0o111 != 0)
+                                .unwrap_or(false)
                         }
-                        crate::op::file_test::IS_READABLE | crate::op::file_test::IS_WRITABLE => {
+                        #[cfg(not(unix))]
+                        {
                             std::path::Path::new(&path).exists()
                         }
-                        crate::op::file_test::IS_EXECUTABLE => {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::PermissionsExt;
-                                std::fs::metadata(&path)
-                                    .map(|m| m.permissions().mode() & 0o111 != 0)
-                                    .unwrap_or(false)
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                std::path::Path::new(&path).exists()
-                            }
+                    }
+                    crate::op::file_test::IS_NONEMPTY => std::fs::metadata(&path)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false),
+                    crate::op::file_test::IS_SOCKET => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::FileTypeExt;
+                            std::fs::symlink_metadata(&path)
+                                .map(|m| m.file_type().is_socket())
+                                .unwrap_or(false)
                         }
-                        crate::op::file_test::IS_NONEMPTY => std::fs::metadata(&path)
-                            .map(|m| m.len() > 0)
-                            .unwrap_or(false),
-                        crate::op::file_test::IS_SOCKET => {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::FileTypeExt;
-                                std::fs::symlink_metadata(&path)
-                                    .map(|m| m.file_type().is_socket())
-                                    .unwrap_or(false)
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                false
-                            }
+                        #[cfg(not(unix))]
+                        {
+                            false
                         }
-                        crate::op::file_test::IS_FIFO => {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::FileTypeExt;
-                                std::fs::symlink_metadata(&path)
-                                    .map(|m| m.file_type().is_fifo())
-                                    .unwrap_or(false)
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                false
-                            }
+                    }
+                    crate::op::file_test::IS_FIFO => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::FileTypeExt;
+                            std::fs::symlink_metadata(&path)
+                                .map(|m| m.file_type().is_fifo())
+                                .unwrap_or(false)
                         }
-                        crate::op::file_test::IS_BLOCK_DEV => {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::FileTypeExt;
-                                std::fs::symlink_metadata(&path)
-                                    .map(|m| m.file_type().is_block_device())
-                                    .unwrap_or(false)
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                false
-                            }
+                        #[cfg(not(unix))]
+                        {
+                            false
                         }
-                        crate::op::file_test::IS_CHAR_DEV => {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::FileTypeExt;
-                                std::fs::symlink_metadata(&path)
-                                    .map(|m| m.file_type().is_char_device())
-                                    .unwrap_or(false)
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                false
-                            }
+                    }
+                    crate::op::file_test::IS_BLOCK_DEV => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::FileTypeExt;
+                            std::fs::symlink_metadata(&path)
+                                .map(|m| m.file_type().is_block_device())
+                                .unwrap_or(false)
                         }
-                        _ => false,
-                    };
-                    self.push(Value::Bool(result));
-                }
+                        #[cfg(not(unix))]
+                        {
+                            false
+                        }
+                    }
+                    crate::op::file_test::IS_CHAR_DEV => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::FileTypeExt;
+                            std::fs::symlink_metadata(&path)
+                                .map(|m| m.file_type().is_char_device())
+                                .unwrap_or(false)
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                self.push(Value::Bool(result));
+            }
 
-                Op::Exec(argc) => {
-                    let argc = *argc;
-                    let start = self.stack.len().saturating_sub(argc as usize);
-                    // Flatten Value::Array entries into argv. Shell array splice
-                    // (`${arr[@]}`) pushes a single Array value at compile-time
-                    // even though it expands to N argv slots at runtime. Without
-                    // this flat_map, `cmd ${arr[@]}` would pass the whole array
-                    // as one space-joined arg instead of N separate args.
-                    let args: Vec<String> = self
-                        .stack
-                        .drain(start..)
-                        .flat_map(|v| match v {
-                            Value::Array(items) => {
-                                items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
-                            }
-                            other => vec![other.to_str()],
-                        })
-                        .collect();
-                    if let Some(cmd) = args.first() {
-                        // Check if it's a shell function
-                        let name_idx = self.chunk.names.iter().position(|n| n == cmd);
-                        if let Some(name_idx) = name_idx {
-                            if let Some(entry_ip) = self.chunk.find_sub(name_idx as u16) {
-                                // Push arguments for the function (skip command name)
-                                for arg in &args[1..] {
-                                    self.push(Value::str(arg));
-                                }
-                                // Push frame and call
-                                self.frames.push(Frame {
-                                    return_ip: self.ip,
-                                    stack_base: self.stack.len() - (args.len() - 1),
-                                    slots: Vec::with_capacity(8),
-                                });
-                                self.ip = entry_ip;
-                                return ExecFlow::Cont;
-                            }
+            Op::Exec(argc) => {
+                let argc = *argc;
+                let start = self.stack.len().saturating_sub(argc as usize);
+                // Flatten Value::Array entries into argv. Shell array splice
+                // (`${arr[@]}`) pushes a single Array value at compile-time
+                // even though it expands to N argv slots at runtime. Without
+                // this flat_map, `cmd ${arr[@]}` would pass the whole array
+                // as one space-joined arg instead of N separate args.
+                let args: Vec<String> = self
+                    .stack
+                    .drain(start..)
+                    .flat_map(|v| match v {
+                        Value::Array(items) => {
+                            items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
                         }
-
-                        match cmd.as_str() {
-                            "true" => self.push(Value::Status(0)),
-                            "false" => self.push(Value::Status(1)),
-                            "echo" => {
-                                println!("{}", args[1..].join(" "));
-                                self.push(Value::Status(0));
-                            }
-                            "test" | "[" => {
-                                self.push(Value::Status(0));
-                            }
-                            _ => {
-                                // Route through the host's `exec` so frontends
-                                // (zshrs) can apply intercepts/AOP advice/job
-                                // tracking on dynamic command names like
-                                // `cmd=ls; $cmd`. The default ShellHost::exec
-                                // implementation falls back to Command::new,
-                                // so behavior is identical when no host is
-                                // wired. Without host, we keep the inline
-                                // Command::new path so the VM still runs in
-                                // host-less embeddings (tests, REPL stubs).
-                                let status = if let Some(h) = self.host.as_mut() {
-                                    h.exec(args.clone())
-                                } else {
-                                    use std::process::{Command, Stdio};
-                                    Command::new(cmd)
-                                        .args(&args[1..])
-                                        .stdout(Stdio::inherit())
-                                        .stderr(Stdio::inherit())
-                                        .status()
-                                        .map(|s| s.code().unwrap_or(1))
-                                        .unwrap_or(127)
-                                };
-                                self.push(Value::Status(status));
-                            }
-                        }
-                    } else {
-                        self.push(Value::Status(0));
-                    }
-                }
-                Op::ExecBg(argc) => {
-                    let argc = *argc;
-                    let start = self.stack.len().saturating_sub(argc as usize);
-                    // Same Array-flattening as Op::Exec — see comment there.
-                    let args: Vec<String> = self
-                        .stack
-                        .drain(start..)
-                        .flat_map(|v| match v {
-                            Value::Array(items) => {
-                                items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
-                            }
-                            other => vec![other.to_str()],
-                        })
-                        .collect();
-                    if let Some(cmd) = args.first() {
-                        // Route bg exec through the host. Frontends override
-                        // to register the spawned pid in their job table; the
-                        // default impl spawns and detaches. We DON'T wait on
-                        // the bg child here — that's the host's responsibility
-                        // (zshrs uses BUILTIN_RUN_BG which forks before
-                        // emitting Op::ExecBg, so this path is rare for
-                        // shell-level bg). Without host, fall back to inline
-                        // Command::new spawn for host-less embeddings.
-                        if let Some(h) = self.host.as_mut() {
-                            let _ = h.exec_bg(args.clone());
-                        } else {
-                            use std::process::{Command, Stdio};
-                            let _ = Command::new(cmd)
-                                .args(&args[1..])
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .spawn();
-                        }
-                    }
-                    self.push(Value::Status(0));
-                }
-
-                // ── Shell ops ── (route through host when set, fall back to stubs)
-                Op::PipelineBegin(n) => {
-                    let n = *n;
-                    if let Some(h) = self.host.as_mut() {
-                        h.pipeline_begin(n);
-                    }
-                }
-                Op::PipelineStage => {
-                    if let Some(h) = self.host.as_mut() {
-                        h.pipeline_stage();
-                    }
-                }
-                Op::PipelineEnd => {
-                    let status = if let Some(h) = self.host.as_mut() {
-                        h.pipeline_end()
-                    } else {
-                        self.last_status
-                    };
-                    self.last_status = status;
-                    self.push(Value::Status(status));
-                }
-                Op::SubshellBegin => {
-                    if let Some(h) = self.host.as_mut() {
-                        h.subshell_begin();
-                    }
-                }
-                Op::SubshellEnd => {
-                    if let Some(h) = self.host.as_mut() {
-                        if let Some(status) = h.subshell_end() {
-                            self.last_status = status;
-                        }
-                    }
-                }
-                Op::Redirect(fd, op) => {
-                    let fd = *fd;
-                    let op = *op;
-                    let target = self.pop().to_str();
-                    if let Some(h) = self.host.as_mut() {
-                        h.redirect(fd, op, &target);
-                    }
-                }
-                Op::HereDoc(idx) => {
-                    let content = self
-                        .chunk
-                        .constants
-                        .get(*idx as usize)
-                        .map(|v| v.to_str())
-                        .unwrap_or_default();
-                    if let Some(h) = self.host.as_mut() {
-                        h.heredoc(&content);
-                    }
-                }
-                Op::HereString => {
-                    let s = self.pop().to_str();
-                    if let Some(h) = self.host.as_mut() {
-                        h.herestring(&s);
-                    }
-                }
-                Op::CmdSubst(idx) => {
-                    let result = match self.chunk.sub_chunks.get(*idx as usize) {
-                        Some(sub) => {
-                            // Split borrow: self.host and self.chunk are disjoint fields
-                            let sub_ref: *const Chunk = sub;
-                            // SAFETY: sub_chunks is not mutated during op dispatch
-                            let sub_ref = unsafe { &*sub_ref };
-                            if let Some(h) = self.host.as_mut() {
-                                h.cmd_subst(sub_ref)
-                            } else {
-                                String::new()
-                            }
-                        }
-                        None => String::new(),
-                    };
-                    self.push(Value::str(result));
-                }
-                Op::ProcessSubIn(idx) => {
-                    let result = match self.chunk.sub_chunks.get(*idx as usize) {
-                        Some(sub) => {
-                            let sub_ref: *const Chunk = sub;
-                            let sub_ref = unsafe { &*sub_ref };
-                            if let Some(h) = self.host.as_mut() {
-                                h.process_sub_in(sub_ref)
-                            } else {
-                                String::new()
-                            }
-                        }
-                        None => String::new(),
-                    };
-                    self.push(Value::str(result));
-                }
-                Op::ProcessSubOut(idx) => {
-                    let result = match self.chunk.sub_chunks.get(*idx as usize) {
-                        Some(sub) => {
-                            let sub_ref: *const Chunk = sub;
-                            let sub_ref = unsafe { &*sub_ref };
-                            if let Some(h) = self.host.as_mut() {
-                                h.process_sub_out(sub_ref)
-                            } else {
-                                String::new()
-                            }
-                        }
-                        None => String::new(),
-                    };
-                    self.push(Value::str(result));
-                }
-                Op::Glob | Op::GlobRecursive => {
-                    let recursive = matches!(&ops[ip], Op::GlobRecursive);
-                    let pat_val = self.pop();
-                    let pattern = pat_val.to_str();
-                    let matches: Vec<String> = if let Some(h) = self.host.as_mut() {
-                        h.glob(&pattern, recursive)
-                    } else {
-                        glob::glob(&pattern)
-                            .into_iter()
-                            .flat_map(|paths| paths.filter_map(|p| p.ok()))
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .collect()
-                    };
-                    let arr: Vec<Value> = matches.into_iter().map(Value::str).collect();
-                    self.push(Value::Array(arr));
-                }
-                Op::TrapSet(idx) => {
-                    // stack: [signal_name]
-                    let sig = self.pop().to_str();
-                    if let Some(sub) = self.chunk.sub_chunks.get(*idx as usize) {
-                        let sub_ref: *const Chunk = sub;
-                        let sub_ref = unsafe { &*sub_ref };
-                        if let Some(h) = self.host.as_mut() {
-                            h.trap_set(&sig, sub_ref);
-                        }
-                    }
-                }
-                Op::TrapCheck => {
-                    if let Some(h) = self.host.as_mut() {
-                        h.trap_check();
-                    }
-                }
-                Op::TildeExpand => {
-                    let s = self.pop().to_str();
-                    let result = if let Some(h) = self.host.as_mut() {
-                        h.tilde_expand(&s)
-                    } else {
-                        s
-                    };
-                    self.push(Value::str(result));
-                }
-                Op::BraceExpand => {
-                    let s = self.pop().to_str();
-                    let result = if let Some(h) = self.host.as_mut() {
-                        h.brace_expand(&s)
-                    } else {
-                        vec![s]
-                    };
-                    let arr: Vec<Value> = result.into_iter().map(Value::str).collect();
-                    self.push(Value::Array(arr));
-                }
-                Op::WordSplit => {
-                    let s = self.pop().to_str();
-                    let result = if let Some(h) = self.host.as_mut() {
-                        h.word_split(&s)
-                    } else {
-                        s.split_whitespace().map(|w| w.to_string()).collect()
-                    };
-                    let arr: Vec<Value> = result.into_iter().map(Value::str).collect();
-                    self.push(Value::Array(arr));
-                }
-                Op::ExpandParam(modifier) => {
-                    // Stack layout per modifier:
-                    //   DEFAULT/ASSIGN/ERROR/ALTERNATE/STRIP*/RSTRIP*: [name, arg]
-                    //   SUBST_FIRST/SUBST_ALL: [name, pat, rep]
-                    //   SLICE: [name, off, len]
-                    //   LENGTH/UPPER/LOWER/UPPER_FIRST/LOWER_FIRST/INDIRECT/KEYS: [name]
-                    let m = *modifier;
-                    let argc = match m {
-                        crate::op::param_mod::DEFAULT
-                        | crate::op::param_mod::ASSIGN
-                        | crate::op::param_mod::ERROR
-                        | crate::op::param_mod::ALTERNATE
-                        | crate::op::param_mod::STRIP_SHORT
-                        | crate::op::param_mod::STRIP_LONG
-                        | crate::op::param_mod::RSTRIP_SHORT
-                        | crate::op::param_mod::RSTRIP_LONG => 1,
-                        crate::op::param_mod::SUBST_FIRST
-                        | crate::op::param_mod::SUBST_ALL
-                        | crate::op::param_mod::SLICE => 2,
-                        _ => 0,
-                    };
-                    let mut args: Vec<Value> = Vec::with_capacity(argc);
-                    for _ in 0..argc {
-                        args.push(self.pop());
-                    }
-                    args.reverse();
-                    let name = self.pop().to_str();
-                    let result = if let Some(h) = self.host.as_mut() {
-                        h.expand_param(&name, m, &args)
-                    } else {
-                        Value::str("")
-                    };
-                    self.push(result);
-                }
-                Op::StrMatch => {
-                    let pat = self.pop().to_str();
-                    let s = self.pop().to_str();
-                    let result = if let Some(h) = self.host.as_mut() {
-                        h.str_match(&s, &pat)
-                    } else {
-                        s == pat
-                    };
-                    self.push(Value::Bool(result));
-                }
-                Op::RegexMatch => {
-                    let re = self.pop().to_str();
-                    let s = self.pop().to_str();
-                    let result = if let Some(h) = self.host.as_mut() {
-                        h.regex_match(&s, &re)
-                    } else {
-                        false
-                    };
-                    self.push(Value::Bool(result));
-                }
-                Op::WithRedirectsBegin(n) => {
-                    let n = *n;
-                    if let Some(h) = self.host.as_mut() {
-                        h.with_redirects_begin(n);
-                    }
-                }
-                Op::WithRedirectsEnd => {
-                    if let Some(h) = self.host.as_mut() {
-                        h.with_redirects_end();
-                    }
-                }
-                Op::CallFunction(name_idx, argc) => {
-                    let name = self
-                        .chunk
-                        .names
-                        .get(*name_idx as usize)
-                        .cloned()
-                        .unwrap_or_default();
-                    let argc = *argc as usize;
-                    let start = self.stack.len().saturating_sub(argc);
-                    // Flatten arrays (see Op::Exec for rationale).
-                    let args: Vec<String> = self
-                        .stack
-                        .drain(start..)
-                        .flat_map(|v| match v {
-                            Value::Array(items) => {
-                                items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
-                            }
-                            other => vec![other.to_str()],
-                        })
-                        .collect();
-                    let status = if let Some(h) = self.host.as_mut() {
-                        match h.call_function(&name, args.clone()) {
-                            Some(s) => s,
-                            None => {
-                                let mut full = Vec::with_capacity(args.len() + 1);
-                                full.push(name.clone());
-                                full.extend(args);
-                                h.exec(full)
-                            }
-                        }
-                    } else {
-                        // No host — fall back to in-chunk function lookup, then external exec
-                        let nidx = *name_idx;
-                        if let Some(entry_ip) = self.chunk.find_sub(nidx) {
-                            for arg in &args {
+                        other => vec![other.to_str()],
+                    })
+                    .collect();
+                if let Some(cmd) = args.first() {
+                    // Check if it's a shell function
+                    let name_idx = self.chunk.names.iter().position(|n| n == cmd);
+                    if let Some(name_idx) = name_idx {
+                        if let Some(entry_ip) = self.chunk.find_sub(name_idx as u16) {
+                            // Push arguments for the function (skip command name)
+                            for arg in &args[1..] {
                                 self.push(Value::str(arg));
                             }
+                            // Push frame and call
                             self.frames.push(Frame {
                                 return_ip: self.ip,
-                                stack_base: self.stack.len() - args.len(),
+                                stack_base: self.stack.len() - (args.len() - 1),
                                 slots: Vec::with_capacity(8),
                             });
                             self.ip = entry_ip;
                             return ExecFlow::Cont;
                         }
-                        let mut full = Vec::with_capacity(args.len() + 1);
-                        full.push(name);
-                        full.extend(args);
-                        use std::process::Command;
-                        Command::new(&full[0])
-                            .args(&full[1..])
-                            .status()
-                            .map(|s| s.code().unwrap_or(1))
-                            .unwrap_or(127)
-                    };
-                    self.last_status = status;
-                    self.push(Value::Status(status));
-                }
-
-                // ── Remaining fused ops ──
-                Op::ConcatConstLoop(const_idx, s_slot, i_slot, limit) => {
-                    let c_str = self
-                        .chunk
-                        .constants
-                        .get(*const_idx as usize)
-                        .map(|v| v.as_str_cow())
-                        .unwrap_or(std::borrow::Cow::Borrowed(""));
-                    let mut s = self.get_slot(*s_slot).to_str();
-                    let mut i = self.get_slot(*i_slot).to_int();
-                    let lim = *limit as i64;
-                    let iters = (lim - i).max(0) as usize;
-                    s.reserve(c_str.len() * iters);
-                    while i < lim {
-                        s.push_str(&c_str);
-                        i += 1;
                     }
-                    self.set_slot(*s_slot, Value::str(s));
-                    self.set_slot(*i_slot, Value::Int(i));
+
+                    match cmd.as_str() {
+                        "true" => self.push(Value::Status(0)),
+                        "false" => self.push(Value::Status(1)),
+                        "echo" => {
+                            println!("{}", args[1..].join(" "));
+                            self.push(Value::Status(0));
+                        }
+                        "test" | "[" => {
+                            self.push(Value::Status(0));
+                        }
+                        _ => {
+                            // Route through the host's `exec` so frontends
+                            // (zshrs) can apply intercepts/AOP advice/job
+                            // tracking on dynamic command names like
+                            // `cmd=ls; $cmd`. The default ShellHost::exec
+                            // implementation falls back to Command::new,
+                            // so behavior is identical when no host is
+                            // wired. Without host, we keep the inline
+                            // Command::new path so the VM still runs in
+                            // host-less embeddings (tests, REPL stubs).
+                            let status = if let Some(h) = self.host.as_mut() {
+                                h.exec(args.clone())
+                            } else {
+                                use std::process::{Command, Stdio};
+                                Command::new(cmd)
+                                    .args(&args[1..])
+                                    .stdout(Stdio::inherit())
+                                    .stderr(Stdio::inherit())
+                                    .status()
+                                    .map(|s| s.code().unwrap_or(1))
+                                    .unwrap_or(127)
+                            };
+                            self.push(Value::Status(status));
+                        }
+                    }
+                } else {
+                    self.push(Value::Status(0));
                 }
-                Op::PushIntRangeLoop(arr_idx, i_slot, limit) => {
-                    let mut i = self.get_slot(*i_slot).to_int();
-                    let lim = *limit as i64;
-                    let arr = self.get_var(*arr_idx);
-                    let mut vec = if let Value::Array(v) = arr {
-                        v
+            }
+            Op::ExecBg(argc) => {
+                let argc = *argc;
+                let start = self.stack.len().saturating_sub(argc as usize);
+                // Same Array-flattening as Op::Exec — see comment there.
+                let args: Vec<String> = self
+                    .stack
+                    .drain(start..)
+                    .flat_map(|v| match v {
+                        Value::Array(items) => {
+                            items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
+                        }
+                        other => vec![other.to_str()],
+                    })
+                    .collect();
+                if let Some(cmd) = args.first() {
+                    // Route bg exec through the host. Frontends override
+                    // to register the spawned pid in their job table; the
+                    // default impl spawns and detaches. We DON'T wait on
+                    // the bg child here — that's the host's responsibility
+                    // (zshrs uses BUILTIN_RUN_BG which forks before
+                    // emitting Op::ExecBg, so this path is rare for
+                    // shell-level bg). Without host, fall back to inline
+                    // Command::new spawn for host-less embeddings.
+                    if let Some(h) = self.host.as_mut() {
+                        let _ = h.exec_bg(args.clone());
                     } else {
-                        Vec::new()
-                    };
-                    vec.reserve((lim - i).max(0) as usize);
-                    while i < lim {
-                        vec.push(Value::Int(i));
-                        i += 1;
+                        use std::process::{Command, Stdio};
+                        let _ = Command::new(cmd)
+                            .args(&args[1..])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn();
                     }
-                    self.set_var(*arr_idx, Value::Array(vec));
-                    self.set_slot(*i_slot, Value::Int(i));
                 }
+                self.push(Value::Status(0));
+            }
 
-                // ── Higher-order (stubs) ──
-                Op::MapBlock(_)
-                | Op::GrepBlock(_)
-                | Op::SortBlock(_)
-                | Op::SortDefault
-                | Op::ForEachBlock(_) => {}
+            // ── Shell ops ── (route through host when set, fall back to stubs)
+            Op::PipelineBegin(n) => {
+                let n = *n;
+                if let Some(h) = self.host.as_mut() {
+                    h.pipeline_begin(n);
+                }
+            }
+            Op::PipelineStage => {
+                if let Some(h) = self.host.as_mut() {
+                    h.pipeline_stage();
+                }
+            }
+            Op::PipelineEnd => {
+                let status = if let Some(h) = self.host.as_mut() {
+                    h.pipeline_end()
+                } else {
+                    self.last_status
+                };
+                self.last_status = status;
+                self.push(Value::Status(status));
+            }
+            Op::SubshellBegin => {
+                if let Some(h) = self.host.as_mut() {
+                    h.subshell_begin();
+                }
+            }
+            Op::SubshellEnd => {
+                if let Some(h) = self.host.as_mut() {
+                    if let Some(status) = h.subshell_end() {
+                        self.last_status = status;
+                    }
+                }
+            }
+            Op::Redirect(fd, op) => {
+                let fd = *fd;
+                let op = *op;
+                let target = self.pop().to_str();
+                if let Some(h) = self.host.as_mut() {
+                    h.redirect(fd, op, &target);
+                }
+            }
+            Op::HereDoc(idx) => {
+                let content = self
+                    .chunk
+                    .constants
+                    .get(*idx as usize)
+                    .map(|v| v.to_str())
+                    .unwrap_or_default();
+                if let Some(h) = self.host.as_mut() {
+                    h.heredoc(&content);
+                }
+            }
+            Op::HereString => {
+                let s = self.pop().to_str();
+                if let Some(h) = self.host.as_mut() {
+                    h.herestring(&s);
+                }
+            }
+            Op::CmdSubst(idx) => {
+                let result = match self.chunk.sub_chunks.get(*idx as usize) {
+                    Some(sub) => {
+                        // Split borrow: self.host and self.chunk are disjoint fields
+                        let sub_ref: *const Chunk = sub;
+                        // SAFETY: sub_chunks is not mutated during op dispatch
+                        let sub_ref = unsafe { &*sub_ref };
+                        if let Some(h) = self.host.as_mut() {
+                            h.cmd_subst(sub_ref)
+                        } else {
+                            String::new()
+                        }
+                    }
+                    None => String::new(),
+                };
+                self.push(Value::str(result));
+            }
+            Op::ProcessSubIn(idx) => {
+                let result = match self.chunk.sub_chunks.get(*idx as usize) {
+                    Some(sub) => {
+                        let sub_ref: *const Chunk = sub;
+                        let sub_ref = unsafe { &*sub_ref };
+                        if let Some(h) = self.host.as_mut() {
+                            h.process_sub_in(sub_ref)
+                        } else {
+                            String::new()
+                        }
+                    }
+                    None => String::new(),
+                };
+                self.push(Value::str(result));
+            }
+            Op::ProcessSubOut(idx) => {
+                let result = match self.chunk.sub_chunks.get(*idx as usize) {
+                    Some(sub) => {
+                        let sub_ref: *const Chunk = sub;
+                        let sub_ref = unsafe { &*sub_ref };
+                        if let Some(h) = self.host.as_mut() {
+                            h.process_sub_out(sub_ref)
+                        } else {
+                            String::new()
+                        }
+                    }
+                    None => String::new(),
+                };
+                self.push(Value::str(result));
+            }
+            Op::Glob | Op::GlobRecursive => {
+                let recursive = matches!(&ops[ip], Op::GlobRecursive);
+                let pat_val = self.pop();
+                let pattern = pat_val.to_str();
+                let matches: Vec<String> = if let Some(h) = self.host.as_mut() {
+                    h.glob(&pattern, recursive)
+                } else {
+                    glob::glob(&pattern)
+                        .into_iter()
+                        .flat_map(|paths| paths.filter_map(|p| p.ok()))
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect()
+                };
+                let arr: Vec<Value> = matches.into_iter().map(Value::str).collect();
+                self.push(Value::Array(arr));
+            }
+            Op::TrapSet(idx) => {
+                // stack: [signal_name]
+                let sig = self.pop().to_str();
+                if let Some(sub) = self.chunk.sub_chunks.get(*idx as usize) {
+                    let sub_ref: *const Chunk = sub;
+                    let sub_ref = unsafe { &*sub_ref };
+                    if let Some(h) = self.host.as_mut() {
+                        h.trap_set(&sig, sub_ref);
+                    }
+                }
+            }
+            Op::TrapCheck => {
+                if let Some(h) = self.host.as_mut() {
+                    h.trap_check();
+                }
+            }
+            Op::TildeExpand => {
+                let s = self.pop().to_str();
+                let result = if let Some(h) = self.host.as_mut() {
+                    h.tilde_expand(&s)
+                } else {
+                    s
+                };
+                self.push(Value::str(result));
+            }
+            Op::BraceExpand => {
+                let s = self.pop().to_str();
+                let result = if let Some(h) = self.host.as_mut() {
+                    h.brace_expand(&s)
+                } else {
+                    vec![s]
+                };
+                let arr: Vec<Value> = result.into_iter().map(Value::str).collect();
+                self.push(Value::Array(arr));
+            }
+            Op::WordSplit => {
+                let s = self.pop().to_str();
+                let result = if let Some(h) = self.host.as_mut() {
+                    h.word_split(&s)
+                } else {
+                    s.split_whitespace().map(|w| w.to_string()).collect()
+                };
+                let arr: Vec<Value> = result.into_iter().map(Value::str).collect();
+                self.push(Value::Array(arr));
+            }
+            Op::ExpandParam(modifier) => {
+                // Stack layout per modifier:
+                //   DEFAULT/ASSIGN/ERROR/ALTERNATE/STRIP*/RSTRIP*: [name, arg]
+                //   SUBST_FIRST/SUBST_ALL: [name, pat, rep]
+                //   SLICE: [name, off, len]
+                //   LENGTH/UPPER/LOWER/UPPER_FIRST/LOWER_FIRST/INDIRECT/KEYS: [name]
+                let m = *modifier;
+                let argc = match m {
+                    crate::op::param_mod::DEFAULT
+                    | crate::op::param_mod::ASSIGN
+                    | crate::op::param_mod::ERROR
+                    | crate::op::param_mod::ALTERNATE
+                    | crate::op::param_mod::STRIP_SHORT
+                    | crate::op::param_mod::STRIP_LONG
+                    | crate::op::param_mod::RSTRIP_SHORT
+                    | crate::op::param_mod::RSTRIP_LONG => 1,
+                    crate::op::param_mod::SUBST_FIRST
+                    | crate::op::param_mod::SUBST_ALL
+                    | crate::op::param_mod::SLICE => 2,
+                    _ => 0,
+                };
+                let mut args: Vec<Value> = Vec::with_capacity(argc);
+                for _ in 0..argc {
+                    args.push(self.pop());
+                }
+                args.reverse();
+                let name = self.pop().to_str();
+                let result = if let Some(h) = self.host.as_mut() {
+                    h.expand_param(&name, m, &args)
+                } else {
+                    Value::str("")
+                };
+                self.push(result);
+            }
+            Op::StrMatch => {
+                let pat = self.pop().to_str();
+                let s = self.pop().to_str();
+                let result = if let Some(h) = self.host.as_mut() {
+                    h.str_match(&s, &pat)
+                } else {
+                    s == pat
+                };
+                self.push(Value::Bool(result));
+            }
+            Op::RegexMatch => {
+                let re = self.pop().to_str();
+                let s = self.pop().to_str();
+                let result = if let Some(h) = self.host.as_mut() {
+                    h.regex_match(&s, &re)
+                } else {
+                    false
+                };
+                self.push(Value::Bool(result));
+            }
+            Op::WithRedirectsBegin(n) => {
+                let n = *n;
+                if let Some(h) = self.host.as_mut() {
+                    h.with_redirects_begin(n);
+                }
+            }
+            Op::WithRedirectsEnd => {
+                if let Some(h) = self.host.as_mut() {
+                    h.with_redirects_end();
+                }
+            }
+            Op::CallFunction(name_idx, argc) => {
+                let name = self
+                    .chunk
+                    .names
+                    .get(*name_idx as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let argc = *argc as usize;
+                let start = self.stack.len().saturating_sub(argc);
+                // Flatten arrays (see Op::Exec for rationale).
+                let args: Vec<String> = self
+                    .stack
+                    .drain(start..)
+                    .flat_map(|v| match v {
+                        Value::Array(items) => {
+                            items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
+                        }
+                        other => vec![other.to_str()],
+                    })
+                    .collect();
+                let status = if let Some(h) = self.host.as_mut() {
+                    match h.call_function(&name, args.clone()) {
+                        Some(s) => s,
+                        None => {
+                            let mut full = Vec::with_capacity(args.len() + 1);
+                            full.push(name.clone());
+                            full.extend(args);
+                            h.exec(full)
+                        }
+                    }
+                } else {
+                    // No host — fall back to in-chunk function lookup, then external exec
+                    let nidx = *name_idx;
+                    if let Some(entry_ip) = self.chunk.find_sub(nidx) {
+                        for arg in &args {
+                            self.push(Value::str(arg));
+                        }
+                        self.frames.push(Frame {
+                            return_ip: self.ip,
+                            stack_base: self.stack.len() - args.len(),
+                            slots: Vec::with_capacity(8),
+                        });
+                        self.ip = entry_ip;
+                        return ExecFlow::Cont;
+                    }
+                    let mut full = Vec::with_capacity(args.len() + 1);
+                    full.push(name);
+                    full.extend(args);
+                    use std::process::Command;
+                    Command::new(&full[0])
+                        .args(&full[1..])
+                        .status()
+                        .map(|s| s.code().unwrap_or(1))
+                        .unwrap_or(127)
+                };
+                self.last_status = status;
+                self.push(Value::Status(status));
+            }
 
-                // ── Builtins (inline cache) ──
-                Op::CallBuiltin(id, argc) => {
-                    let (id, argc) = (*id, *argc);
-                    if let Some(Some(handler)) = self.builtin_table.get(id as usize) {
-                        let result = handler(self, argc);
-                        self.push(result);
-                    }
+            // ── Remaining fused ops ──
+            Op::ConcatConstLoop(const_idx, s_slot, i_slot, limit) => {
+                let c_str = self
+                    .chunk
+                    .constants
+                    .get(*const_idx as usize)
+                    .map(|v| v.as_str_cow())
+                    .unwrap_or(std::borrow::Cow::Borrowed(""));
+                let mut s = self.get_slot(*s_slot).to_str();
+                let mut i = self.get_slot(*i_slot).to_int();
+                let lim = *limit as i64;
+                let iters = (lim - i).max(0) as usize;
+                s.reserve(c_str.len() * iters);
+                while i < lim {
+                    s.push_str(&c_str);
+                    i += 1;
                 }
+                self.set_slot(*s_slot, Value::str(s));
+                self.set_slot(*i_slot, Value::Int(i));
+            }
+            Op::PushIntRangeLoop(arr_idx, i_slot, limit) => {
+                let mut i = self.get_slot(*i_slot).to_int();
+                let lim = *limit as i64;
+                let arr = self.get_var(*arr_idx);
+                let mut vec = if let Value::Array(v) = arr {
+                    v
+                } else {
+                    Vec::new()
+                };
+                vec.reserve((lim - i).max(0) as usize);
+                while i < lim {
+                    vec.push(Value::Int(i));
+                    i += 1;
+                }
+                self.set_var(*arr_idx, Value::Array(vec));
+                self.set_slot(*i_slot, Value::Int(i));
+            }
 
-                // ── AWK ops (first-class; dispatched to the AwkHost, same path
-                //    as the reserved ExtendedWide AWK range) ──
-                Op::AwkFieldGet => self.dispatch_awk(ab::AWK_FIELD_GET, 0),
-                Op::AwkFieldSet => self.dispatch_awk(ab::AWK_FIELD_SET, 0),
-                Op::AwkNf => self.dispatch_awk(ab::AWK_NF, 0),
-                Op::AwkSetRecord => self.dispatch_awk(ab::AWK_SET_RECORD, 0),
-                Op::AwkSpecialGet(n) => self.dispatch_awk(ab::AWK_SPECIAL_GET, *n as usize),
-                Op::AwkSpecialSet(n) => self.dispatch_awk(ab::AWK_SPECIAL_SET, *n as usize),
-                Op::AwkPrint(argc) => self.dispatch_awk(ab::AWK_PRINT, *argc as usize),
-                Op::AwkPrintf(argc) => self.dispatch_awk(ab::AWK_PRINTF, *argc as usize),
-                Op::AwkSprintf(argc) => self.dispatch_awk(ab::AWK_SPRINTF, *argc as usize),
-                Op::AwkGetline(src) => self.dispatch_awk(ab::AWK_GETLINE, *src as usize),
-                Op::AwkLength(argc) => self.dispatch_awk(ab::AWK_LENGTH, *argc as usize),
-                Op::AwkSubstr(argc) => self.dispatch_awk(ab::AWK_SUBSTR, *argc as usize),
-                Op::AwkIndex => self.dispatch_awk(ab::AWK_INDEX, 0),
-                Op::AwkSplit(argc) => self.dispatch_awk(ab::AWK_SPLIT, *argc as usize),
-                Op::AwkSub(argc) => self.dispatch_awk(ab::AWK_SUB, *argc as usize),
-                Op::AwkGsub(argc) => self.dispatch_awk(ab::AWK_GSUB, *argc as usize),
-                Op::AwkMatch => self.dispatch_awk(ab::AWK_MATCH, 0),
-                Op::AwkToLower => self.dispatch_awk(ab::AWK_TOLOWER, 0),
-                Op::AwkToUpper => self.dispatch_awk(ab::AWK_TOUPPER, 0),
-                Op::AwkInt => self.dispatch_awk(ab::AWK_INT, 0),
-                Op::AwkSqrt => self.dispatch_awk(ab::AWK_SQRT, 0),
-                Op::AwkSin => self.dispatch_awk(ab::AWK_SIN, 0),
-                Op::AwkCos => self.dispatch_awk(ab::AWK_COS, 0),
-                Op::AwkExp => self.dispatch_awk(ab::AWK_EXP, 0),
-                Op::AwkLog => self.dispatch_awk(ab::AWK_LOG, 0),
-                Op::AwkAtan2 => self.dispatch_awk(ab::AWK_ATAN2, 0),
-                // awk `a / b` and `a % b`: pop b then a (same order as Op::Div),
-                // raise the POSIX fatal error on a zero divisor instead of
-                // yielding Undef. Distinct from the shared shell-arithmetic ops.
-                Op::AwkDiv => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let divisor = b.to_float();
-                    if divisor == 0.0 {
-                        return ExecFlow::Ret(VMResult::Error("division by zero attempted".to_string()));
-                    }
-                    self.push(Value::Float(a.to_float() / divisor));
-                }
-                Op::AwkMod => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let divisor = b.to_float();
-                    if divisor == 0.0 {
-                        return ExecFlow::Ret(VMResult::Error("division by zero attempted in `%'".to_string()));
-                    }
-                    self.push(Value::Float(a.to_float() % divisor));
-                }
-                // Block-JIT-eligible div/mod (see `Op::AwkDivJit`). The
-                // interpreter behavior is byte-identical to AwkDiv/AwkMod; the
-                // distinct opcode only changes JIT eligibility.
-                Op::AwkDivJit => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let divisor = b.to_float();
-                    if divisor == 0.0 {
-                        return ExecFlow::Ret(VMResult::Error("division by zero attempted".to_string()));
-                    }
-                    self.push(Value::Float(a.to_float() / divisor));
-                }
-                Op::AwkModJit => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let divisor = b.to_float();
-                    if divisor == 0.0 {
-                        return ExecFlow::Ret(VMResult::Error("division by zero attempted in `%'".to_string()));
-                    }
-                    self.push(Value::Float(a.to_float() % divisor));
-                }
-                // awk sqrt(x) — interpreter path. On negative input, emit the
-                // generic "awk: warning: sqrt: received negative argument <x>"
-                // warning to stderr (the JIT-trapped path uses the same generic
-                // format via the warn libcall, so the two tiers agree).
-                Op::AwkSqrtJit => {
-                    let a = self.pop().to_float();
-                    if a < 0.0 {
-                        eprintln!("awk: warning: sqrt: received negative argument {a}");
-                        self.push(Value::Float(f64::NAN));
-                    } else {
-                        self.push(Value::Float(a.sqrt()));
-                    }
-                }
-                // awk log(x) — interpreter path. Negative emits the generic warn
-                // and pushes NaN; zero returns -inf naturally (no lint warn in
-                // this tier — host frontends that want LINT=1 behavior must use
-                // the existing `Op::AwkLog` host-dispatched variant).
-                Op::AwkLogJit => {
-                    let a = self.pop().to_float();
-                    if a < 0.0 {
-                        eprintln!("awk: warning: log: received negative argument {a}");
-                        self.push(Value::Float(f64::NAN));
-                    } else {
-                        self.push(Value::Float(a.ln()));
-                    }
-                }
-                // awk lshift(a, n) — fatal on negative operands. Stack [a, n]:
-                // pop n then a (matches the awk evaluation order pushed by
-                // frontends).
-                Op::AwkLshiftJit => {
-                    let n = self.pop().to_float();
-                    let a = self.pop().to_float();
-                    if a < 0.0 || n < 0.0 {
-                        return ExecFlow::Ret(VMResult::Error(
-                            "lshift: negative values are not allowed".to_string(),
-                        ));
-                    }
-                    let shifted = (a as i64).wrapping_shl((n as u32) & 0x3f);
-                    self.push(Value::Float(shifted as f64));
-                }
-                // awk rshift(a, n) — same guard as lshift but logical right.
-                Op::AwkRshiftJit => {
-                    let n = self.pop().to_float();
-                    let a = self.pop().to_float();
-                    if a < 0.0 || n < 0.0 {
-                        return ExecFlow::Ret(VMResult::Error(
-                            "rshift: negative values are not allowed".to_string(),
-                        ));
-                    }
-                    let shifted = ((a as i64) as u64).wrapping_shr((n as u32) & 0x3f);
-                    self.push(Value::Float(shifted as f64));
-                }
-                // awk compl(a) — fatal on negative. `!a` in u64 space then back
-                // to f64 (the high bits saturate the f64 mantissa, matching
-                // awkrs's `num_to_u64` semantics).
-                Op::AwkComplJit => {
-                    let a = self.pop().to_float();
-                    if a < 0.0 {
-                        return ExecFlow::Ret(VMResult::Error("compl: negative value is not allowed".to_string()));
-                    }
-                    let v = !(a as i64);
-                    self.push(Value::Float(v as f64));
-                }
-                // awk `$N` numeric read — interpreter path. Calls the same
-                // host-installed hook as the JIT-compiled variant so behavior
-                // matches across tiers. Returns 0.0 when no hook is set, which
-                // matches awk's "missing field" coercion.
-                Op::AwkGetFieldNum(field_idx) => {
-                    let v = crate::jit::fusevm_jit_awk_get_field_num(*field_idx as i64);
-                    self.push(Value::Float(v));
-                }
-                Op::PowFloat => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    self.push(Value::Float(a.to_float().powf(b.to_float())));
-                }
-                Op::SqrtFloat => {
-                    let a = self.pop();
-                    self.push(Value::Float(a.to_float().sqrt()));
-                }
-                Op::SinFloat => {
-                    let a = self.pop();
-                    self.push(Value::Float(a.to_float().sin()));
-                }
-                Op::CosFloat => {
-                    let a = self.pop();
-                    self.push(Value::Float(a.to_float().cos()));
-                }
-                Op::ExpFloat => {
-                    let a = self.pop();
-                    self.push(Value::Float(a.to_float().exp()));
-                }
-                Op::Atan2Float => {
-                    let x = self.pop();
-                    let y = self.pop();
-                    self.push(Value::Float(y.to_float().atan2(x.to_float())));
-                }
-                Op::LogFloat => {
-                    let a = self.pop();
-                    self.push(Value::Float(a.to_float().ln()));
-                }
-                Op::AbsFloat => {
-                    let a = self.pop();
-                    self.push(Value::Float(a.to_float().abs()));
-                }
-                Op::TruncInt => {
-                    let a = self.pop();
-                    self.push(Value::Int(a.to_int()));
-                }
-                Op::CeilFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().ceil())); }
-                Op::FloorFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().floor())); }
-                Op::TruncFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().trunc())); }
-                Op::RoundFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().round_ties_even())); }
-                Op::TanFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().tan())); }
-                Op::AsinFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().asin())); }
-                Op::AcosFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().acos())); }
-                Op::AtanFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().atan())); }
-                Op::SinhFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().sinh())); }
-                Op::CoshFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().cosh())); }
-                Op::TanhFloat => { let a = self.pop(); self.push(Value::Float(a.to_float().tanh())); }
-                Op::Log2Float => { let a = self.pop(); self.push(Value::Float(a.to_float().log2())); }
-                Op::Log10Float => { let a = self.pop(); self.push(Value::Float(a.to_float().log10())); }
-                Op::AbsInt => { let a = self.pop(); self.push(Value::Int(a.to_int().wrapping_abs())); }
-                Op::GcdInt => {
-                    let b = self.pop().to_int().unsigned_abs();
-                    let a = self.pop().to_int().unsigned_abs();
-                    let mut x = a; let mut y = b;
-                    while y != 0 { let t = x % y; x = y; y = t; }
-                    self.push(Value::Int(x as i64));
-                }
-                Op::LcmInt => {
-                    let b = self.pop().to_int().unsigned_abs();
-                    let a = self.pop().to_int().unsigned_abs();
-                    if a == 0 || b == 0 { self.push(Value::Int(0)); } else {
-                        let mut x = a; let mut y = b;
-                        while y != 0 { let t = x % y; x = y; y = t; }
-                        let prod = (a / x).saturating_mul(b);
-                        self.push(Value::Int(prod.min(i64::MAX as u64) as i64));
-                    }
-                }
-                Op::TimeInt => {
-                    let secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    self.push(Value::Int(secs));
-                }
-                Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
-                Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
-                Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),
-                Op::AwkArrayDelete(n) => self.dispatch_awk(ab::AWK_ARRAY_DELETE, *n as usize),
-                Op::AwkArrayClear(n) => self.dispatch_awk(ab::AWK_ARRAY_CLEAR, *n as usize),
-                Op::AwkArrayLen(n) => self.dispatch_awk(ab::AWK_ARRAY_LEN, *n as usize),
-                Op::AwkAnd(argc) => self.dispatch_awk(ab::AWK_AND, *argc as usize),
-                Op::AwkOr(argc) => self.dispatch_awk(ab::AWK_OR, *argc as usize),
-                Op::AwkXor(argc) => self.dispatch_awk(ab::AWK_XOR, *argc as usize),
-                Op::AwkCompl => self.dispatch_awk(ab::AWK_COMPL, 0),
-                Op::AwkLshift => self.dispatch_awk(ab::AWK_LSHIFT, 0),
-                Op::AwkRshift => self.dispatch_awk(ab::AWK_RSHIFT, 0),
-                Op::AwkStrtonum => self.dispatch_awk(ab::AWK_STRTONUM, 0),
-                Op::AwkSystime => self.dispatch_awk(ab::AWK_SYSTIME, 0),
-                Op::AwkRand => self.dispatch_awk(ab::AWK_RAND, 0),
-                Op::AwkSrand(argc) => self.dispatch_awk(ab::AWK_SRAND, *argc as usize),
-                Op::AwkStrftime(argc) => self.dispatch_awk(ab::AWK_STRFTIME, *argc as usize),
-                Op::AwkMktime(argc) => self.dispatch_awk(ab::AWK_MKTIME, *argc as usize),
-                Op::AwkOrd => self.dispatch_awk(ab::AWK_ORD, 1),
-                Op::AwkChr => self.dispatch_awk(ab::AWK_CHR, 1),
-                Op::AwkMkbool => self.dispatch_awk(ab::AWK_MKBOOL, 1),
-                Op::AwkIntdiv => self.dispatch_awk(ab::AWK_INTDIV, 2),
-                Op::AwkIntdiv0 => self.dispatch_awk(ab::AWK_INTDIV0, 2),
-                Op::AwkGensub(argc) => self.dispatch_awk(ab::AWK_GENSUB, *argc as usize),
-                Op::AwkSignal(code) => {
-                    // Raise the AWK control-flow signal and halt this chunk; the
-                    // frontend driver reads `self.awk_signal()` after `run()`.
-                    self.awk_signal = Some(*code);
-                    self.halted = true;
+            // ── Higher-order (stubs) ──
+            Op::MapBlock(_)
+            | Op::GrepBlock(_)
+            | Op::SortBlock(_)
+            | Op::SortDefault
+            | Op::ForEachBlock(_) => {}
+
+            // ── Builtins (inline cache) ──
+            Op::CallBuiltin(id, argc) => {
+                let (id, argc) = (*id, *argc);
+                if let Some(Some(handler)) = self.builtin_table.get(id as usize) {
+                    let result = handler(self, argc);
+                    self.push(result);
                 }
             }
 
-            // Tracing JIT: finalize an active recording on either:
-            //   (a) the recorder was marked aborted earlier (e.g. trace
-            //       exceeded MAX_TRACE_LEN, observed CallBuiltin, etc.) —
-            //       discard and clean up the cache entry, OR
-            //   (b) the just-dispatched jump landed at the anchor IP —
-            //       this is the loop-closing backward branch.
-            // Internal mid-trace branches that DON'T land at the anchor
-            // continue recording; their direction is captured in
-            // `recorded_ips` for later compile-time guard emission.
-            // Only run finalize if the recorder was armed *before* this step;
-            // a recorder freshly armed inside this step starts recording on
-            // the next iteration.
-            #[cfg(feature = "jit")]
-            if recorder_was_armed && self.recorder.is_some() {
-                let aborted = self.recorder.as_ref().map_or(false, |r| r.aborted);
-                // Phase 9: close on the recorded `close_anchor_ip` rather
-                // than `record_anchor_ip` — for side traces these differ.
-                let close_ip = self
-                    .recorder
-                    .as_ref()
-                    .map(|r| r.close_anchor_ip)
+            // ── AWK ops (first-class; dispatched to the AwkHost, same path
+            //    as the reserved ExtendedWide AWK range) ──
+            Op::AwkFieldGet => self.dispatch_awk(ab::AWK_FIELD_GET, 0),
+            Op::AwkFieldSet => self.dispatch_awk(ab::AWK_FIELD_SET, 0),
+            Op::AwkNf => self.dispatch_awk(ab::AWK_NF, 0),
+            Op::AwkSetRecord => self.dispatch_awk(ab::AWK_SET_RECORD, 0),
+            Op::AwkSpecialGet(n) => self.dispatch_awk(ab::AWK_SPECIAL_GET, *n as usize),
+            Op::AwkSpecialSet(n) => self.dispatch_awk(ab::AWK_SPECIAL_SET, *n as usize),
+            Op::AwkPrint(argc) => self.dispatch_awk(ab::AWK_PRINT, *argc as usize),
+            Op::AwkPrintf(argc) => self.dispatch_awk(ab::AWK_PRINTF, *argc as usize),
+            Op::AwkSprintf(argc) => self.dispatch_awk(ab::AWK_SPRINTF, *argc as usize),
+            Op::AwkGetline(src) => self.dispatch_awk(ab::AWK_GETLINE, *src as usize),
+            Op::AwkLength(argc) => self.dispatch_awk(ab::AWK_LENGTH, *argc as usize),
+            Op::AwkSubstr(argc) => self.dispatch_awk(ab::AWK_SUBSTR, *argc as usize),
+            Op::AwkIndex => self.dispatch_awk(ab::AWK_INDEX, 0),
+            Op::AwkSplit(argc) => self.dispatch_awk(ab::AWK_SPLIT, *argc as usize),
+            Op::AwkSub(argc) => self.dispatch_awk(ab::AWK_SUB, *argc as usize),
+            Op::AwkGsub(argc) => self.dispatch_awk(ab::AWK_GSUB, *argc as usize),
+            Op::AwkMatch => self.dispatch_awk(ab::AWK_MATCH, 0),
+            Op::AwkToLower => self.dispatch_awk(ab::AWK_TOLOWER, 0),
+            Op::AwkToUpper => self.dispatch_awk(ab::AWK_TOUPPER, 0),
+            Op::AwkInt => self.dispatch_awk(ab::AWK_INT, 0),
+            Op::AwkSqrt => self.dispatch_awk(ab::AWK_SQRT, 0),
+            Op::AwkSin => self.dispatch_awk(ab::AWK_SIN, 0),
+            Op::AwkCos => self.dispatch_awk(ab::AWK_COS, 0),
+            Op::AwkExp => self.dispatch_awk(ab::AWK_EXP, 0),
+            Op::AwkLog => self.dispatch_awk(ab::AWK_LOG, 0),
+            Op::AwkAtan2 => self.dispatch_awk(ab::AWK_ATAN2, 0),
+            // awk `a / b` and `a % b`: pop b then a (same order as Op::Div),
+            // raise the POSIX fatal error on a zero divisor instead of
+            // yielding Undef. Distinct from the shared shell-arithmetic ops.
+            Op::AwkDiv => {
+                let b = self.pop();
+                let a = self.pop();
+                let divisor = b.to_float();
+                if divisor == 0.0 {
+                    return ExecFlow::Ret(VMResult::Error(
+                        "division by zero attempted".to_string(),
+                    ));
+                }
+                self.push(Value::Float(a.to_float() / divisor));
+            }
+            Op::AwkMod => {
+                let b = self.pop();
+                let a = self.pop();
+                let divisor = b.to_float();
+                if divisor == 0.0 {
+                    return ExecFlow::Ret(VMResult::Error(
+                        "division by zero attempted in `%'".to_string(),
+                    ));
+                }
+                self.push(Value::Float(a.to_float() % divisor));
+            }
+            // Block-JIT-eligible div/mod (see `Op::AwkDivJit`). The
+            // interpreter behavior is byte-identical to AwkDiv/AwkMod; the
+            // distinct opcode only changes JIT eligibility.
+            Op::AwkDivJit => {
+                let b = self.pop();
+                let a = self.pop();
+                let divisor = b.to_float();
+                if divisor == 0.0 {
+                    return ExecFlow::Ret(VMResult::Error(
+                        "division by zero attempted".to_string(),
+                    ));
+                }
+                self.push(Value::Float(a.to_float() / divisor));
+            }
+            Op::AwkModJit => {
+                let b = self.pop();
+                let a = self.pop();
+                let divisor = b.to_float();
+                if divisor == 0.0 {
+                    return ExecFlow::Ret(VMResult::Error(
+                        "division by zero attempted in `%'".to_string(),
+                    ));
+                }
+                self.push(Value::Float(a.to_float() % divisor));
+            }
+            // awk sqrt(x) — interpreter path. On negative input, emit the
+            // generic "awk: warning: sqrt: received negative argument <x>"
+            // warning to stderr (the JIT-trapped path uses the same generic
+            // format via the warn libcall, so the two tiers agree).
+            Op::AwkSqrtJit => {
+                let a = self.pop().to_float();
+                if a < 0.0 {
+                    eprintln!("awk: warning: sqrt: received negative argument {a}");
+                    self.push(Value::Float(f64::NAN));
+                } else {
+                    self.push(Value::Float(a.sqrt()));
+                }
+            }
+            // awk log(x) — interpreter path. Negative emits the generic warn
+            // and pushes NaN; zero returns -inf naturally (no lint warn in
+            // this tier — host frontends that want LINT=1 behavior must use
+            // the existing `Op::AwkLog` host-dispatched variant).
+            Op::AwkLogJit => {
+                let a = self.pop().to_float();
+                if a < 0.0 {
+                    eprintln!("awk: warning: log: received negative argument {a}");
+                    self.push(Value::Float(f64::NAN));
+                } else {
+                    self.push(Value::Float(a.ln()));
+                }
+            }
+            // awk lshift(a, n) — fatal on negative operands. Stack [a, n]:
+            // pop n then a (matches the awk evaluation order pushed by
+            // frontends).
+            Op::AwkLshiftJit => {
+                let n = self.pop().to_float();
+                let a = self.pop().to_float();
+                if a < 0.0 || n < 0.0 {
+                    return ExecFlow::Ret(VMResult::Error(
+                        "lshift: negative values are not allowed".to_string(),
+                    ));
+                }
+                let shifted = (a as i64).wrapping_shl((n as u32) & 0x3f);
+                self.push(Value::Float(shifted as f64));
+            }
+            // awk rshift(a, n) — same guard as lshift but logical right.
+            Op::AwkRshiftJit => {
+                let n = self.pop().to_float();
+                let a = self.pop().to_float();
+                if a < 0.0 || n < 0.0 {
+                    return ExecFlow::Ret(VMResult::Error(
+                        "rshift: negative values are not allowed".to_string(),
+                    ));
+                }
+                let shifted = ((a as i64) as u64).wrapping_shr((n as u32) & 0x3f);
+                self.push(Value::Float(shifted as f64));
+            }
+            // awk compl(a) — fatal on negative. `!a` in u64 space then back
+            // to f64 (the high bits saturate the f64 mantissa, matching
+            // awkrs's `num_to_u64` semantics).
+            Op::AwkComplJit => {
+                let a = self.pop().to_float();
+                if a < 0.0 {
+                    return ExecFlow::Ret(VMResult::Error(
+                        "compl: negative value is not allowed".to_string(),
+                    ));
+                }
+                let v = !(a as i64);
+                self.push(Value::Float(v as f64));
+            }
+            // awk `$N` numeric read — interpreter path. Calls the same
+            // host-installed hook as the JIT-compiled variant so behavior
+            // matches across tiers. Returns 0.0 when no hook is set, which
+            // matches awk's "missing field" coercion.
+            Op::AwkGetFieldNum(field_idx) => {
+                let v = crate::jit::fusevm_jit_awk_get_field_num(*field_idx as i64);
+                self.push(Value::Float(v));
+            }
+            Op::PowFloat => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().powf(b.to_float())));
+            }
+            Op::SqrtFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().sqrt()));
+            }
+            Op::SinFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().sin()));
+            }
+            Op::CosFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().cos()));
+            }
+            Op::ExpFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().exp()));
+            }
+            Op::Atan2Float => {
+                let x = self.pop();
+                let y = self.pop();
+                self.push(Value::Float(y.to_float().atan2(x.to_float())));
+            }
+            Op::LogFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().ln()));
+            }
+            Op::AbsFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().abs()));
+            }
+            Op::TruncInt => {
+                let a = self.pop();
+                self.push(Value::Int(a.to_int()));
+            }
+            Op::CeilFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().ceil()));
+            }
+            Op::FloorFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().floor()));
+            }
+            Op::TruncFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().trunc()));
+            }
+            Op::RoundFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().round_ties_even()));
+            }
+            Op::TanFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().tan()));
+            }
+            Op::AsinFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().asin()));
+            }
+            Op::AcosFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().acos()));
+            }
+            Op::AtanFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().atan()));
+            }
+            Op::SinhFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().sinh()));
+            }
+            Op::CoshFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().cosh()));
+            }
+            Op::TanhFloat => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().tanh()));
+            }
+            Op::Log2Float => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().log2()));
+            }
+            Op::Log10Float => {
+                let a = self.pop();
+                self.push(Value::Float(a.to_float().log10()));
+            }
+            Op::AbsInt => {
+                let a = self.pop();
+                self.push(Value::Int(a.to_int().wrapping_abs()));
+            }
+            Op::GcdInt => {
+                let b = self.pop().to_int().unsigned_abs();
+                let a = self.pop().to_int().unsigned_abs();
+                let mut x = a;
+                let mut y = b;
+                while y != 0 {
+                    let t = x % y;
+                    x = y;
+                    y = t;
+                }
+                self.push(Value::Int(x as i64));
+            }
+            Op::LcmInt => {
+                let b = self.pop().to_int().unsigned_abs();
+                let a = self.pop().to_int().unsigned_abs();
+                if a == 0 || b == 0 {
+                    self.push(Value::Int(0));
+                } else {
+                    let mut x = a;
+                    let mut y = b;
+                    while y != 0 {
+                        let t = x % y;
+                        x = y;
+                        y = t;
+                    }
+                    let prod = (a / x).saturating_mul(b);
+                    self.push(Value::Int(prod.min(i64::MAX as u64) as i64));
+                }
+            }
+            Op::TimeInt => {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                let was_jump = matches!(
-                    &ops[ip],
-                    Op::Jump(_)
-                        | Op::JumpIfTrue(_)
-                        | Op::JumpIfFalse(_)
-                        | Op::JumpIfTrueKeep(_)
-                        | Op::JumpIfFalseKeep(_)
-                );
-                let landed_at_anchor = self.ip == close_ip;
-                if aborted || (was_jump && landed_at_anchor) {
-                    self.finalize_recorder();
-                }
+                self.push(Value::Int(secs));
             }
+            Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
+            Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
+            Op::AwkArrayExists(n) => self.dispatch_awk(ab::AWK_ARRAY_EXISTS, *n as usize),
+            Op::AwkArrayDelete(n) => self.dispatch_awk(ab::AWK_ARRAY_DELETE, *n as usize),
+            Op::AwkArrayClear(n) => self.dispatch_awk(ab::AWK_ARRAY_CLEAR, *n as usize),
+            Op::AwkArrayLen(n) => self.dispatch_awk(ab::AWK_ARRAY_LEN, *n as usize),
+            Op::AwkAnd(argc) => self.dispatch_awk(ab::AWK_AND, *argc as usize),
+            Op::AwkOr(argc) => self.dispatch_awk(ab::AWK_OR, *argc as usize),
+            Op::AwkXor(argc) => self.dispatch_awk(ab::AWK_XOR, *argc as usize),
+            Op::AwkCompl => self.dispatch_awk(ab::AWK_COMPL, 0),
+            Op::AwkLshift => self.dispatch_awk(ab::AWK_LSHIFT, 0),
+            Op::AwkRshift => self.dispatch_awk(ab::AWK_RSHIFT, 0),
+            Op::AwkStrtonum => self.dispatch_awk(ab::AWK_STRTONUM, 0),
+            Op::AwkSystime => self.dispatch_awk(ab::AWK_SYSTIME, 0),
+            Op::AwkRand => self.dispatch_awk(ab::AWK_RAND, 0),
+            Op::AwkSrand(argc) => self.dispatch_awk(ab::AWK_SRAND, *argc as usize),
+            Op::AwkStrftime(argc) => self.dispatch_awk(ab::AWK_STRFTIME, *argc as usize),
+            Op::AwkMktime(argc) => self.dispatch_awk(ab::AWK_MKTIME, *argc as usize),
+            Op::AwkOrd => self.dispatch_awk(ab::AWK_ORD, 1),
+            Op::AwkChr => self.dispatch_awk(ab::AWK_CHR, 1),
+            Op::AwkMkbool => self.dispatch_awk(ab::AWK_MKBOOL, 1),
+            Op::AwkIntdiv => self.dispatch_awk(ab::AWK_INTDIV, 2),
+            Op::AwkIntdiv0 => self.dispatch_awk(ab::AWK_INTDIV0, 2),
+            Op::AwkGensub(argc) => self.dispatch_awk(ab::AWK_GENSUB, *argc as usize),
+            Op::AwkSignal(code) => {
+                // Raise the AWK control-flow signal and halt this chunk; the
+                // frontend driver reads `self.awk_signal()` after `run()`.
+                self.awk_signal = Some(*code);
+                self.halted = true;
+            }
+        }
+
+        // Tracing JIT: finalize an active recording on either:
+        //   (a) the recorder was marked aborted earlier (e.g. trace
+        //       exceeded MAX_TRACE_LEN, observed CallBuiltin, etc.) —
+        //       discard and clean up the cache entry, OR
+        //   (b) the just-dispatched jump landed at the anchor IP —
+        //       this is the loop-closing backward branch.
+        // Internal mid-trace branches that DON'T land at the anchor
+        // continue recording; their direction is captured in
+        // `recorded_ips` for later compile-time guard emission.
+        // Only run finalize if the recorder was armed *before* this step;
+        // a recorder freshly armed inside this step starts recording on
+        // the next iteration.
+        #[cfg(feature = "jit")]
+        if recorder_was_armed && self.recorder.is_some() {
+            let aborted = self.recorder.as_ref().map_or(false, |r| r.aborted);
+            // Phase 9: close on the recorded `close_anchor_ip` rather
+            // than `record_anchor_ip` — for side traces these differ.
+            let close_ip = self
+                .recorder
+                .as_ref()
+                .map(|r| r.close_anchor_ip)
+                .unwrap_or(0);
+            let was_jump = matches!(
+                &ops[ip],
+                Op::Jump(_)
+                    | Op::JumpIfTrue(_)
+                    | Op::JumpIfFalse(_)
+                    | Op::JumpIfTrueKeep(_)
+                    | Op::JumpIfFalseKeep(_)
+            );
+            let landed_at_anchor = self.ip == close_ip;
+            if aborted || (was_jump && landed_at_anchor) {
+                self.finalize_recorder();
+            }
+        }
         ExecFlow::Cont
     }
 

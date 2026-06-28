@@ -864,23 +864,115 @@ mod cranelift_jit_impl {
                     _ => Cell::Dyn,
                 });
             }
-            Op::CeilFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.ceil())), _ => stack.push(Cell::DynF) } }
-            Op::FloorFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.floor())), _ => stack.push(Cell::DynF) } }
-            Op::TruncFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.trunc())), _ => stack.push(Cell::DynF) } }
-            Op::RoundFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.round_ties_even())), _ => stack.push(Cell::DynF) } }
-            Op::TanFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.tan())), _ => stack.push(Cell::DynF) } }
-            Op::AsinFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.asin())), _ => stack.push(Cell::DynF) } }
-            Op::AcosFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.acos())), _ => stack.push(Cell::DynF) } }
-            Op::AtanFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.atan())), _ => stack.push(Cell::DynF) } }
-            Op::SinhFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.sinh())), _ => stack.push(Cell::DynF) } }
-            Op::CoshFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.cosh())), _ => stack.push(Cell::DynF) } }
-            Op::TanhFloat => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.tanh())), _ => stack.push(Cell::DynF) } }
-            Op::Log2Float => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.log2())), _ => stack.push(Cell::DynF) } }
-            Op::Log10Float => { let a = stack.pop()?; match a { Cell::ConstF(x) => stack.push(Cell::ConstF(x.log10())), _ => stack.push(Cell::DynF) } }
-            Op::AbsInt => { let a = stack.pop()?; match a { Cell::Const(n) => stack.push(Cell::Const(n.wrapping_abs())), _ => stack.push(Cell::Dyn) } }
-            Op::GcdInt => { let (_, _) = pop2_strict(stack)?; stack.push(Cell::Dyn); }
-            Op::LcmInt => { let (_, _) = pop2_strict(stack)?; stack.push(Cell::Dyn); }
-            Op::TimeInt => { stack.push(Cell::Dyn); }
+            Op::CeilFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.ceil())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::FloorFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.floor())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::TruncFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.trunc())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::RoundFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.round_ties_even())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::TanFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.tan())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::AsinFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.asin())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::AcosFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.acos())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::AtanFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.atan())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::SinhFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.sinh())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::CoshFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.cosh())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::TanhFloat => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.tanh())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::Log2Float => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.log2())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::Log10Float => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::ConstF(x) => stack.push(Cell::ConstF(x.log10())),
+                    _ => stack.push(Cell::DynF),
+                }
+            }
+            Op::AbsInt => {
+                let a = stack.pop()?;
+                match a {
+                    Cell::Const(n) => stack.push(Cell::Const(n.wrapping_abs())),
+                    _ => stack.push(Cell::Dyn),
+                }
+            }
+            Op::GcdInt => {
+                let (_, _) = pop2_strict(stack)?;
+                stack.push(Cell::Dyn);
+            }
+            Op::LcmInt => {
+                let (_, _) = pop2_strict(stack)?;
+                stack.push(Cell::Dyn);
+            }
+            Op::TimeInt => {
+                stack.push(Cell::Dyn);
+            }
             // awk int(x): truncate toward zero. An integer operand is already
             // integral (identity); a float is truncated. Matches awkrs
             // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
@@ -1161,22 +1253,98 @@ mod cranelift_jit_impl {
         }
     }
 
-    #[no_mangle] pub extern "C" fn fusevm_jit_tan_f64(x: f64) -> f64 { let r = x.tan(); if r.is_nan() { f64::NAN } else { r } }
-    #[no_mangle] pub extern "C" fn fusevm_jit_asin_f64(x: f64) -> f64 { let r = x.asin(); if r.is_nan() { f64::NAN } else { r } }
-    #[no_mangle] pub extern "C" fn fusevm_jit_acos_f64(x: f64) -> f64 { let r = x.acos(); if r.is_nan() { f64::NAN } else { r } }
-    #[no_mangle] pub extern "C" fn fusevm_jit_atan_f64(x: f64) -> f64 { let r = x.atan(); if r.is_nan() { f64::NAN } else { r } }
-    #[no_mangle] pub extern "C" fn fusevm_jit_sinh_f64(x: f64) -> f64 { let r = x.sinh(); if r.is_nan() { f64::NAN } else { r } }
-    #[no_mangle] pub extern "C" fn fusevm_jit_cosh_f64(x: f64) -> f64 { let r = x.cosh(); if r.is_nan() { f64::NAN } else { r } }
-    #[no_mangle] pub extern "C" fn fusevm_jit_tanh_f64(x: f64) -> f64 { let r = x.tanh(); if r.is_nan() { f64::NAN } else { r } }
-    #[no_mangle] pub extern "C" fn fusevm_jit_log2_f64(x: f64) -> f64 { let r = x.log2(); if r.is_nan() { f64::NAN } else { r } }
-    #[no_mangle] pub extern "C" fn fusevm_jit_log10_f64(x: f64) -> f64 { let r = x.log10(); if r.is_nan() { f64::NAN } else { r } }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_tan_f64(x: f64) -> f64 {
+        let r = x.tan();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_asin_f64(x: f64) -> f64 {
+        let r = x.asin();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_acos_f64(x: f64) -> f64 {
+        let r = x.acos();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_atan_f64(x: f64) -> f64 {
+        let r = x.atan();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_sinh_f64(x: f64) -> f64 {
+        let r = x.sinh();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_cosh_f64(x: f64) -> f64 {
+        let r = x.cosh();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_tanh_f64(x: f64) -> f64 {
+        let r = x.tanh();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_log2_f64(x: f64) -> f64 {
+        let r = x.log2();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_log10_f64(x: f64) -> f64 {
+        let r = x.log10();
+        if r.is_nan() {
+            f64::NAN
+        } else {
+            r
+        }
+    }
 
     /// GCD of two i64s (reduced by absolute value). gcd(0, 0) = 0.
     #[no_mangle]
     pub extern "C" fn fusevm_jit_gcd_i64(a: i64, b: i64) -> i64 {
         let mut x = a.unsigned_abs();
         let mut y = b.unsigned_abs();
-        while y != 0 { let t = x % y; x = y; y = t; }
+        while y != 0 {
+            let t = x % y;
+            x = y;
+            y = t;
+        }
         x.min(i64::MAX as u64) as i64
     }
 
@@ -1185,7 +1353,9 @@ mod cranelift_jit_impl {
     pub extern "C" fn fusevm_jit_lcm_i64(a: i64, b: i64) -> i64 {
         let x = a.unsigned_abs();
         let y = b.unsigned_abs();
-        if x == 0 || y == 0 { return 0; }
+        if x == 0 || y == 0 {
+            return 0;
+        }
         let g = fusevm_jit_gcd_i64(a, b).unsigned_abs();
         let prod = (x / g).saturating_mul(y);
         prod.min(i64::MAX as u64) as i64
@@ -1326,18 +1496,42 @@ mod cranelift_jit_impl {
                     Op::LogFloat if m.log.is_none() => {
                         m.log = declare_unary_f64(module, "fusevm_jit_log_f64");
                     }
-                    Op::TanFloat if m.tan.is_none() => { m.tan = declare_unary_f64(module, "fusevm_jit_tan_f64"); }
-                    Op::AsinFloat if m.asin.is_none() => { m.asin = declare_unary_f64(module, "fusevm_jit_asin_f64"); }
-                    Op::AcosFloat if m.acos.is_none() => { m.acos = declare_unary_f64(module, "fusevm_jit_acos_f64"); }
-                    Op::AtanFloat if m.atan.is_none() => { m.atan = declare_unary_f64(module, "fusevm_jit_atan_f64"); }
-                    Op::SinhFloat if m.sinh.is_none() => { m.sinh = declare_unary_f64(module, "fusevm_jit_sinh_f64"); }
-                    Op::CoshFloat if m.cosh.is_none() => { m.cosh = declare_unary_f64(module, "fusevm_jit_cosh_f64"); }
-                    Op::TanhFloat if m.tanh.is_none() => { m.tanh = declare_unary_f64(module, "fusevm_jit_tanh_f64"); }
-                    Op::Log2Float if m.log2.is_none() => { m.log2 = declare_unary_f64(module, "fusevm_jit_log2_f64"); }
-                    Op::Log10Float if m.log10.is_none() => { m.log10 = declare_unary_f64(module, "fusevm_jit_log10_f64"); }
-                    Op::GcdInt if m.gcd_i64.is_none() => { m.gcd_i64 = declare_binary_i64(module, "fusevm_jit_gcd_i64"); }
-                    Op::LcmInt if m.lcm_i64.is_none() => { m.lcm_i64 = declare_binary_i64(module, "fusevm_jit_lcm_i64"); }
-                    Op::TimeInt if m.time_i64.is_none() => { m.time_i64 = declare_nullary_i64(module, "fusevm_jit_time_i64"); }
+                    Op::TanFloat if m.tan.is_none() => {
+                        m.tan = declare_unary_f64(module, "fusevm_jit_tan_f64");
+                    }
+                    Op::AsinFloat if m.asin.is_none() => {
+                        m.asin = declare_unary_f64(module, "fusevm_jit_asin_f64");
+                    }
+                    Op::AcosFloat if m.acos.is_none() => {
+                        m.acos = declare_unary_f64(module, "fusevm_jit_acos_f64");
+                    }
+                    Op::AtanFloat if m.atan.is_none() => {
+                        m.atan = declare_unary_f64(module, "fusevm_jit_atan_f64");
+                    }
+                    Op::SinhFloat if m.sinh.is_none() => {
+                        m.sinh = declare_unary_f64(module, "fusevm_jit_sinh_f64");
+                    }
+                    Op::CoshFloat if m.cosh.is_none() => {
+                        m.cosh = declare_unary_f64(module, "fusevm_jit_cosh_f64");
+                    }
+                    Op::TanhFloat if m.tanh.is_none() => {
+                        m.tanh = declare_unary_f64(module, "fusevm_jit_tanh_f64");
+                    }
+                    Op::Log2Float if m.log2.is_none() => {
+                        m.log2 = declare_unary_f64(module, "fusevm_jit_log2_f64");
+                    }
+                    Op::Log10Float if m.log10.is_none() => {
+                        m.log10 = declare_unary_f64(module, "fusevm_jit_log10_f64");
+                    }
+                    Op::GcdInt if m.gcd_i64.is_none() => {
+                        m.gcd_i64 = declare_binary_i64(module, "fusevm_jit_gcd_i64");
+                    }
+                    Op::LcmInt if m.lcm_i64.is_none() => {
+                        m.lcm_i64 = declare_binary_i64(module, "fusevm_jit_lcm_i64");
+                    }
+                    Op::TimeInt if m.time_i64.is_none() => {
+                        m.time_i64 = declare_nullary_i64(module, "fusevm_jit_time_i64");
+                    }
                     Op::AwkDivJit | Op::AwkModJit if m.awk_div_trap.is_none() => {
                         m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
                     }
@@ -1386,7 +1580,9 @@ mod cranelift_jit_impl {
                 log10: self.log10.map(|id| module.declare_func_in_func(id, func)),
                 gcd_i64: self.gcd_i64.map(|id| module.declare_func_in_func(id, func)),
                 lcm_i64: self.lcm_i64.map(|id| module.declare_func_in_func(id, func)),
-                time_i64: self.time_i64.map(|id| module.declare_func_in_func(id, func)),
+                time_i64: self
+                    .time_i64
+                    .map(|id| module.declare_func_in_func(id, func)),
                 awk_div_trap: self
                     .awk_div_trap
                     .map(|id| module.declare_func_in_func(id, func)),
@@ -1838,19 +2034,67 @@ mod cranelift_jit_impl {
                     }
                 }
             }
-            Op::CeilFloat => { let a = pop_as_f64(bcx, stack)?; stack.push((bcx.ins().ceil(a), JitTy::Float)); }
-            Op::FloorFloat => { let a = pop_as_f64(bcx, stack)?; stack.push((bcx.ins().floor(a), JitTy::Float)); }
-            Op::TruncFloat => { let a = pop_as_f64(bcx, stack)?; stack.push((bcx.ins().trunc(a), JitTy::Float)); }
-            Op::RoundFloat => { let a = pop_as_f64(bcx, stack)?; stack.push((bcx.ins().nearest(a), JitTy::Float)); }
-            Op::TanFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.tan?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
-            Op::AsinFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.asin?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
-            Op::AcosFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.acos?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
-            Op::AtanFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.atan?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
-            Op::SinhFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.sinh?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
-            Op::CoshFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.cosh?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
-            Op::TanhFloat => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.tanh?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
-            Op::Log2Float => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.log2?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
-            Op::Log10Float => { let a = pop_as_f64(bcx, stack)?; let c = bcx.ins().call(math.log10?, &[a]); stack.push((*bcx.inst_results(c).first()?, JitTy::Float)); }
+            Op::CeilFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                stack.push((bcx.ins().ceil(a), JitTy::Float));
+            }
+            Op::FloorFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                stack.push((bcx.ins().floor(a), JitTy::Float));
+            }
+            Op::TruncFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                stack.push((bcx.ins().trunc(a), JitTy::Float));
+            }
+            Op::RoundFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                stack.push((bcx.ins().nearest(a), JitTy::Float));
+            }
+            Op::TanFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.tan?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
+            Op::AsinFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.asin?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
+            Op::AcosFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.acos?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
+            Op::AtanFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.atan?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
+            Op::SinhFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.sinh?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
+            Op::CoshFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.cosh?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
+            Op::TanhFloat => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.tanh?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
+            Op::Log2Float => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.log2?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
+            Op::Log10Float => {
+                let a = pop_as_f64(bcx, stack)?;
+                let c = bcx.ins().call(math.log10?, &[a]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Float));
+            }
             Op::AbsInt => {
                 let (a, ty) = stack.pop()?;
                 match ty {
@@ -2914,8 +3158,18 @@ mod cranelift_jit_impl {
                     tanh: Some(import(&mut bcx, H_TANH_F64, &[types::F64], types::F64)),
                     log2: Some(import(&mut bcx, H_LOG2_F64, &[types::F64], types::F64)),
                     log10: Some(import(&mut bcx, H_LOG10_F64, &[types::F64], types::F64)),
-                    gcd_i64: Some(import(&mut bcx, H_GCD_I64, &[types::I64, types::I64], types::I64)),
-                    lcm_i64: Some(import(&mut bcx, H_LCM_I64, &[types::I64, types::I64], types::I64)),
+                    gcd_i64: Some(import(
+                        &mut bcx,
+                        H_GCD_I64,
+                        &[types::I64, types::I64],
+                        types::I64,
+                    )),
+                    lcm_i64: Some(import(
+                        &mut bcx,
+                        H_LCM_I64,
+                        &[types::I64, types::I64],
+                        types::I64,
+                    )),
                     time_i64: Some(import(&mut bcx, H_TIME_I64, &[], types::I64)),
                     // The linear tier never lowers AwkDivJit/AwkModJit (those are
                     // block-only ops handled in `build_block_function`), so the
@@ -4764,29 +5018,53 @@ mod cranelift_jit_impl {
                         v.push((fid, disk_cache::H_LOG_F64));
                     }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.tan { v.push((fid, disk_cache::H_TAN_F64)); }
+                    if let Some(fid) = math_ids.tan {
+                        v.push((fid, disk_cache::H_TAN_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.asin { v.push((fid, disk_cache::H_ASIN_F64)); }
+                    if let Some(fid) = math_ids.asin {
+                        v.push((fid, disk_cache::H_ASIN_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.acos { v.push((fid, disk_cache::H_ACOS_F64)); }
+                    if let Some(fid) = math_ids.acos {
+                        v.push((fid, disk_cache::H_ACOS_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.atan { v.push((fid, disk_cache::H_ATAN_F64)); }
+                    if let Some(fid) = math_ids.atan {
+                        v.push((fid, disk_cache::H_ATAN_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.sinh { v.push((fid, disk_cache::H_SINH_F64)); }
+                    if let Some(fid) = math_ids.sinh {
+                        v.push((fid, disk_cache::H_SINH_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.cosh { v.push((fid, disk_cache::H_COSH_F64)); }
+                    if let Some(fid) = math_ids.cosh {
+                        v.push((fid, disk_cache::H_COSH_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.tanh { v.push((fid, disk_cache::H_TANH_F64)); }
+                    if let Some(fid) = math_ids.tanh {
+                        v.push((fid, disk_cache::H_TANH_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.log2 { v.push((fid, disk_cache::H_LOG2_F64)); }
+                    if let Some(fid) = math_ids.log2 {
+                        v.push((fid, disk_cache::H_LOG2_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.log10 { v.push((fid, disk_cache::H_LOG10_F64)); }
+                    if let Some(fid) = math_ids.log10 {
+                        v.push((fid, disk_cache::H_LOG10_F64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.gcd_i64 { v.push((fid, disk_cache::H_GCD_I64)); }
+                    if let Some(fid) = math_ids.gcd_i64 {
+                        v.push((fid, disk_cache::H_GCD_I64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.lcm_i64 { v.push((fid, disk_cache::H_LCM_I64)); }
+                    if let Some(fid) = math_ids.lcm_i64 {
+                        v.push((fid, disk_cache::H_LCM_I64));
+                    }
                     #[cfg(feature = "jit-disk-cache")]
-                    if let Some(fid) = math_ids.time_i64 { v.push((fid, disk_cache::H_TIME_I64)); }
+                    if let Some(fid) = math_ids.time_i64 {
+                        v.push((fid, disk_cache::H_TIME_I64));
+                    }
                     v
                 },
             },
