@@ -2717,6 +2717,90 @@ impl VM {
         self.aot_result = Some(VMResult::Ok(Value::Float(f)));
     }
 
+    /// Spill a scalar from a native register onto the boxed operand stack, so a
+    /// shimmed (non-lowered) op can consume it. Boxed by kind to match exactly
+    /// what the interpreter would have on the stack.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_push_int(&mut self, n: i64) {
+        self.stack.push(Value::Int(n));
+    }
+
+    /// Float analog of [`VM::aot_push_int`].
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_push_float(&mut self, f: f64) {
+        self.stack.push(Value::Float(f));
+    }
+
+    /// Bool analog of [`VM::aot_push_int`] (the register carries 0/1).
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_push_bool(&mut self, n: i64) {
+        self.stack.push(Value::Bool(n != 0));
+    }
+
+    /// Write a register-resident slot back to the VM frame on deopt, so the
+    /// resumed interpreter sees the current value. (Native code caches slots in
+    /// registers; the frame is otherwise stale.)
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_store_slot_int(&mut self, idx: u32, n: i64) {
+        self.set_slot(idx as u16, Value::Int(n));
+    }
+
+    /// Float analog of [`VM::aot_store_slot_int`].
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_store_slot_float(&mut self, idx: u32, f: f64) {
+        self.set_slot(idx as u16, Value::Float(f));
+    }
+
+    /// Global analog of [`VM::aot_store_slot_int`].
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_store_global_int(&mut self, idx: u32, n: i64) {
+        self.set_var(idx as u16, Value::Int(n));
+    }
+
+    /// Float global analog of [`VM::aot_store_slot_int`].
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_store_global_float(&mut self, idx: u32, f: f64) {
+        self.set_var(idx as u16, Value::Float(f));
+    }
+
+    /// Deopt exit: resume interpretation from `ip` with the VM state the native
+    /// code just reconstructed (operand stack spilled, slots/globals written
+    /// back), and capture the rest-of-chunk result. One-way — native code does
+    /// not re-enter after this.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_resume(&mut self, ip: u32) {
+        self.ip = ip as usize;
+        let r = self.run();
+        self.aot_result = Some(r);
+    }
+
+    /// Reload a float off the boxed operand stack into a native register — the
+    /// reload half of the boundary, for source ops whose result kind is
+    /// statically `Float` (so no runtime type guard is needed).
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_pop_float(&mut self) -> f64 {
+        self.stack.pop().map(|v| v.to_float()).unwrap_or(0.0)
+    }
+
+    /// Reload an integer (via `to_int`) off the boxed operand stack — used for
+    /// `GetStatus`, whose `Value::Status` carries its code as the int.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_pop_int(&mut self) -> i64 {
+        self.stack.pop().map(|v| v.to_int()).unwrap_or(0)
+    }
+
+    /// Spill a `Status` code from a register onto the boxed stack (deopt/sink).
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_push_status(&mut self, n: i64) {
+        self.stack.push(Value::Status(n as i32));
+    }
+
+    /// Store a `Status` result computed by natively-lowered AOT code.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_set_status_result(&mut self, n: i64) {
+        self.aot_result = Some(VMResult::Ok(Value::Status(n as i32)));
+    }
+
     /// Store an error result from natively-lowered AOT code, keyed by a small
     /// code so the native side passes an integer rather than a string. The
     /// messages match the interpreter's for the corresponding ops exactly.
