@@ -2701,6 +2701,38 @@ impl VM {
         }
     }
 
+    /// Store an explicit integer result computed by natively-lowered AOT code.
+    /// The native fast path holds intermediate values in registers (never on
+    /// `self.stack`), so it reports its final value through this hook instead of
+    /// the stack-tail logic in [`VM::aot_finish`].
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_set_int_result(&mut self, n: i64) {
+        self.aot_result = Some(VMResult::Ok(Value::Int(n)));
+    }
+
+    /// Store an explicit float result computed by natively-lowered AOT code.
+    /// The float analog of [`VM::aot_set_int_result`].
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_set_float_result(&mut self, f: f64) {
+        self.aot_result = Some(VMResult::Ok(Value::Float(f)));
+    }
+
+    /// Read a slot as an integer for natively-lowered AOT code. Mirrors the
+    /// interpreter's `GetSlot` (root/current frame, `Undef`→0 via `to_int`).
+    /// The native path only emits this when its analysis proves the slot holds
+    /// an integer, so the coercion is exact for those programs.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_slot_get_int(&self, slot: u32) -> i64 {
+        self.get_slot(slot as u16).to_int()
+    }
+
+    /// Write an integer slot for natively-lowered AOT code. Mirrors the
+    /// interpreter's `SetSlot` (stores into the current frame, growing it).
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_slot_set_int(&mut self, slot: u32, n: i64) {
+        self.set_slot(slot as u16, Value::Int(n));
+    }
+
     /// Take the result captured by the AOT driver, leaving `None` behind.
     #[cfg(feature = "aot")]
     pub(crate) fn take_aot_result(&mut self) -> VMResult {

@@ -494,7 +494,7 @@ for _ in 0..1000 {
 |---|---|
 | `VM::new(chunk)` per call | 130 ns |
 | `pool.acquire(chunk)` per call | 163 ns |
-
+γ
 For tiny chunks the pool is *slower* — `reset` does more bookkeeping (drop the old chunk, clear globals, zero the deopt buffer) than `VM::new` skips. The pool wins for chunks where:
 - Globals/name pool is large (>16 entries — reset's resize is amortized vs `vec![Value::Undef; n]`)
 - Many slots get used (frame.slots Vec capacity is preserved across reuse)
