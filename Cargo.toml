@@ -81,3 +81,8 @@ required-features = ["jit"]
 name = "jit_disk_cache"
 harness = false
 required-features = ["jit-disk-cache"]
+
+[[bench]]
+name = "aot_native"
+harness = false
+required-features = ["aot"]

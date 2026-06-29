@@ -2717,20 +2717,20 @@ impl VM {
         self.aot_result = Some(VMResult::Ok(Value::Float(f)));
     }
 
-    /// Read a slot as an integer for natively-lowered AOT code. Mirrors the
-    /// interpreter's `GetSlot` (root/current frame, `Undef`→0 via `to_int`).
-    /// The native path only emits this when its analysis proves the slot holds
-    /// an integer, so the coercion is exact for those programs.
+    /// Store an error result from natively-lowered AOT code, keyed by a small
+    /// code so the native side passes an integer rather than a string. The
+    /// messages match the interpreter's for the corresponding ops exactly.
     #[cfg(feature = "aot")]
-    pub(crate) fn aot_slot_get_int(&self, slot: u32) -> i64 {
-        self.get_slot(slot as u16).to_int()
-    }
-
-    /// Write an integer slot for natively-lowered AOT code. Mirrors the
-    /// interpreter's `SetSlot` (stores into the current frame, growing it).
-    #[cfg(feature = "aot")]
-    pub(crate) fn aot_slot_set_int(&mut self, slot: u32, n: i64) {
-        self.set_slot(slot as u16, Value::Int(n));
+    pub(crate) fn aot_set_error(&mut self, code: u32) {
+        let msg = match code {
+            0 => "division by zero attempted",
+            1 => "division by zero attempted in `%'",
+            2 => "lshift: negative values are not allowed",
+            3 => "rshift: negative values are not allowed",
+            4 => "compl: negative value is not allowed",
+            _ => "aot: runtime error",
+        };
+        self.aot_result = Some(VMResult::Error(msg.to_string()));
     }
 
     /// Take the result captured by the AOT driver, leaving `None` behind.

@@ -32,24 +32,44 @@
 //! # Native op specialization (in progress)
 //!
 //! Layered on top of the threaded path, [`build_entry`] lowers chunks that are
-//! integer/boolean computations directly to native IR. [`analyze_native`] runs
+//! integer/boolean computations directly to native IR. `analyze_native` runs
 //! an abstract interpretation over the operand stack — tracking int-vs-bool
-//! [`Kind`]s, finding basic-block leaders, and checking join consistency — and,
-//! when the whole chunk qualifies, [`build_entry_native`] emits one Cranelift
+//! `Kind`s, finding basic-block leaders, and checking join consistency — and,
+//! when the whole chunk qualifies, `build_entry_native` emits one Cranelift
 //! block per leader with the operand stack held in frontend `Variable`s (an
-//! `i64` and an `f64` variable per position; the plan's [`Kind`]s say which is
+//! `i64` and an `f64` variable per position; the plan's `Kind`s say which is
 //! live). This covers integer **and float** arithmetic/comparisons — including
-//! `int→float` promotion mirroring the interpreter — control flow
-//! (`Jump`/`JumpIf*`), and integer slots (via typed accessor shims), with
-//! **no per-op interpreter dispatch**; only the final result is boxed back into
-//! the VM.
+//! `int→float` promotion mirroring the interpreter — modulo (`Mod`: integer
+//! `srem` guarding the divisors that would trap, or an `fmod` libcall for
+//! floats) and power (`Pow`/`PowFloat` via a `powf` libcall), the math
+//! intrinsics (`AbsFloat`/`SqrtFloat`/`Ceil`/`Floor`/`Trunc`/`RoundFloat` as
+//! single instructions; `Sin`/`Cos`/`Tan`/`Exp`/`Log`/… and `Atan2Float` via
+//! libcalls; `AbsInt`/`TruncInt`; `GcdInt`/`LcmInt` as internal Euclid loops;
+//! and the awk JIT scalar ops (`AwkDivJit`/`AwkModJit`/`AwkLshiftJit`/
+//! `AwkRshiftJit`/`AwkComplJit`, which take a native error-return branch on a
+//! bad operand; `AwkSqrtJit`/`AwkLogJit`, which warn-and-return-NaN on a
+//! negative argument), integer bitwise/shift ops
+//! (`BitAnd`/…/`Shl`/`Shr`), `Inc`/`Dec`, booleans (`LoadTrue`/`LoadFalse`/
+//! `LogNot`/`LogAnd`/`LogOr`), three-way compare (`Spaceship`), stack shuffles
+//! (`Dup`/`Dup2`/`Swap`/`Rot`/`Pop`), control flow (`Jump`/`JumpIf*`, including
+//! the value-keeping `JumpIf*Keep`), integer slots and globals
+//! (`GetVar`/`SetVar`/`DeclareVar`) — both held in SSA registers, guarded by a
+//! definite-assignment analysis — and the slot super-ops the
+//! compiler emits for hot loops (`PreIncSlot`/`PostIncSlot`/…,
+//! `AddAssignSlotVoid`, the fused `SlotLtIntJumpIfFalse` /
+//! `SlotIncLtIntJumpBack`, and `AccumSumLoop` — whose internal
+//! `while i < limit { sum += i; i += 1 }` is emitted as a real native loop),
+//! with **no per-op interpreter dispatch and no per-op
+//! shim calls**; only the final result is boxed back into the VM. A
+//! fully-native loop therefore runs entirely in registers.
 //!
-//! Still deferred to later stages: `Div`/`Mod`/`Pow` (divide-by-zero `Undef`,
-//! integer-div traps, and `powf`), float-typed slots, runtime type guards for
+//! Still deferred to later stages: `Div` (divide-by-zero yields `Undef`, which
+//! can't be statically typed without runtime tagging), float-typed slots,
+//! runtime type guards for
 //! genuinely dynamic values, and mixed inline/shim regions (which need a
 //! boxed↔unboxed spill/reload boundary so an unlowered op can fall back
 //! mid-chunk). Anything not yet specialized falls back wholesale to
-//! [`build_entry_threaded`].
+//! `build_entry_threaded`.
 //!
 //! [`build_entry`] is generic over [`Module`], so the in-memory JIT path used
 //! to validate the compiler ([`run_chunk_native`]) and the on-disk object path
@@ -113,7 +133,7 @@ pub extern "C" fn fusevm_aot_finish(vm: *mut VM) {
 }
 
 /// Store an integer result computed by natively-lowered AOT code (see
-/// [`VM::aot_set_int_result`]). The native fast path keeps intermediate values
+/// `VM::aot_set_int_result`). The native fast path keeps intermediate values
 /// in registers, so it reports its final result through this shim rather than
 /// the boxed stack-tail logic in [`fusevm_aot_finish`].
 ///
@@ -127,7 +147,7 @@ pub extern "C" fn fusevm_aot_set_int_result(vm: *mut VM, n: i64) {
 }
 
 /// Store a float result from natively-lowered AOT code (see
-/// [`VM::aot_set_float_result`]). The float analog of
+/// `VM::aot_set_float_result`). The float analog of
 /// [`fusevm_aot_set_int_result`].
 ///
 /// # Safety
@@ -139,29 +159,69 @@ pub extern "C" fn fusevm_aot_set_float_result(vm: *mut VM, f: f64) {
     unsafe { (*vm).aot_set_float_result(f) }
 }
 
-/// Read an integer slot for natively-lowered AOT code (see
-/// [`VM::aot_slot_get_int`]). Slots stay boxed in the VM; the native path holds
-/// only the operand stack in registers and touches slots through this shim.
+/// Store an error result (by code) from natively-lowered AOT code that hit a
+/// runtime fault (e.g. awk division by zero). The native side branches to a
+/// block that calls this and returns early, leaving `aot_result` an `Error`.
 ///
 /// # Safety
 /// Same contract as [`fusevm_aot_exec_op`].
 #[no_mangle]
-pub extern "C" fn fusevm_aot_slot_get_int(vm: *mut VM, slot: u32) -> i64 {
+pub extern "C" fn fusevm_aot_set_error(vm: *mut VM, code: u32) {
     debug_assert!(!vm.is_null());
     // SAFETY: see the function contract; the driver owns the VM for the run.
-    unsafe { (*vm).aot_slot_get_int(slot) }
+    unsafe { (*vm).aot_set_error(code) }
 }
 
-/// Write an integer slot for natively-lowered AOT code (see
-/// [`VM::aot_slot_set_int`]).
-///
-/// # Safety
-/// Same contract as [`fusevm_aot_exec_op`].
+/// Emit an awk negative-argument warning to stderr, keyed by `code` (0 = sqrt,
+/// 1 = log), formatting `value` exactly as the interpreter does. Pure (no VM
+/// access); used by `AwkSqrtJit`/`AwkLogJit`'s negative branch.
 #[no_mangle]
-pub extern "C" fn fusevm_aot_slot_set_int(vm: *mut VM, slot: u32, n: i64) {
-    debug_assert!(!vm.is_null());
-    // SAFETY: see the function contract; the driver owns the VM for the run.
-    unsafe { (*vm).aot_slot_set_int(slot, n) }
+pub extern "C" fn fusevm_aot_awk_warn(code: u32, value: f64) {
+    let func = if code == 0 { "sqrt" } else { "log" };
+    eprintln!("awk: warning: {func}: received negative argument {value}");
+}
+
+/// Math libcall for `Op::Pow` — there is no single instruction for `powf`, so
+/// native code calls it exactly as compiled Rust/C would. Pure (no VM access).
+#[no_mangle]
+pub extern "C" fn fusevm_aot_powf(a: f64, b: f64) -> f64 {
+    a.powf(b)
+}
+
+/// Math libcall for the float case of `Op::Mod` (`f64` remainder). Matches the
+/// interpreter's `a % b`. Pure (no VM access).
+#[no_mangle]
+pub extern "C" fn fusevm_aot_fmod(a: f64, b: f64) -> f64 {
+    a % b
+}
+
+/// Unary transcendental dispatcher for the `*Float` math ops, keyed by `id` (see
+/// the id assignment in `build_entry_native`'s codegen). One libcall import
+/// covers all of them. Pure (no VM access).
+#[no_mangle]
+pub extern "C" fn fusevm_aot_unary_math(id: u32, x: f64) -> f64 {
+    match id {
+        0 => x.sin(),
+        1 => x.cos(),
+        2 => x.tan(),
+        3 => x.asin(),
+        4 => x.acos(),
+        5 => x.atan(),
+        6 => x.sinh(),
+        7 => x.cosh(),
+        8 => x.tanh(),
+        9 => x.exp(),
+        10 => x.ln(),
+        11 => x.log2(),
+        12 => x.log10(),
+        _ => f64::NAN,
+    }
+}
+
+/// Math libcall for `Op::Atan2Float` (`y.atan2(x)`). Pure (no VM access).
+#[no_mangle]
+pub extern "C" fn fusevm_aot_atan2(y: f64, x: f64) -> f64 {
+    y.atan2(x)
 }
 
 /// Build a Cranelift ISA for the host. `is_pic=false` matches the in-process
@@ -185,13 +245,13 @@ fn host_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
 ///
 /// Two codegen strategies, selected per chunk:
 ///
-/// * [`build_entry_native`] — when [`analyze_native`] approves the whole chunk
+/// * `build_entry_native` — when `analyze_native` approves the whole chunk
 ///   (an integer/boolean computation over the supported op set, including
 ///   control flow and slots), every op is lowered to real native IR
-///   (`iadd`/`icmp`/`brif`/…) with the operand stack held in registers and
-///   **no per-op interpreter dispatch**. Slots are reached through typed
-///   accessor shims; only the final result is boxed back into the VM.
-/// * [`build_entry_threaded`] — the general fallback: one block per op, each
+///   (`iadd`/`icmp`/`brif`/…) with the operand stack and slots held in
+///   registers and **no per-op interpreter dispatch**; only the final result
+///   is boxed back into the VM.
+/// * `build_entry_threaded` — the general fallback: one block per op, each
 ///   running its semantics through the [`fusevm_aot_exec_op`] shim. Handles
 ///   everything the native path doesn't yet cover (strings, arrays, hashes,
 ///   calls, float arithmetic, …).
@@ -221,12 +281,31 @@ impl Kind {
     fn is_numeric(self) -> bool {
         matches!(self, Kind::Int | Kind::Float)
     }
+
+    /// Int-like kinds are carried as `i64` and feed integer bitwise/shift ops
+    /// and `Inc`/`Dec` directly (a `Bool`'s 0/1 equals its `to_int`, so it works
+    /// unchanged); `Float` does not (it would need a truncating coercion).
+    fn is_intlike(self) -> bool {
+        matches!(self, Kind::Int | Kind::Bool)
+    }
 }
+
+/// Upper bound on distinct slots (or globals) a chunk may use and still lower
+/// natively (each becomes an SSA register variable); larger spaces fall back to
+/// threaded. Both stay well under `GLOBAL_TAG`, so the two index spaces never
+/// collide in the unified definite-assignment set.
+const NATIVE_SLOT_LIMIT: usize = 4096;
+
+/// Tag bit OR-ed into a global's index to key it in the unified
+/// definite-assignment set, keeping it disjoint from slot keys (both index
+/// spaces are bounded by `NATIVE_SLOT_LIMIT`, far below this bit).
+const GLOBAL_TAG: u32 = 0x1_0000;
 
 /// A validated plan for native lowering: where the basic-block boundaries are,
 /// the operand-stack *kinds* on entry to each block (length = depth), the
-/// maximum stack depth (how many SSA stack variables to allocate), and the
-/// stack kinds when control falls off the end (whose top selects the result).
+/// maximum stack depth (how many SSA stack variables to allocate), the stack
+/// kinds when control falls off the end (whose top selects the result), and how
+/// many slot register variables to allocate.
 struct NativePlan {
     /// Basic-block leader ips (each becomes one Cranelift block).
     leaders: BTreeSet<usize>,
@@ -236,17 +315,22 @@ struct NativePlan {
     max_depth: usize,
     /// Operand-stack kinds when control falls off the end (empty ⇒ `Halted`).
     end_kinds: Vec<Kind>,
+    /// Number of slot register variables to allocate (max slot index + 1).
+    slot_count: usize,
+    /// Number of global register variables to allocate (max global index + 1).
+    global_count: usize,
 }
 
-/// Whether `chunk` lowers natively — thin wrapper over [`analyze_native`], kept
-/// for readability at call sites and in tests.
+/// Whether `chunk` lowers natively — thin wrapper over `analyze_native` used
+/// by tests to assert which path a chunk takes.
+#[cfg(test)]
 fn native_lowerable(chunk: &Chunk) -> bool {
     analyze_native(chunk).is_some()
 }
 
 /// Validate `chunk` for native lowering and, if it qualifies, return a
-/// [`NativePlan`]. Performs an abstract interpretation over the operand stack:
-/// it tracks per-position [`Kind`]s, discovers basic-block leaders, and checks
+/// `NativePlan`. Performs an abstract interpretation over the operand stack:
+/// it tracks per-position `Kind`s, discovers basic-block leaders, and checks
 /// that the stack state is identical on every edge into a join point (which
 /// well-formed structured bytecode always satisfies). Any unsupported op, stack
 /// underflow, type violation, inconsistent join, or non-integer result makes it
@@ -260,37 +344,84 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             entry_kinds: HashMap::new(),
             max_depth: 0,
             end_kinds: Vec::new(),
+            slot_count: 0,
+            global_count: 0,
         });
     }
 
-    // Entry stack state (kinds) per discovered ip; `state` doubles as the
-    // visited set. The program-end pseudo-point is `n`.
-    let mut state: HashMap<usize, Vec<Kind>> = HashMap::new();
+    // Per-ip entry state: the operand-stack kinds and the set of slots/globals
+    // that are *definitely* assigned on every path here (globals tagged with
+    // `GLOBAL_TAG` to share one set). `state` doubles as the visited set; the
+    // program-end pseudo-point is `n`. Kinds use must-match-exactly merging at
+    // joins (structured bytecode guarantees this); init sets use intersection
+    // and re-converge (a node is re-queued when its set shrinks).
+    let mut state: HashMap<usize, (Vec<Kind>, BTreeSet<u32>)> = HashMap::new();
     let mut leaders: BTreeSet<usize> = BTreeSet::new();
     let mut max_depth = 0usize;
+    let mut max_slot: Option<u16> = None;
+    let mut max_global: Option<u16> = None;
     let mut end_state: Option<Vec<Kind>> = None;
 
-    state.insert(0, Vec::new());
+    state.insert(0, (Vec::new(), BTreeSet::new()));
     leaders.insert(0);
     let mut work = vec![0usize];
 
     while let Some(ip) = work.pop() {
-        let mut st = state.get(&ip)?.clone();
+        let (mut st, inits) = state.get(&ip)?.clone();
         max_depth = max_depth.max(st.len());
 
-        // Successors after applying ops[ip]: (successor ip, resulting stack).
-        let mut succs: Vec<(usize, Vec<Kind>)> = Vec::new();
+        // Bound the slot/global spaces we'd materialize as registers — over
+        // every slot or global any op touches.
+        let mut tslot = [0u16; 2];
+        let mut nslot = 0usize;
+        let mut tglob: Option<u16> = None;
         match &ops[ip] {
-            Op::Nop => succs.push((ip + 1, st)),
+            Op::GetSlot(s)
+            | Op::SetSlot(s)
+            | Op::PreIncSlot(s)
+            | Op::PreIncSlotVoid(s)
+            | Op::PreDecSlot(s)
+            | Op::PostIncSlot(s)
+            | Op::PostDecSlot(s)
+            | Op::SlotLtIntJumpIfFalse(s, _, _)
+            | Op::SlotIncLtIntJumpBack(s, _, _) => {
+                tslot[0] = *s;
+                nslot = 1;
+            }
+            Op::AddAssignSlotVoid(a, b) | Op::AccumSumLoop(a, b, _) => {
+                tslot[0] = *a;
+                tslot[1] = *b;
+                nslot = 2;
+            }
+            Op::GetVar(g) | Op::SetVar(g) | Op::DeclareVar(g) => tglob = Some(*g),
+            _ => {}
+        }
+        for &s in &tslot[..nslot] {
+            if s as usize >= NATIVE_SLOT_LIMIT {
+                return None;
+            }
+            max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
+        }
+        if let Some(g) = tglob {
+            if g as usize >= NATIVE_SLOT_LIMIT {
+                return None;
+            }
+            max_global = Some(max_global.map_or(g, |m| m.max(g)));
+        }
+
+        // Successors after applying ops[ip]: (successor ip, kinds, init set).
+        let mut succs: Vec<(usize, Vec<Kind>, BTreeSet<u32>)> = Vec::new();
+        match &ops[ip] {
+            Op::Nop => succs.push((ip + 1, st, inits)),
             Op::LoadInt(_) | Op::GetSlot(_) => {
                 st.push(Kind::Int);
                 max_depth = max_depth.max(st.len());
-                succs.push((ip + 1, st));
+                succs.push((ip + 1, st, inits));
             }
             Op::LoadFloat(_) => {
                 st.push(Kind::Float);
                 max_depth = max_depth.max(st.len());
-                succs.push((ip + 1, st));
+                succs.push((ip + 1, st, inits));
             }
             Op::LoadConst(idx) => {
                 // Only numeric constants are lowerable; others fall back.
@@ -301,7 +432,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 };
                 st.push(k);
                 max_depth = max_depth.max(st.len());
-                succs.push((ip + 1, st));
+                succs.push((ip + 1, st, inits));
             }
             // Arithmetic promotes: result is Float if either operand is Float,
             // else Int — mirroring the interpreter's `arith_int_fast`.
@@ -317,7 +448,137 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                     Kind::Int
                 };
                 st.push(r);
-                succs.push((ip + 1, st));
+                succs.push((ip + 1, st, inits));
+            }
+            // Modulo: both Int → integer `srem` (with the `y==0 → 0` guard);
+            // otherwise the float branch via an `fmod` libcall. (Bool operands
+            // fall back, like the other arithmetic.)
+            Op::Mod => {
+                let b = st.pop()?;
+                let a = st.pop()?;
+                if !a.is_numeric() || !b.is_numeric() {
+                    return None;
+                }
+                let r = if a == Kind::Float || b == Kind::Float {
+                    Kind::Float
+                } else {
+                    Kind::Int
+                };
+                st.push(r);
+                succs.push((ip + 1, st, inits));
+            }
+            // `a.powf(b)` — always Float, via a `powf` libcall.
+            Op::Pow => {
+                let b = st.pop()?;
+                let a = st.pop()?;
+                if !a.is_numeric() || !b.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // Unary float math (single instructions + transcendental libcalls):
+            // operand coerced to f64, result Float.
+            Op::AbsFloat
+            | Op::SqrtFloat
+            | Op::CeilFloat
+            | Op::FloorFloat
+            | Op::TruncFloat
+            | Op::RoundFloat
+            | Op::SinFloat
+            | Op::CosFloat
+            | Op::TanFloat
+            | Op::AsinFloat
+            | Op::AcosFloat
+            | Op::AtanFloat
+            | Op::SinhFloat
+            | Op::CoshFloat
+            | Op::TanhFloat
+            | Op::ExpFloat
+            | Op::LogFloat
+            | Op::Log2Float
+            | Op::Log10Float => {
+                if !st.pop()?.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // `to_int` of the operand → Int (Float truncates toward zero,
+            // saturating like `f as i64`).
+            Op::TruncInt => {
+                if !st.pop()?.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
+            // Integer absolute value (wrapping); int-like operand only.
+            Op::AbsInt => {
+                if !st.pop()?.is_intlike() {
+                    return None;
+                }
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
+            // Binary float math libcalls → Float.
+            Op::PowFloat | Op::Atan2Float => {
+                let b = st.pop()?;
+                let a = st.pop()?;
+                if !a.is_numeric() || !b.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // gcd/lcm via internal Euclid loops on magnitudes → Int. Int-like
+            // operands only (the interpreter's `to_int().unsigned_abs()`).
+            Op::GcdInt | Op::LcmInt => {
+                let b = st.pop()?;
+                let a = st.pop()?;
+                if !a.is_intlike() || !b.is_intlike() {
+                    return None;
+                }
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
+            // awk `/` and `%` — float result, but a runtime error (not `Undef`)
+            // on a zero divisor, so they get a native error-return branch.
+            Op::AwkDivJit | Op::AwkModJit => {
+                let b = st.pop()?;
+                let a = st.pop()?;
+                if !a.is_numeric() || !b.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // awk lshift/rshift — two operands, error on negatives, Float result.
+            Op::AwkLshiftJit | Op::AwkRshiftJit => {
+                let b = st.pop()?;
+                let a = st.pop()?;
+                if !a.is_numeric() || !b.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // awk compl — one operand, error on negative, Float result.
+            Op::AwkComplJit => {
+                if !st.pop()?.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // awk sqrt/log — one operand, Float result. Negative input warns to
+            // stderr and yields NaN (no error/halt), so no fallback is needed.
+            Op::AwkSqrtJit | Op::AwkLogJit => {
+                if !st.pop()?.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
             }
             Op::Negate => {
                 let a = st.pop()?;
@@ -325,7 +586,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                     return None;
                 }
                 st.push(a); // Int → Int, Float → Float
-                succs.push((ip + 1, st));
+                succs.push((ip + 1, st, inits));
             }
             Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe => {
                 let b = st.pop()?;
@@ -334,24 +595,206 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                     return None;
                 }
                 st.push(Kind::Bool);
-                succs.push((ip + 1, st));
+                succs.push((ip + 1, st, inits));
             }
-            Op::SetSlot(_) => {
+            Op::LoadTrue | Op::LoadFalse => {
+                st.push(Kind::Bool);
+                max_depth = max_depth.max(st.len());
+                succs.push((ip + 1, st, inits));
+            }
+            // Inc/Dec coerce to int and yield int; int-like operands only.
+            Op::Inc | Op::Dec => {
+                if !st.pop()?.is_intlike() {
+                    return None;
+                }
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
+            // `!truthy` for any kind → Bool.
+            Op::LogNot => {
+                st.pop()?;
+                st.push(Kind::Bool);
+                succs.push((ip + 1, st, inits));
+            }
+            // Bitwise/shift: int-like operands (carried as i64), int result.
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
+                let b = st.pop()?;
+                let a = st.pop()?;
+                if !a.is_intlike() || !b.is_intlike() {
+                    return None;
+                }
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
+            Op::BitNot => {
+                if !st.pop()?.is_intlike() {
+                    return None;
+                }
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
+            // Stack shuffles — kind-preserving permutations of the top values.
+            Op::Dup2 => {
+                let len = st.len();
+                if len < 2 {
+                    return None;
+                }
+                let a = st[len - 2];
+                let b = st[len - 1];
+                st.push(a);
+                st.push(b);
+                max_depth = max_depth.max(st.len());
+                succs.push((ip + 1, st, inits));
+            }
+            Op::Swap => {
+                let len = st.len();
+                if len < 2 {
+                    return None;
+                }
+                st.swap(len - 1, len - 2);
+                succs.push((ip + 1, st, inits));
+            }
+            Op::Rot => {
+                let len = st.len();
+                if len < 3 {
+                    return None;
+                }
+                // [a, b, c] → [b, c, a]
+                st.swap(len - 3, len - 2);
+                st.swap(len - 2, len - 1);
+                succs.push((ip + 1, st, inits));
+            }
+            // Logical and/or: truthiness of both operands → Bool (not
+            // short-circuit — both operands are already evaluated on the stack).
+            Op::LogAnd | Op::LogOr => {
+                st.pop()?;
+                st.pop()?;
+                st.push(Kind::Bool);
+                succs.push((ip + 1, st, inits));
+            }
+            // Three-way compare → Int (-1 / 0 / 1).
+            Op::Spaceship => {
+                let b = st.pop()?;
+                let a = st.pop()?;
+                if !a.is_numeric() || !b.is_numeric() {
+                    return None;
+                }
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
+            // Branch on truthiness but keep the value on the stack (both arms).
+            Op::JumpIfTrueKeep(t) | Op::JumpIfFalseKeep(t) => {
+                let t = *t;
+                if t > n {
+                    return None;
+                }
+                if st.is_empty() {
+                    return None;
+                }
+                if t < n {
+                    leaders.insert(t);
+                }
+                if ip + 1 < n {
+                    leaders.insert(ip + 1);
+                }
+                succs.push((t, st.clone(), inits.clone()));
+                succs.push((ip + 1, st, inits));
+            }
+            // Slot read-modify-write super-ops. They read via `to_int` (so an
+            // unassigned slot coerces to 0, matching a zero-init register — no
+            // definite-assignment needed), write an int slot (gen), and push the
+            // new (Pre*) or old (Post*) value as Int. Int slots only.
+            Op::PreIncSlot(s) | Op::PreDecSlot(s) | Op::PostIncSlot(s) | Op::PostDecSlot(s) => {
+                let mut ni = inits;
+                ni.insert(u32::from(*s));
+                st.push(Kind::Int);
+                max_depth = max_depth.max(st.len());
+                succs.push((ip + 1, st, ni));
+            }
+            Op::PreIncSlotVoid(s) => {
+                let mut ni = inits;
+                ni.insert(u32::from(*s));
+                succs.push((ip + 1, st, ni));
+            }
+            Op::AddAssignSlotVoid(a, _b) => {
+                let mut ni = inits;
+                ni.insert(u32::from(*a)); // writes slot a (reads a and b coerce)
+                succs.push((ip + 1, st, ni));
+            }
+            // Runs a whole `while i < limit { sum += i; i += 1 }` internally;
+            // straight-line from the outside (one successor). Writes both slots.
+            Op::AccumSumLoop(sum_s, i_s, _limit) => {
+                let mut ni = inits;
+                ni.insert(u32::from(*sum_s));
+                ni.insert(u32::from(*i_s));
+                succs.push((ip + 1, st, ni));
+            }
+            // Fused loop ops: a slot/limit comparison branch and an
+            // increment-compare-jumpback. No stack change; the read coerces.
+            Op::SlotLtIntJumpIfFalse(_s, _limit, t) => {
+                let t = *t;
+                if t > n {
+                    return None;
+                }
+                if t < n {
+                    leaders.insert(t);
+                }
+                if ip + 1 < n {
+                    leaders.insert(ip + 1);
+                }
+                succs.push((t, st.clone(), inits.clone()));
+                succs.push((ip + 1, st, inits));
+            }
+            Op::SlotIncLtIntJumpBack(s, _limit, t) => {
+                let t = *t;
+                if t > n {
+                    return None;
+                }
+                let mut ni = inits;
+                ni.insert(u32::from(*s)); // increments (writes) slot s
+                if t < n {
+                    leaders.insert(t);
+                }
+                if ip + 1 < n {
+                    leaders.insert(ip + 1);
+                }
+                succs.push((t, st.clone(), ni.clone()));
+                succs.push((ip + 1, st, ni));
+            }
+            Op::SetSlot(s) => {
                 // Slots are int-only for now (float slots are a later stage).
                 if st.pop()? != Kind::Int {
                     return None;
                 }
-                succs.push((ip + 1, st));
+                let mut ni = inits;
+                ni.insert(u32::from(*s)); // this slot is now definitely assigned
+                succs.push((ip + 1, st, ni));
+            }
+            // Globals mirror slots (int-only, in registers). `GetVar` pushes
+            // Int (definite-assignment checked in Phase B); `SetVar` and the
+            // identical `DeclareVar` pop Int and assign the global.
+            Op::GetVar(_) => {
+                st.push(Kind::Int);
+                max_depth = max_depth.max(st.len());
+                succs.push((ip + 1, st, inits));
+            }
+            Op::SetVar(g) | Op::DeclareVar(g) => {
+                if st.pop()? != Kind::Int {
+                    return None;
+                }
+                let mut ni = inits;
+                ni.insert(u32::from(*g) | GLOBAL_TAG);
+                succs.push((ip + 1, st, ni));
             }
             Op::Pop => {
                 st.pop()?;
-                succs.push((ip + 1, st));
+                succs.push((ip + 1, st, inits));
             }
             Op::Dup => {
                 let k = *st.last()?;
                 st.push(k);
                 max_depth = max_depth.max(st.len());
-                succs.push((ip + 1, st));
+                succs.push((ip + 1, st, inits));
             }
             Op::Jump(t) => {
                 let t = *t;
@@ -361,7 +804,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 if t < n {
                     leaders.insert(t);
                 }
-                succs.push((t, st));
+                succs.push((t, st, inits));
             }
             Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
                 let t = *t;
@@ -375,29 +818,51 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 if ip + 1 < n {
                     leaders.insert(ip + 1);
                 }
-                succs.push((t, st.clone()));
-                succs.push((ip + 1, st));
+                succs.push((t, st.clone(), inits.clone()));
+                succs.push((ip + 1, st, inits));
             }
             _ => return None,
         }
 
-        for (s, sstate) in succs {
+        for (s, sk, si) in succs {
             if s == n {
                 match &end_state {
-                    None => end_state = Some(sstate),
-                    Some(prev) if *prev != sstate => return None,
+                    None => end_state = Some(sk),
+                    Some(prev) if *prev != sk => return None,
                     Some(_) => {}
                 }
                 continue;
             }
-            match state.get(&s) {
+            match state.get_mut(&s) {
                 None => {
-                    state.insert(s, sstate);
+                    state.insert(s, (sk, si));
                     work.push(s);
                 }
-                Some(prev) if *prev != sstate => return None,
-                Some(_) => {}
+                Some((pk, pi)) => {
+                    if *pk != sk {
+                        return None;
+                    }
+                    // Intersect the init-slot sets; re-converge if this shrank it.
+                    let before = pi.len();
+                    pi.retain(|x| si.contains(x));
+                    if pi.len() != before {
+                        work.push(s);
+                    }
+                }
             }
+        }
+    }
+
+    // Definite assignment: every reachable `GetSlot`/`GetVar` must read a
+    // slot/global assigned on all paths to it. Otherwise the interpreter would
+    // observe `Undef` where the native path would see a register, so we fall
+    // back. (The slot/global RMW ops coerce via `to_int`, so they don't need
+    // this — an unassigned read coerces to 0, matching a zero-init register.)
+    for (&ip, (_kinds, inits)) in &state {
+        match &ops[ip] {
+            Op::GetSlot(s) if !inits.contains(&u32::from(*s)) => return None,
+            Op::GetVar(g) if !inits.contains(&(u32::from(*g) | GLOBAL_TAG)) => return None,
+            _ => {}
         }
     }
 
@@ -419,29 +884,34 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
 
     let entry_kinds = leaders
         .iter()
-        .map(|&l| (l, state.get(&l).cloned().unwrap_or_default()))
+        .map(|&l| (l, state.get(&l).map(|(k, _)| k.clone()).unwrap_or_default()))
         .collect();
+    let slot_count = max_slot.map_or(0, |m| m as usize + 1);
+    let global_count = max_global.map_or(0, |m| m as usize + 1);
 
     Some(NativePlan {
         leaders,
         entry_kinds,
         max_depth,
         end_kinds,
+        slot_count,
+        global_count,
     })
 }
 
 /// Native fast path: emit real integer/float IR for a chunk that
-/// [`analyze_native`] has approved, following the `plan` it produced. One
+/// `analyze_native` has approved, following the `plan` it produced. One
 /// Cranelift block per basic-block leader; the operand stack lives in frontend
 /// [`Variable`]s (so SSA/phi construction at joins — including loop back-edges —
 /// is automatic on `seal_all_blocks`).
 ///
-/// Each stack position has two parallel variables — one `i64` ([`Kind::Int`]
-/// and [`Kind::Bool`]) and one `f64` ([`Kind::Float`]) — and codegen replays
-/// the plan's per-position [`Kind`]s to read/write the right one and to insert
-/// `int→float` promotions where the interpreter would. Slots are reached
-/// through typed accessor shims; only the final result is boxed back into the
-/// VM. No per-op dispatch and no interpreter shim calls for the lowered ops.
+/// Each stack position has two parallel variables — one `i64` (`Kind::Int`
+/// and `Kind::Bool`) and one `f64` (`Kind::Float`) — and codegen replays
+/// the plan's per-position `Kind`s to read/write the right one and to insert
+/// `int→float` promotions where the interpreter would. Integer slots get their
+/// own SSA register variables (analysis proved definite assignment). Only the
+/// final result is boxed back into the VM — no per-op dispatch, no per-op
+/// shim calls.
 fn build_entry_native<M: Module>(
     module: &mut M,
     chunk: &Chunk,
@@ -464,21 +934,44 @@ fn build_entry_native<M: Module>(
         .declare_function("fusevm_aot_set_float_result", Linkage::Import, &fres_sig)
         .map_err(|e| format!("aot: declare set_float_result: {e}"))?;
 
-    let mut sget_sig = module.make_signature();
-    sget_sig.params.push(AbiParam::new(ptr_ty));
-    sget_sig.params.push(AbiParam::new(types::I32));
-    sget_sig.returns.push(AbiParam::new(types::I64));
-    let sget_id = module
-        .declare_function("fusevm_aot_slot_get_int", Linkage::Import, &sget_sig)
-        .map_err(|e| format!("aot: declare slot_get: {e}"))?;
+    let mut serr_sig = module.make_signature();
+    serr_sig.params.push(AbiParam::new(ptr_ty));
+    serr_sig.params.push(AbiParam::new(types::I32));
+    let serr_id = module
+        .declare_function("fusevm_aot_set_error", Linkage::Import, &serr_sig)
+        .map_err(|e| format!("aot: declare set_error: {e}"))?;
 
-    let mut sset_sig = module.make_signature();
-    sset_sig.params.push(AbiParam::new(ptr_ty));
-    sset_sig.params.push(AbiParam::new(types::I32));
-    sset_sig.params.push(AbiParam::new(types::I64));
-    let sset_id = module
-        .declare_function("fusevm_aot_slot_set_int", Linkage::Import, &sset_sig)
-        .map_err(|e| format!("aot: declare slot_set: {e}"))?;
+    // Math libcalls: fn(f64, f64) -> f64 (powf, fmod).
+    let mut math_sig = module.make_signature();
+    math_sig.params.push(AbiParam::new(types::F64));
+    math_sig.params.push(AbiParam::new(types::F64));
+    math_sig.returns.push(AbiParam::new(types::F64));
+    let powf_id = module
+        .declare_function("fusevm_aot_powf", Linkage::Import, &math_sig)
+        .map_err(|e| format!("aot: declare powf: {e}"))?;
+    let fmod_id = module
+        .declare_function("fusevm_aot_fmod", Linkage::Import, &math_sig)
+        .map_err(|e| format!("aot: declare fmod: {e}"))?;
+    let atan2_id = module
+        .declare_function("fusevm_aot_atan2", Linkage::Import, &math_sig)
+        .map_err(|e| format!("aot: declare atan2: {e}"))?;
+
+    // Unary transcendental dispatcher: fn(u32 id, f64) -> f64.
+    let mut unary_sig = module.make_signature();
+    unary_sig.params.push(AbiParam::new(types::I32));
+    unary_sig.params.push(AbiParam::new(types::F64));
+    unary_sig.returns.push(AbiParam::new(types::F64));
+    let unary_id = module
+        .declare_function("fusevm_aot_unary_math", Linkage::Import, &unary_sig)
+        .map_err(|e| format!("aot: declare unary_math: {e}"))?;
+
+    // awk negative-arg warning: fn(u32 code, f64) -> ().
+    let mut warn_sig = module.make_signature();
+    warn_sig.params.push(AbiParam::new(types::I32));
+    warn_sig.params.push(AbiParam::new(types::F64));
+    let warn_id = module
+        .declare_function("fusevm_aot_awk_warn", Linkage::Import, &warn_sig)
+        .map_err(|e| format!("aot: declare awk_warn: {e}"))?;
 
     // Exported entry: fn(vm) -> i64.
     let mut entry_sig = module.make_signature();
@@ -495,19 +988,30 @@ fn build_entry_native<M: Module>(
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         let ires_ref = module.declare_func_in_func(ires_id, b.func);
         let fres_ref = module.declare_func_in_func(fres_id, b.func);
-        let sget_ref = module.declare_func_in_func(sget_id, b.func);
-        let sset_ref = module.declare_func_in_func(sset_id, b.func);
+        let serr_ref = module.declare_func_in_func(serr_id, b.func);
+        let powf_ref = module.declare_func_in_func(powf_id, b.func);
+        let fmod_ref = module.declare_func_in_func(fmod_id, b.func);
+        let atan2_ref = module.declare_func_in_func(atan2_id, b.func);
+        let unary_ref = module.declare_func_in_func(unary_id, b.func);
+        let warn_ref = module.declare_func_in_func(warn_id, b.func);
 
         // The VM pointer and each operand-stack position are frontend Variables;
         // `seal_all_blocks` then builds the SSA phis at all joins for us. Each
-        // position has an i64 var and an f64 var; the plan's Kinds say which is
-        // live (consistent across all edges into any join).
+        // stack position has an i64 var and an f64 var; the plan's Kinds say
+        // which is live (consistent across all edges into any join). Slots are
+        // int-only register variables (definite-assignment proven by analysis).
         let vm_var = b.declare_var(ptr_ty);
         let ivars: Vec<Variable> = (0..plan.max_depth)
             .map(|_| b.declare_var(types::I64))
             .collect();
         let fvars: Vec<Variable> = (0..plan.max_depth)
             .map(|_| b.declare_var(types::F64))
+            .collect();
+        let slot_vars: Vec<Variable> = (0..plan.slot_count)
+            .map(|_| b.declare_var(types::I64))
+            .collect();
+        let global_vars: Vec<Variable> = (0..plan.global_count)
+            .map(|_| b.declare_var(types::I64))
             .collect();
 
         let n = chunk.ops.len();
@@ -529,10 +1033,19 @@ fn build_entry_native<M: Module>(
             }
         };
 
-        // Entry: stash the VM pointer, jump to the first block (or ret if empty).
+        // Entry: stash the VM pointer, zero-init slot/global registers (definite
+        // assignment guarantees this 0 is never actually read; it only keeps the
+        // variables defined on every edge for Cranelift's SSA construction),
+        // then jump to the first block (or ret if empty).
         b.switch_to_block(entry_block);
         let vm_param = b.block_params(entry_block)[0];
         b.def_var(vm_var, vm_param);
+        if !slot_vars.is_empty() || !global_vars.is_empty() {
+            let zero = b.ins().iconst(types::I64, 0);
+            for &sv in slot_vars.iter().chain(global_vars.iter()) {
+                b.def_var(sv, zero);
+            }
+        }
         if n == 0 {
             b.ins().jump(ret_block, &[]);
         } else {
@@ -617,6 +1130,393 @@ fn build_entry_native<M: Module>(
                         kinds.push(Kind::Int);
                     }
                 }
+                // Modulo. Both Int → integer `srem`, guarding the two divisors
+                // that would trap natively but yield 0 in the interpreter:
+                // `y == 0` (its explicit `→ 0`) and `y == -1` (where
+                // `x % -1 == 0` for all x, also dodging the `srem(INT_MIN, -1)`
+                // overflow trap). Otherwise the float branch via `fmod`.
+                Op::Mod => {
+                    let ky = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let kx = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    if ky == Kind::Float || kx == Kind::Float {
+                        let y = load_f64(&mut b, &ivars, &fvars, iy, ky);
+                        let x = load_f64(&mut b, &ivars, &fvars, ix, kx);
+                        let call = b.ins().call(fmod_ref, &[x, y]);
+                        let r = b.inst_results(call)[0];
+                        b.def_var(fvars[ix], r);
+                        kinds.push(Kind::Float);
+                    } else {
+                        let y = b.use_var(ivars[iy]);
+                        let x = b.use_var(ivars[ix]);
+                        let zero = b.ins().iconst(types::I64, 0);
+                        let one = b.ins().iconst(types::I64, 1);
+                        let y_is_zero = b.ins().icmp_imm(IntCC::Equal, y, 0);
+                        let y_is_neg1 = b.ins().icmp_imm(IntCC::Equal, y, -1);
+                        let special = b.ins().bor(y_is_zero, y_is_neg1);
+                        let safe_y = b.ins().select(special, one, y);
+                        let rem = b.ins().srem(x, safe_y);
+                        let r = b.ins().select(special, zero, rem);
+                        b.def_var(ivars[ix], r);
+                        kinds.push(Kind::Int);
+                    }
+                }
+                // Power: always Float, via the `powf` libcall.
+                Op::Pow => {
+                    let ky = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let kx = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let y = load_f64(&mut b, &ivars, &fvars, iy, ky);
+                    let x = load_f64(&mut b, &ivars, &fvars, ix, kx);
+                    let call = b.ins().call(powf_ref, &[x, y]);
+                    let r = b.inst_results(call)[0];
+                    b.def_var(fvars[ix], r);
+                    kinds.push(Kind::Float);
+                }
+                // Unary float math: single Cranelift instructions where they
+                // exist (`RoundFloat`'s round-ties-even is `nearest`).
+                op @ (Op::AbsFloat
+                | Op::SqrtFloat
+                | Op::CeilFloat
+                | Op::FloorFloat
+                | Op::TruncFloat
+                | Op::RoundFloat) => {
+                    let ka = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let x = load_f64(&mut b, &ivars, &fvars, idx, ka);
+                    let r = match op {
+                        Op::AbsFloat => b.ins().fabs(x),
+                        Op::SqrtFloat => b.ins().sqrt(x),
+                        Op::CeilFloat => b.ins().ceil(x),
+                        Op::FloorFloat => b.ins().floor(x),
+                        Op::TruncFloat => b.ins().trunc(x),
+                        _ => b.ins().nearest(x), // RoundFloat (ties to even)
+                    };
+                    b.def_var(fvars[idx], r);
+                    kinds.push(Kind::Float);
+                }
+                // Unary transcendentals: one shared libcall, keyed by id.
+                op @ (Op::SinFloat
+                | Op::CosFloat
+                | Op::TanFloat
+                | Op::AsinFloat
+                | Op::AcosFloat
+                | Op::AtanFloat
+                | Op::SinhFloat
+                | Op::CoshFloat
+                | Op::TanhFloat
+                | Op::ExpFloat
+                | Op::LogFloat
+                | Op::Log2Float
+                | Op::Log10Float) => {
+                    let id: i64 = match op {
+                        Op::SinFloat => 0,
+                        Op::CosFloat => 1,
+                        Op::TanFloat => 2,
+                        Op::AsinFloat => 3,
+                        Op::AcosFloat => 4,
+                        Op::AtanFloat => 5,
+                        Op::SinhFloat => 6,
+                        Op::CoshFloat => 7,
+                        Op::TanhFloat => 8,
+                        Op::ExpFloat => 9,
+                        Op::LogFloat => 10,
+                        Op::Log2Float => 11,
+                        _ => 12, // Log10Float
+                    };
+                    let ka = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let x = load_f64(&mut b, &ivars, &fvars, idx, ka);
+                    let idc = b.ins().iconst(types::I32, id);
+                    let call = b.ins().call(unary_ref, &[idc, x]);
+                    let r = b.inst_results(call)[0];
+                    b.def_var(fvars[idx], r);
+                    kinds.push(Kind::Float);
+                }
+                // `to_int`: Float truncates (saturating, like `f as i64`); an
+                // int-like value passes through unchanged.
+                Op::TruncInt => {
+                    let ka = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let r = if ka == Kind::Float {
+                        let f = b.use_var(fvars[idx]);
+                        b.ins().fcvt_to_sint_sat(types::I64, f)
+                    } else {
+                        b.use_var(ivars[idx])
+                    };
+                    b.def_var(ivars[idx], r);
+                    kinds.push(Kind::Int);
+                }
+                // Integer absolute value, wrapping (`abs(i64::MIN) == i64::MIN`).
+                Op::AbsInt => {
+                    let _ = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let x = b.use_var(ivars[idx]);
+                    let neg = b.ins().ineg(x);
+                    let is_neg = b.ins().icmp_imm(IntCC::SignedLessThan, x, 0);
+                    let r = b.ins().select(is_neg, neg, x);
+                    b.def_var(ivars[idx], r);
+                    kinds.push(Kind::Int);
+                }
+                // Binary float math libcalls. `a` is the lower operand, `b` the
+                // top — matching the interpreter's pop order.
+                op @ (Op::PowFloat | Op::Atan2Float) => {
+                    let kb = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let ka = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let top = load_f64(&mut b, &ivars, &fvars, iy, kb);
+                    let low = load_f64(&mut b, &ivars, &fvars, ix, ka);
+                    let call = match op {
+                        // a.powf(b): base=low, exponent=top
+                        Op::PowFloat => b.ins().call(powf_ref, &[low, top]),
+                        // y.atan2(x): pops x (top) then y (low) → atan2(y, x)
+                        _ => b.ins().call(atan2_ref, &[low, top]),
+                    };
+                    let r = b.inst_results(call)[0];
+                    b.def_var(fvars[ix], r);
+                    kinds.push(Kind::Float);
+                }
+                // gcd via an internal Euclid loop on the magnitudes (`urem`,
+                // guarded by the `y != 0` loop condition). Result is `x` as i64.
+                Op::GcdInt => {
+                    let _ = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let _ = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let av = b.use_var(ivars[ix]);
+                    let a0 = uabs(&mut b, av);
+                    let bv = b.use_var(ivars[iy]);
+                    let b0 = uabs(&mut b, bv);
+                    let xv = b.declare_var(types::I64);
+                    let yv = b.declare_var(types::I64);
+                    b.def_var(xv, a0);
+                    b.def_var(yv, b0);
+                    let header = b.create_block();
+                    let body = b.create_block();
+                    let exit = b.create_block();
+                    b.ins().jump(header, &[]);
+                    b.switch_to_block(header);
+                    let y = b.use_var(yv);
+                    let cont = b.ins().icmp_imm(IntCC::NotEqual, y, 0);
+                    b.ins().brif(cont, body, &[], exit, &[]);
+                    b.switch_to_block(body);
+                    let x = b.use_var(xv);
+                    let y2 = b.use_var(yv);
+                    let t = b.ins().urem(x, y2);
+                    b.def_var(xv, y2); // x = y
+                    b.def_var(yv, t); // y = x % y
+                    b.ins().jump(header, &[]);
+                    b.switch_to_block(exit);
+                    let g = b.use_var(xv);
+                    b.def_var(ivars[ix], g);
+                    kinds.push(Kind::Int);
+                }
+                // lcm = (a/gcd).saturating_mul(b), capped at i64::MAX; 0 if either
+                // operand is 0. Euclid loop plus a saturating u64 multiply.
+                Op::LcmInt => {
+                    let _ = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let _ = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let av = b.use_var(ivars[ix]);
+                    let a0 = uabs(&mut b, av);
+                    let bv = b.use_var(ivars[iy]);
+                    let b0 = uabs(&mut b, bv);
+                    let rv = b.declare_var(types::I64);
+                    let a_is0 = b.ins().icmp_imm(IntCC::Equal, a0, 0);
+                    let b_is0 = b.ins().icmp_imm(IntCC::Equal, b0, 0);
+                    let any0 = b.ins().bor(a_is0, b_is0);
+                    let zero_b = b.create_block();
+                    let comp_b = b.create_block();
+                    let done_b = b.create_block();
+                    b.ins().brif(any0, zero_b, &[], comp_b, &[]);
+
+                    b.switch_to_block(zero_b);
+                    let z = b.ins().iconst(types::I64, 0);
+                    b.def_var(rv, z);
+                    b.ins().jump(done_b, &[]);
+
+                    b.switch_to_block(comp_b);
+                    let xv = b.declare_var(types::I64);
+                    let yv = b.declare_var(types::I64);
+                    b.def_var(xv, a0);
+                    b.def_var(yv, b0);
+                    let gh = b.create_block();
+                    let gb = b.create_block();
+                    let ge = b.create_block();
+                    b.ins().jump(gh, &[]);
+                    b.switch_to_block(gh);
+                    let y = b.use_var(yv);
+                    let cont = b.ins().icmp_imm(IntCC::NotEqual, y, 0);
+                    b.ins().brif(cont, gb, &[], ge, &[]);
+                    b.switch_to_block(gb);
+                    let x = b.use_var(xv);
+                    let y2 = b.use_var(yv);
+                    let t = b.ins().urem(x, y2);
+                    b.def_var(xv, y2);
+                    b.def_var(yv, t);
+                    b.ins().jump(gh, &[]);
+                    b.switch_to_block(ge);
+                    let g = b.use_var(xv);
+                    let p = b.ins().udiv(a0, g); // a / gcd
+                    let prod = b.ins().imul(p, b0); // low 64 bits of p*b
+                    let hi = b.ins().umulhi(p, b0); // high bits ⇒ overflow if != 0
+                    let ovf = b.ins().icmp_imm(IntCC::NotEqual, hi, 0);
+                    let umax = b.ins().iconst(types::I64, -1); // u64::MAX bits
+                    let sat = b.ins().select(ovf, umax, prod);
+                    let imax = b.ins().iconst(types::I64, i64::MAX);
+                    let lt = b.ins().icmp(IntCC::UnsignedLessThan, sat, imax);
+                    let res = b.ins().select(lt, sat, imax); // min(sat, i64::MAX)
+                    b.def_var(rv, res);
+                    b.ins().jump(done_b, &[]);
+
+                    b.switch_to_block(done_b);
+                    let r = b.use_var(rv);
+                    b.def_var(ivars[ix], r);
+                    kinds.push(Kind::Int);
+                }
+                // awk `/` and `%`: float result, with a runtime error on a zero
+                // divisor (the native code branches to set the error and returns
+                // early; the ok path continues). Codes match `VM::aot_set_error`.
+                op @ (Op::AwkDivJit | Op::AwkModJit) => {
+                    let kb = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let ka = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let divisor = load_f64(&mut b, &ivars, &fvars, iy, kb);
+                    let dividend = load_f64(&mut b, &ivars, &fvars, ix, ka);
+                    let zero = b.ins().f64const(Ieee64::with_bits(0f64.to_bits()));
+                    let is_zero = b.ins().fcmp(FloatCC::Equal, divisor, zero);
+                    let err_blk = b.create_block();
+                    let ok_blk = b.create_block();
+                    b.ins().brif(is_zero, err_blk, &[], ok_blk, &[]);
+
+                    b.switch_to_block(err_blk);
+                    let vm = b.use_var(vm_var);
+                    let code = b
+                        .ins()
+                        .iconst(types::I32, if matches!(op, Op::AwkDivJit) { 0 } else { 1 });
+                    b.ins().call(serr_ref, &[vm, code]);
+                    let status = b.ins().iconst(types::I64, 0);
+                    b.ins().return_(&[status]);
+
+                    b.switch_to_block(ok_blk);
+                    let r = if matches!(op, Op::AwkDivJit) {
+                        b.ins().fdiv(dividend, divisor)
+                    } else {
+                        let call = b.ins().call(fmod_ref, &[dividend, divisor]);
+                        b.inst_results(call)[0]
+                    };
+                    b.def_var(fvars[ix], r);
+                    kinds.push(Kind::Float);
+                }
+                // awk lshift/rshift: error on negative operands, else convert to
+                // int, shift (logical for rshift) with `(n as u32) & 0x3f`, and
+                // convert back to float — mirroring the interpreter exactly.
+                op @ (Op::AwkLshiftJit | Op::AwkRshiftJit) => {
+                    let kb = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let ka = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let n = load_f64(&mut b, &ivars, &fvars, iy, kb);
+                    let a = load_f64(&mut b, &ivars, &fvars, ix, ka);
+                    let zero = b.ins().f64const(Ieee64::with_bits(0f64.to_bits()));
+                    let a_neg = b.ins().fcmp(FloatCC::LessThan, a, zero);
+                    let n_neg = b.ins().fcmp(FloatCC::LessThan, n, zero);
+                    let bad = b.ins().bor(a_neg, n_neg);
+                    let err_blk = b.create_block();
+                    let ok_blk = b.create_block();
+                    b.ins().brif(bad, err_blk, &[], ok_blk, &[]);
+
+                    b.switch_to_block(err_blk);
+                    let vm = b.use_var(vm_var);
+                    let code = b
+                        .ins()
+                        .iconst(types::I32, if matches!(op, Op::AwkLshiftJit) { 2 } else { 3 });
+                    b.ins().call(serr_ref, &[vm, code]);
+                    let st0 = b.ins().iconst(types::I64, 0);
+                    b.ins().return_(&[st0]);
+
+                    b.switch_to_block(ok_blk);
+                    let ai = b.ins().fcvt_to_sint_sat(types::I64, a);
+                    let shift_u32 = b.ins().fcvt_to_uint_sat(types::I32, n);
+                    let shift_u64 = b.ins().uextend(types::I64, shift_u32);
+                    let shift = b.ins().band_imm(shift_u64, 0x3f);
+                    let r = if matches!(op, Op::AwkLshiftJit) {
+                        let sh = b.ins().ishl(ai, shift);
+                        b.ins().fcvt_from_sint(types::F64, sh)
+                    } else {
+                        // logical right shift on the u64 bit pattern → f64
+                        let sh = b.ins().ushr(ai, shift);
+                        b.ins().fcvt_from_uint(types::F64, sh)
+                    };
+                    b.def_var(fvars[ix], r);
+                    kinds.push(Kind::Float);
+                }
+                // awk compl: error on negative, else `!(a as i64)` as float.
+                Op::AwkComplJit => {
+                    let ka = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let a = load_f64(&mut b, &ivars, &fvars, idx, ka);
+                    let zero = b.ins().f64const(Ieee64::with_bits(0f64.to_bits()));
+                    let a_neg = b.ins().fcmp(FloatCC::LessThan, a, zero);
+                    let err_blk = b.create_block();
+                    let ok_blk = b.create_block();
+                    b.ins().brif(a_neg, err_blk, &[], ok_blk, &[]);
+
+                    b.switch_to_block(err_blk);
+                    let vm = b.use_var(vm_var);
+                    let code = b.ins().iconst(types::I32, 4);
+                    b.ins().call(serr_ref, &[vm, code]);
+                    let st0 = b.ins().iconst(types::I64, 0);
+                    b.ins().return_(&[st0]);
+
+                    b.switch_to_block(ok_blk);
+                    let ai = b.ins().fcvt_to_sint_sat(types::I64, a);
+                    let v = b.ins().bnot(ai);
+                    let r = b.ins().fcvt_from_sint(types::F64, v);
+                    b.def_var(fvars[idx], r);
+                    kinds.push(Kind::Float);
+                }
+                // awk sqrt/log: warn-to-stderr + NaN on negative input (no halt),
+                // else the result. The two arms merge their value in fvars[idx].
+                op @ (Op::AwkSqrtJit | Op::AwkLogJit) => {
+                    let ka = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let a = load_f64(&mut b, &ivars, &fvars, idx, ka);
+                    let zero = b.ins().f64const(Ieee64::with_bits(0f64.to_bits()));
+                    let neg = b.ins().fcmp(FloatCC::LessThan, a, zero);
+                    let warn_blk = b.create_block();
+                    let ok_blk = b.create_block();
+                    let cont_blk = b.create_block();
+                    b.ins().brif(neg, warn_blk, &[], ok_blk, &[]);
+
+                    b.switch_to_block(warn_blk);
+                    let code = b
+                        .ins()
+                        .iconst(types::I32, if matches!(op, Op::AwkSqrtJit) { 0 } else { 1 });
+                    b.ins().call(warn_ref, &[code, a]);
+                    let nan = b.ins().f64const(Ieee64::with_bits(f64::NAN.to_bits()));
+                    b.def_var(fvars[idx], nan);
+                    b.ins().jump(cont_blk, &[]);
+
+                    b.switch_to_block(ok_blk);
+                    let r = if matches!(op, Op::AwkSqrtJit) {
+                        b.ins().sqrt(a)
+                    } else {
+                        let ln_id = b.ins().iconst(types::I32, 10); // ln
+                        let call = b.ins().call(unary_ref, &[ln_id, a]);
+                        b.inst_results(call)[0]
+                    };
+                    b.def_var(fvars[idx], r);
+                    b.ins().jump(cont_blk, &[]);
+
+                    b.switch_to_block(cont_blk);
+                    kinds.push(Kind::Float);
+                }
                 Op::Negate => {
                     let k = kinds.pop().unwrap();
                     let idx = kinds.len();
@@ -671,21 +1571,114 @@ fn build_entry_native<M: Module>(
                     kinds.push(Kind::Bool);
                 }
                 Op::GetSlot(slot) => {
-                    let vm = b.use_var(vm_var);
-                    let sc = b.ins().iconst(types::I32, *slot as i64);
-                    let call = b.ins().call(sget_ref, &[vm, sc]);
-                    let r = b.inst_results(call)[0];
+                    let v = b.use_var(slot_vars[*slot as usize]);
                     let idx = kinds.len();
-                    b.def_var(ivars[idx], r);
+                    b.def_var(ivars[idx], v);
                     kinds.push(Kind::Int);
                 }
                 Op::SetSlot(slot) => {
                     kinds.pop().unwrap(); // analysis guarantees Int
                     let idx = kinds.len();
                     let v = b.use_var(ivars[idx]);
-                    let vm = b.use_var(vm_var);
-                    let sc = b.ins().iconst(types::I32, *slot as i64);
-                    b.ins().call(sset_ref, &[vm, sc, v]);
+                    b.def_var(slot_vars[*slot as usize], v);
+                }
+                // Globals: register-resident int variables, like slots.
+                Op::GetVar(g) => {
+                    let v = b.use_var(global_vars[*g as usize]);
+                    let idx = kinds.len();
+                    b.def_var(ivars[idx], v);
+                    kinds.push(Kind::Int);
+                }
+                Op::SetVar(g) | Op::DeclareVar(g) => {
+                    kinds.pop().unwrap(); // analysis guarantees Int
+                    let idx = kinds.len();
+                    let v = b.use_var(ivars[idx]);
+                    b.def_var(global_vars[*g as usize], v);
+                }
+                // Slot read-modify-write super-ops (slots are i64 registers).
+                op @ (Op::PreIncSlot(slot) | Op::PreDecSlot(slot)) => {
+                    let sv = slot_vars[*slot as usize];
+                    let old = b.use_var(sv);
+                    let nv = b
+                        .ins()
+                        .iadd_imm(old, if matches!(op, Op::PreIncSlot(_)) { 1 } else { -1 });
+                    b.def_var(sv, nv);
+                    let idx = kinds.len();
+                    b.def_var(ivars[idx], nv); // pre: push the new value
+                    kinds.push(Kind::Int);
+                }
+                op @ (Op::PostIncSlot(slot) | Op::PostDecSlot(slot)) => {
+                    let sv = slot_vars[*slot as usize];
+                    let old = b.use_var(sv);
+                    let nv = b
+                        .ins()
+                        .iadd_imm(old, if matches!(op, Op::PostIncSlot(_)) { 1 } else { -1 });
+                    b.def_var(sv, nv);
+                    let idx = kinds.len();
+                    b.def_var(ivars[idx], old); // post: push the old value
+                    kinds.push(Kind::Int);
+                }
+                Op::PreIncSlotVoid(slot) => {
+                    let sv = slot_vars[*slot as usize];
+                    let old = b.use_var(sv);
+                    let nv = b.ins().iadd_imm(old, 1);
+                    b.def_var(sv, nv);
+                }
+                Op::AddAssignSlotVoid(a, b_slot) => {
+                    let av = slot_vars[*a as usize];
+                    let x = b.use_var(av);
+                    let y = b.use_var(slot_vars[*b_slot as usize]);
+                    let sum = b.ins().iadd(x, y);
+                    b.def_var(av, sum);
+                }
+                // Emit the internal `while i < limit { sum += i; i += 1 }` as a
+                // real native loop over the two slot registers. Three on-the-fly
+                // blocks (not plan leaders); `seal_all_blocks` builds the phis.
+                // Execution continues in `exit` after this op.
+                Op::AccumSumLoop(sum_s, i_s, limit) => {
+                    let sum_v = slot_vars[*sum_s as usize];
+                    let i_v = slot_vars[*i_s as usize];
+                    let header = b.create_block();
+                    let body = b.create_block();
+                    let exit = b.create_block();
+                    b.ins().jump(header, &[]);
+
+                    b.switch_to_block(header);
+                    let lim = b.ins().iconst(types::I64, *limit as i64);
+                    let i_cur = b.use_var(i_v);
+                    let cond = b.ins().icmp(IntCC::SignedLessThan, i_cur, lim);
+                    b.ins().brif(cond, body, &[], exit, &[]);
+
+                    b.switch_to_block(body);
+                    let s = b.use_var(sum_v);
+                    let i2 = b.use_var(i_v);
+                    let ns = b.ins().iadd(s, i2);
+                    b.def_var(sum_v, ns);
+                    let ni = b.ins().iadd_imm(i2, 1);
+                    b.def_var(i_v, ni);
+                    b.ins().jump(header, &[]);
+
+                    // Fall through into `exit`; subsequent ops emit here.
+                    b.switch_to_block(exit);
+                }
+                Op::SlotLtIntJumpIfFalse(slot, limit, t) => {
+                    let v = b.use_var(slot_vars[*slot as usize]);
+                    // jump to target when slot >= limit, i.e. NOT (slot < limit).
+                    let lt = b.ins().icmp_imm(IntCC::SignedLessThan, v, *limit as i64);
+                    b.ins()
+                        .brif(lt, block_for(ip + 1), &[], block_for(*t), &[]);
+                    terminated = true;
+                }
+                Op::SlotIncLtIntJumpBack(slot, limit, t) => {
+                    let sv = slot_vars[*slot as usize];
+                    let old = b.use_var(sv);
+                    let nv = b.ins().iadd_imm(old, 1);
+                    b.def_var(sv, nv);
+                    // jump back to target while the incremented slot < limit.
+                    let lt = b.ins().icmp_imm(IntCC::SignedLessThan, nv, *limit as i64);
+                    b.ins()
+                        .brif(lt, block_for(*t), &[], block_for(ip + 1), &[]);
+                    terminated = true;
                 }
                 Op::Pop => {
                     kinds.pop().unwrap();
@@ -702,6 +1695,165 @@ fn build_entry_native<M: Module>(
                         b.def_var(ivars[dst], v);
                     }
                     kinds.push(k);
+                }
+                Op::LoadTrue | Op::LoadFalse => {
+                    let v = b
+                        .ins()
+                        .iconst(types::I64, matches!(&chunk.ops[ip], Op::LoadTrue) as i64);
+                    let idx = kinds.len();
+                    b.def_var(ivars[idx], v);
+                    kinds.push(Kind::Bool);
+                }
+                op @ (Op::Inc | Op::Dec) => {
+                    let _ = kinds.pop().unwrap(); // int-like ⇒ value lives in ivars
+                    let idx = kinds.len();
+                    let x = b.use_var(ivars[idx]);
+                    let r = match op {
+                        Op::Inc => b.ins().iadd_imm(x, 1),
+                        _ => b.ins().iadd_imm(x, -1),
+                    };
+                    b.def_var(ivars[idx], r);
+                    kinds.push(Kind::Int);
+                }
+                Op::LogNot => {
+                    let k = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let pred = truthy(&mut b, &ivars, &fvars, idx, k);
+                    // !truthy: truthy ⇒ 0, falsy ⇒ 1.
+                    let one = b.ins().iconst(types::I64, 1);
+                    let zero = b.ins().iconst(types::I64, 0);
+                    let r = b.ins().select(pred, zero, one);
+                    b.def_var(ivars[idx], r);
+                    kinds.push(Kind::Bool);
+                }
+                op @ (Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr) => {
+                    let _ = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let _ = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let y = b.use_var(ivars[iy]);
+                    let x = b.use_var(ivars[ix]);
+                    // Cranelift masks the shift amount to the operand width
+                    // (0–63 for i64), matching the interpreter's `& 63`.
+                    let r = match op {
+                        Op::BitAnd => b.ins().band(x, y),
+                        Op::BitOr => b.ins().bor(x, y),
+                        Op::BitXor => b.ins().bxor(x, y),
+                        Op::Shl => b.ins().ishl(x, y),
+                        _ => b.ins().sshr(x, y),
+                    };
+                    b.def_var(ivars[ix], r);
+                    kinds.push(Kind::Int);
+                }
+                Op::BitNot => {
+                    let _ = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let x = b.use_var(ivars[idx]);
+                    let r = b.ins().bnot(x);
+                    b.def_var(ivars[idx], r);
+                    kinds.push(Kind::Int);
+                }
+                Op::Dup2 => {
+                    let len = kinds.len();
+                    let ka = kinds[len - 2];
+                    let kb = kinds[len - 1];
+                    let a = load_raw(&mut b, &ivars, &fvars, len - 2, ka);
+                    let bv = load_raw(&mut b, &ivars, &fvars, len - 1, kb);
+                    store_raw(&mut b, &ivars, &fvars, len, ka, a);
+                    store_raw(&mut b, &ivars, &fvars, len + 1, kb, bv);
+                    kinds.push(ka);
+                    kinds.push(kb);
+                }
+                Op::Swap => {
+                    let len = kinds.len();
+                    let (ix, iy) = (len - 2, len - 1);
+                    let kx = kinds[ix];
+                    let ky = kinds[iy];
+                    let x = load_raw(&mut b, &ivars, &fvars, ix, kx);
+                    let y = load_raw(&mut b, &ivars, &fvars, iy, ky);
+                    store_raw(&mut b, &ivars, &fvars, ix, ky, y);
+                    store_raw(&mut b, &ivars, &fvars, iy, kx, x);
+                    kinds.swap(ix, iy);
+                }
+                Op::Rot => {
+                    let len = kinds.len();
+                    let (ia, ib, ic) = (len - 3, len - 2, len - 1);
+                    let ka = kinds[ia];
+                    let kb = kinds[ib];
+                    let kc = kinds[ic];
+                    let a = load_raw(&mut b, &ivars, &fvars, ia, ka);
+                    let bv = load_raw(&mut b, &ivars, &fvars, ib, kb);
+                    let c = load_raw(&mut b, &ivars, &fvars, ic, kc);
+                    // [a, b, c] → [b, c, a]
+                    store_raw(&mut b, &ivars, &fvars, ia, kb, bv);
+                    store_raw(&mut b, &ivars, &fvars, ib, kc, c);
+                    store_raw(&mut b, &ivars, &fvars, ic, ka, a);
+                    kinds[ia] = kb;
+                    kinds[ib] = kc;
+                    kinds[ic] = ka;
+                }
+                op @ (Op::LogAnd | Op::LogOr) => {
+                    let kb = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let ka = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let ta = truthy(&mut b, &ivars, &fvars, ix, ka);
+                    let tb = truthy(&mut b, &ivars, &fvars, iy, kb);
+                    let combined = match op {
+                        Op::LogAnd => b.ins().band(ta, tb),
+                        _ => b.ins().bor(ta, tb),
+                    };
+                    let one = b.ins().iconst(types::I64, 1);
+                    let zero = b.ins().iconst(types::I64, 0);
+                    let r = b.ins().select(combined, one, zero);
+                    b.def_var(ivars[ix], r);
+                    kinds.push(Kind::Bool);
+                }
+                Op::Spaceship => {
+                    let kb = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let ka = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let m1 = b.ins().iconst(types::I64, -1);
+                    let zero = b.ins().iconst(types::I64, 0);
+                    let p1 = b.ins().iconst(types::I64, 1);
+                    let (lt, gt) = if ka == Kind::Float || kb == Kind::Float {
+                        let y = load_f64(&mut b, &ivars, &fvars, iy, kb);
+                        let x = load_f64(&mut b, &ivars, &fvars, ix, ka);
+                        (
+                            b.ins().fcmp(FloatCC::LessThan, x, y),
+                            b.ins().fcmp(FloatCC::GreaterThan, x, y),
+                        )
+                    } else {
+                        let y = b.use_var(ivars[iy]);
+                        let x = b.use_var(ivars[ix]);
+                        (
+                            b.ins().icmp(IntCC::SignedLessThan, x, y),
+                            b.ins().icmp(IntCC::SignedGreaterThan, x, y),
+                        )
+                    };
+                    // x<y ? -1 : (x>y ? 1 : 0)
+                    let mid = b.ins().select(gt, p1, zero);
+                    let r = b.ins().select(lt, m1, mid);
+                    b.def_var(ivars[ix], r);
+                    kinds.push(Kind::Int);
+                }
+                Op::JumpIfTrueKeep(t) => {
+                    // Peek (don't pop): the value stays live on both arms.
+                    let k = *kinds.last().unwrap();
+                    let idx = kinds.len() - 1;
+                    let cond = truthy(&mut b, &ivars, &fvars, idx, k);
+                    b.ins()
+                        .brif(cond, block_for(*t), &[], block_for(ip + 1), &[]);
+                    terminated = true;
+                }
+                Op::JumpIfFalseKeep(t) => {
+                    let k = *kinds.last().unwrap();
+                    let idx = kinds.len() - 1;
+                    let cond = truthy(&mut b, &ivars, &fvars, idx, k);
+                    b.ins()
+                        .brif(cond, block_for(ip + 1), &[], block_for(*t), &[]);
+                    terminated = true;
                 }
                 Op::Jump(t) => {
                     b.ins().jump(block_for(*t), &[]);
@@ -776,6 +1928,48 @@ fn load_f64(
     } else {
         let v = b.use_var(ivars[idx]);
         b.ins().fcvt_from_sint(types::F64, v)
+    }
+}
+
+/// Read operand-stack position `idx` in its own representation (no coercion),
+/// picking the i64 or f64 variable per its `Kind`. Used by the stack-shuffle
+/// ops, which move values around unchanged.
+fn load_raw(
+    b: &mut FunctionBuilder,
+    ivars: &[Variable],
+    fvars: &[Variable],
+    idx: usize,
+    k: Kind,
+) -> cranelift_codegen::ir::Value {
+    if k == Kind::Float {
+        b.use_var(fvars[idx])
+    } else {
+        b.use_var(ivars[idx])
+    }
+}
+
+/// Unsigned absolute value of an `i64` (same bit pattern as `i64::unsigned_abs`,
+/// including `i64::MIN` → `2^63`), as an i64 holding the u64 bits. Used by the
+/// `GcdInt`/`LcmInt` Euclid loops, which operate on magnitudes.
+fn uabs(b: &mut FunctionBuilder, v: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+    let neg = b.ins().ineg(v);
+    let is_neg = b.ins().icmp_imm(IntCC::SignedLessThan, v, 0);
+    b.ins().select(is_neg, neg, v)
+}
+
+/// Write `v` to operand-stack position `idx`, into the variable matching `k`.
+fn store_raw(
+    b: &mut FunctionBuilder,
+    ivars: &[Variable],
+    fvars: &[Variable],
+    idx: usize,
+    k: Kind,
+    v: cranelift_codegen::ir::Value,
+) {
+    if k == Kind::Float {
+        b.def_var(fvars[idx], v);
+    } else {
+        b.def_var(ivars[idx], v);
     }
 }
 
@@ -923,14 +2117,12 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
         "fusevm_aot_set_float_result",
         fusevm_aot_set_float_result as *const u8,
     );
-    builder.symbol(
-        "fusevm_aot_slot_get_int",
-        fusevm_aot_slot_get_int as *const u8,
-    );
-    builder.symbol(
-        "fusevm_aot_slot_set_int",
-        fusevm_aot_slot_set_int as *const u8,
-    );
+    builder.symbol("fusevm_aot_powf", fusevm_aot_powf as *const u8);
+    builder.symbol("fusevm_aot_fmod", fusevm_aot_fmod as *const u8);
+    builder.symbol("fusevm_aot_unary_math", fusevm_aot_unary_math as *const u8);
+    builder.symbol("fusevm_aot_atan2", fusevm_aot_atan2 as *const u8);
+    builder.symbol("fusevm_aot_set_error", fusevm_aot_set_error as *const u8);
+    builder.symbol("fusevm_aot_awk_warn", fusevm_aot_awk_warn as *const u8);
     let mut module = JITModule::new(builder);
 
     let entry_id = build_entry(&mut module, chunk)?;
@@ -1139,6 +2331,63 @@ mod tests {
     }
 
     #[test]
+    fn native_unset_slot_read_falls_back() {
+        // Reading a slot never written would yield `Undef` in the interpreter
+        // but 0 in a register — so definite-assignment must reject it, and the
+        // threaded path must still match the interpreter.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::GetSlot(0), 1);
+        let chunk = b.build();
+        assert!(!native_lowerable(&chunk), "unset slot read must fall back");
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_slot_set_on_one_branch_falls_back() {
+        // slot 0 is assigned only on the taken-if path; at the join it is not
+        // definitely assigned, so the read must fall back to threaded.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1); // condition: false ⇒ skip the set
+        let jf = b.emit(Op::JumpIfFalse(0), 1);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let skip = b.current_pos();
+        b.patch_jump(jf, skip);
+        b.emit(Op::GetSlot(0), 1);
+        let chunk = b.build();
+        assert!(
+            !native_lowerable(&chunk),
+            "slot assigned on only one path must fall back"
+        );
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_slot_set_on_both_branches_lowers() {
+        // slot 0 assigned on both arms ⇒ definitely assigned at the join ⇒ the
+        // read lowers natively. (cond false ⇒ else ⇒ slot0 = 2.)
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        let jf = b.emit(Op::JumpIfFalse(0), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let j = b.emit(Op::Jump(0), 1);
+        let else_ip = b.current_pos();
+        b.patch_jump(jf, else_ip);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let end_ip = b.current_pos();
+        b.patch_jump(j, end_ip);
+        b.emit(Op::GetSlot(0), 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "both-path assignment should lower");
+        match run_chunk_native(&chunk, |_| {}).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Int(2)),
+            other => panic!("expected Ok(2), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn native_int_slots_round_trip() {
         // x = 41; x = x + 1; return x  →  42, fully native (slots supported).
         let mut b = ChunkBuilder::new();
@@ -1305,6 +2554,687 @@ mod tests {
             assert!(native_lowerable(&chunk), "generated chunk must lower natively");
             assert_native_matches_interp(chunk);
         }
+    }
+
+    #[test]
+    fn native_differential_integer_bitwise() {
+        // Deterministic differential fuzz over the integer op set, including
+        // bitwise/shift and Inc/Dec. Every value is Int, so each chunk lowers
+        // and must match the interpreter exactly (wrapping on both sides).
+        let mut seed: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+
+        for _ in 0..400 {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt((next() % 17) as i64 - 8), 1);
+            let terms = next() % 8;
+            for _ in 0..terms {
+                if next() % 3 == 0 {
+                    // unary, int → int (depth unchanged)
+                    match next() % 3 {
+                        0 => b.emit(Op::Inc, 1),
+                        1 => b.emit(Op::Dec, 1),
+                        _ => b.emit(Op::BitNot, 1),
+                    };
+                } else {
+                    // binary: push another operand, then combine (depth unchanged)
+                    b.emit(Op::LoadInt((next() % 17) as i64 - 8), 1);
+                    match next() % 9 {
+                        0 => b.emit(Op::Add, 1),
+                        1 => b.emit(Op::Sub, 1),
+                        2 => b.emit(Op::Mul, 1),
+                        3 => b.emit(Op::BitAnd, 1),
+                        4 => b.emit(Op::BitOr, 1),
+                        5 => b.emit(Op::BitXor, 1),
+                        6 => b.emit(Op::Shl, 1),
+                        7 => b.emit(Op::Shr, 1),
+                        // operands span -8..8, so this exercises `% 0` and `% -1`.
+                        _ => b.emit(Op::Mod, 1),
+                    };
+                }
+            }
+            let chunk = b.build();
+            assert!(native_lowerable(&chunk), "integer chunk must lower");
+            assert_native_matches_interp(chunk);
+        }
+    }
+
+    #[test]
+    fn native_bool_lognot_and_bitwise() {
+        // !true → false; (false) & 5 == 0. A Bool flows through LogNot into a
+        // bitwise op (Bool is int-like) and yields an Int result — all native.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadTrue, 1);
+        b.emit(Op::LogNot, 1); // false (0)
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::BitAnd, 1); // 0 & 5 = 0
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk));
+        match run_chunk_native(&chunk, |_| {}).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Int(0)),
+            other => panic!("expected Ok(0), got {other:?}"),
+        }
+
+        // A bare Bool result is not numeric ⇒ falls back; threaded must match.
+        let mut bb = ChunkBuilder::new();
+        bb.emit(Op::LoadFalse, 1);
+        bb.emit(Op::LogNot, 1); // true — but a Bool result, so not lowered
+        let chunk = bb.build();
+        assert!(!native_lowerable(&chunk), "bare bool result falls back");
+        assert_native_matches_interp(chunk);
+    }
+
+    /// Run a lowerable chunk natively and assert its integer result.
+    fn assert_native_int(chunk: Chunk, expect: i64) {
+        assert!(native_lowerable(&chunk), "chunk should lower natively");
+        match run_chunk_native(&chunk, |_| {}).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Int(expect)),
+            other => panic!("expected Ok({expect}), got {other:?}"),
+        }
+    }
+
+    /// Run a lowerable chunk natively and assert its (finite) float result.
+    fn assert_native_int_or_float(chunk: Chunk, expect: f64) {
+        assert!(native_lowerable(&chunk), "chunk should lower natively");
+        match run_chunk_native(&chunk, |_| {}).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Float(expect)),
+            other => panic!("expected Ok({expect}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_integer_mod() {
+        // Normal, plus the two guarded divisors (% 0 and % -1 both → 0).
+        for (x, y, want) in [
+            (7, 3, 1),
+            (-7, 3, -1),  // truncated remainder (sign of dividend)
+            (7, -3, 1),
+            (10, 0, 0),   // interpreter's y==0 → 0
+            (i64::MIN, -1, 0), // x % -1 == 0, and dodges the srem trap
+            (123_456, 1000, 456),
+        ] {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(x), 1);
+            b.emit(Op::LoadInt(y), 1);
+            b.emit(Op::Mod, 1);
+            let chunk = b.build();
+            assert!(native_lowerable(&chunk), "int mod should lower");
+            assert_native_int(chunk, want);
+        }
+
+        // A float operand takes the fmod libcall path: 7.5 % 2.0 = 1.5.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(7.5), 1);
+        b.emit(Op::LoadFloat(2.0), 1);
+        b.emit(Op::Mod, 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "float mod lowers via fmod");
+        match run_chunk_native(&chunk, |_| {}).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Float(1.5)),
+            other => panic!("expected Ok(1.5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_float_math_ops() {
+        // Each shim calls the same Rust method the interpreter does, so finite
+        // results match bit-for-bit. Inputs chosen to stay in-domain (no NaN,
+        // which would fail `==`).
+        let cases: &[(Op, f64)] = &[
+            (Op::AbsFloat, -3.5),
+            (Op::SqrtFloat, 2.0),
+            (Op::CeilFloat, 2.3),
+            (Op::FloorFloat, 2.7),
+            (Op::TruncFloat, -2.7),
+            (Op::RoundFloat, 2.5), // ties to even → 2.0
+            (Op::SinFloat, 1.0),
+            (Op::CosFloat, 1.0),
+            (Op::TanFloat, 1.0),
+            (Op::AsinFloat, 0.5),
+            (Op::AcosFloat, 0.5),
+            (Op::AtanFloat, 2.0),
+            (Op::SinhFloat, 1.0),
+            (Op::CoshFloat, 1.0),
+            (Op::TanhFloat, 1.0),
+            (Op::ExpFloat, 1.5),
+            (Op::LogFloat, 2.0),
+            (Op::Log2Float, 8.0),
+            (Op::Log10Float, 1000.0),
+        ];
+        for (op, input) in cases {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(*input), 1);
+            b.emit(op.clone(), 1);
+            let chunk = b.build();
+            assert!(native_lowerable(&chunk), "{op:?} should lower");
+            assert_native_matches_interp(chunk);
+        }
+
+        // RoundFloat ties-to-even concretely: 2.5 → 2.0, 3.5 → 4.0.
+        for (input, want) in [(2.5_f64, 2.0_f64), (3.5, 4.0)] {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(input), 1);
+            b.emit(Op::RoundFloat, 1);
+            match run_chunk_native(&b.build(), |_| {}).expect("run") {
+                VMResult::Ok(v) => assert_eq!(v, Value::Float(want)),
+                other => panic!("got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn native_awk_div_mod() {
+        // Good cases: float division and modulo.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(7.0), 1);
+        b.emit(Op::LoadFloat(2.0), 1);
+        b.emit(Op::AwkDivJit, 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk));
+        match run_chunk_native(&chunk, |_| {}).expect("run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Float(3.5)),
+            other => panic!("got {other:?}"),
+        }
+
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(7.5), 1);
+        b.emit(Op::LoadFloat(2.0), 1);
+        b.emit(Op::AwkModJit, 1);
+        match run_chunk_native(&b.build(), |_| {}).expect("run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Float(1.5)),
+            other => panic!("got {other:?}"),
+        }
+
+        // Divide-by-zero takes the native error-return branch; the error message
+        // must match the interpreter's exactly.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(5.0), 1);
+        b.emit(Op::LoadFloat(0.0), 1);
+        b.emit(Op::AwkDivJit, 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk));
+        match run_chunk_native(&chunk, |_| {}).expect("run") {
+            VMResult::Error(e) => assert_eq!(e, "division by zero attempted"),
+            other => panic!("expected div-by-zero error, got {other:?}"),
+        }
+        assert_native_matches_interp(chunk);
+
+        // Modulo by zero: the `%` variant's distinct message.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(5.0), 1);
+        b.emit(Op::LoadFloat(0.0), 1);
+        b.emit(Op::AwkModJit, 1);
+        let chunk = b.build();
+        match run_chunk_native(&chunk, |_| {}).expect("run") {
+            VMResult::Error(e) => assert_eq!(e, "division by zero attempted in `%'"),
+            other => panic!("expected mod-by-zero error, got {other:?}"),
+        }
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_awk_sqrt_log() {
+        // sqrt(16) = 4.0 exactly.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(16.0), 1);
+        b.emit(Op::AwkSqrtJit, 1);
+        assert_native_int_or_float(b.build(), 4.0);
+
+        // Non-negative inputs match the interpreter (finite results / -inf).
+        for x in [2.0_f64, 0.5, 100.0, 1.0, 0.0] {
+            for op in [Op::AwkSqrtJit, Op::AwkLogJit] {
+                let mut b = ChunkBuilder::new();
+                b.emit(Op::LoadFloat(x), 1);
+                b.emit(op, 1);
+                let chunk = b.build();
+                assert!(native_lowerable(&chunk));
+                assert_native_matches_interp(chunk);
+            }
+        }
+
+        // Negative input warns (to stderr) and yields NaN; verify the NaN result
+        // (the `==`-based diff harness can't compare NaN).
+        for op in [Op::AwkSqrtJit, Op::AwkLogJit] {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(-4.0), 1);
+            b.emit(op, 1);
+            match run_chunk_native(&b.build(), |_| {}).expect("run") {
+                VMResult::Ok(Value::Float(v)) => assert!(v.is_nan(), "expected NaN"),
+                other => panic!("expected NaN float, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn native_awk_bitwise() {
+        // lshift(3, 4) = 48; rshift(48, 4) = 3; compl(0) = -1.
+        let bin = |a: f64, n: f64, op: Op| {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(a), 1);
+            b.emit(Op::LoadFloat(n), 1);
+            b.emit(op, 1);
+            b.build()
+        };
+        assert_native_int_or_float(bin(3.0, 4.0, Op::AwkLshiftJit), 48.0);
+        assert_native_int_or_float(bin(48.0, 4.0, Op::AwkRshiftJit), 3.0);
+
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(0.0), 1);
+        b.emit(Op::AwkComplJit, 1);
+        assert_native_int_or_float(b.build(), -1.0); // !0 == -1
+
+        // Negative operands error with the exact interpreter message.
+        for (op, msg) in [
+            (Op::AwkLshiftJit, "lshift: negative values are not allowed"),
+            (Op::AwkRshiftJit, "rshift: negative values are not allowed"),
+        ] {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(-1.0), 1);
+            b.emit(Op::LoadFloat(2.0), 1);
+            b.emit(op, 1);
+            let chunk = b.build();
+            match run_chunk_native(&chunk, |_| {}).expect("run") {
+                VMResult::Error(e) => assert_eq!(e, msg),
+                other => panic!("expected error, got {other:?}"),
+            }
+            assert_native_matches_interp(chunk);
+        }
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(-1.0), 1);
+        b.emit(Op::AwkComplJit, 1);
+        let chunk = b.build();
+        match run_chunk_native(&chunk, |_| {}).expect("run") {
+            VMResult::Error(e) => assert_eq!(e, "compl: negative value is not allowed"),
+            other => panic!("expected error, got {other:?}"),
+        }
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_differential_awk_bitwise() {
+        // Non-negative float operands (so no error): the int↔float conversion
+        // and shift semantics must match the interpreter exactly.
+        let mut seed: u64 = 0x84A3_11C5_7E29_B6F1;
+        let mut next = || {
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        for _ in 0..300 {
+            let a = (next() % 1_000_000) as f64;
+            let n = (next() % 70) as f64; // spans the 0x3f mask boundary
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadFloat(a), 1);
+            if next() & 1 == 0 {
+                b.emit(Op::LoadFloat(n), 1);
+                b.emit(if next() & 2 == 0 { Op::AwkLshiftJit } else { Op::AwkRshiftJit }, 1);
+            } else {
+                b.emit(Op::AwkComplJit, 1);
+            }
+            let chunk = b.build();
+            assert!(native_lowerable(&chunk));
+            assert_native_matches_interp(chunk);
+        }
+    }
+
+    #[test]
+    fn native_gcd_lcm() {
+        let gcd = |a: i64, bb: i64| {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(a), 1);
+            b.emit(Op::LoadInt(bb), 1);
+            b.emit(Op::GcdInt, 1);
+            b.build()
+        };
+        assert_native_int(gcd(12, 18), 6);
+        assert_native_int(gcd(17, 5), 1);
+        assert_native_int(gcd(0, 5), 5);
+        assert_native_int(gcd(-12, 18), 6); // unsigned_abs
+
+        let lcm = |a: i64, bb: i64| {
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(a), 1);
+            b.emit(Op::LoadInt(bb), 1);
+            b.emit(Op::LcmInt, 1);
+            b.build()
+        };
+        assert_native_int(lcm(4, 6), 12);
+        assert_native_int(lcm(21, 6), 42);
+        assert_native_int(lcm(0, 5), 0);
+        assert_native_int(lcm(i64::MAX, 2), i64::MAX); // capped at i64::MAX
+    }
+
+    #[test]
+    fn native_differential_gcd_lcm() {
+        // Full-range random pairs: exercises unsigned_abs of negatives,
+        // i64::MIN, and lcm's saturating multiply — all must match the interp.
+        let mut seed: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        for _ in 0..300 {
+            let a = next() as i64;
+            let bb = next() as i64;
+            let op = if next() & 1 == 0 { Op::GcdInt } else { Op::LcmInt };
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(a), 1);
+            b.emit(Op::LoadInt(bb), 1);
+            b.emit(op, 1);
+            let chunk = b.build();
+            assert!(native_lowerable(&chunk));
+            assert_native_matches_interp(chunk);
+        }
+    }
+
+    #[test]
+    fn native_int_math_ops() {
+        // TruncInt of a float truncates toward zero; AbsInt is wrapping abs.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(3.9), 1);
+        b.emit(Op::TruncInt, 1);
+        assert_native_int(b.build(), 3);
+
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(-3.9), 1);
+        b.emit(Op::TruncInt, 1);
+        assert_native_int(b.build(), -3);
+
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(-7), 1);
+        b.emit(Op::AbsInt, 1);
+        assert_native_int(b.build(), 7);
+
+        // wrapping: abs(i64::MIN) == i64::MIN
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(i64::MIN), 1);
+        b.emit(Op::AbsInt, 1);
+        assert_native_int(b.build(), i64::MIN);
+    }
+
+    #[test]
+    fn native_binary_float_math() {
+        // PowFloat: 2 ** 10 = 1024.0.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(2.0), 1);
+        b.emit(Op::LoadFloat(10.0), 1);
+        b.emit(Op::PowFloat, 1);
+        match run_chunk_native(&b.build(), |_| {}).expect("run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Float(1024.0)),
+            other => panic!("got {other:?}"),
+        }
+
+        // Atan2Float: operand order y (lower), x (top) → y.atan2(x).
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(2.0), 1); // y
+        b.emit(Op::LoadFloat(3.0), 1); // x
+        b.emit(Op::Atan2Float, 1);
+        assert_native_matches_interp(b.build());
+    }
+
+    #[test]
+    fn native_pow() {
+        // 2 ** 10 = 1024.0 (always Float, via powf).
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LoadInt(10), 1);
+        b.emit(Op::Pow, 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "pow lowers via powf");
+        match run_chunk_native(&chunk, |_| {}).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Float(1024.0)),
+            other => panic!("expected Ok(1024.0), got {other:?}"),
+        }
+
+        // Mixed/float base: 9.0 ** 0.5 = 3.0; matches the interpreter exactly.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(9.0), 1);
+        b.emit(Op::LoadFloat(0.5), 1);
+        b.emit(Op::Pow, 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk));
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_globals_round_trip() {
+        // SetVar/GetVar: x = 42; return x → 42.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(42), 1);
+        b.emit(Op::SetVar(0), 1);
+        b.emit(Op::GetVar(0), 1);
+        assert_native_int(b.build(), 42);
+
+        // DeclareVar behaves like SetVar.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::DeclareVar(0), 1);
+        b.emit(Op::GetVar(0), 1);
+        assert_native_int(b.build(), 7);
+
+        // Two globals in arithmetic: 10 + 5 = 15.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(10), 1);
+        b.emit(Op::SetVar(0), 1);
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::SetVar(1), 1);
+        b.emit(Op::GetVar(0), 1);
+        b.emit(Op::GetVar(1), 1);
+        b.emit(Op::Add, 1);
+        assert_native_int(b.build(), 15);
+    }
+
+    #[test]
+    fn native_uninit_global_read_falls_back() {
+        // Reading an unassigned global yields `Undef` in the interpreter, so it
+        // must fall back; the threaded path still matches.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::GetVar(0), 1);
+        let chunk = b.build();
+        assert!(!native_lowerable(&chunk), "unset global read must fall back");
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_slot_incdec_superops() {
+        // PreIncSlot: 5 → slot=6, push 6.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::PreIncSlot(0), 1);
+        assert_native_int(b.build(), 6);
+
+        // PostIncSlot: push old 5; slot becomes 6 (observed via GetSlot).
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::PostIncSlot(0), 1);
+        assert_native_int(b.build(), 5);
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::PostIncSlot(0), 1);
+        b.emit(Op::Pop, 1);
+        b.emit(Op::GetSlot(0), 1);
+        assert_native_int(b.build(), 6);
+
+        // PreDecSlot: 5 → 4. PostDecSlot: push old 5.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::PreDecSlot(0), 1);
+        assert_native_int(b.build(), 4);
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::PostDecSlot(0), 1);
+        assert_native_int(b.build(), 5);
+
+        // PreIncSlotVoid on an *unassigned* slot: coerces to 0, becomes 1; the
+        // op also marks the slot assigned so the later GetSlot lowers.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::PreIncSlotVoid(0), 1);
+        b.emit(Op::GetSlot(0), 1);
+        assert_native_int(b.build(), 1);
+
+        // AddAssignSlotVoid: slot0(10) += slot1(7) → 17.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(10), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::SetSlot(1), 1);
+        b.emit(Op::AddAssignSlotVoid(0, 1), 1);
+        b.emit(Op::GetSlot(0), 1);
+        assert_native_int(b.build(), 17);
+    }
+
+    #[test]
+    fn native_accum_sum_loop() {
+        // AccumSumLoop runs `while i < 5 { sum += i; i += 1 }` internally:
+        // sum = 0+1+2+3+4 = 10, and i ends at 5.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1); // sum
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(1), 1); // i
+        b.emit(Op::AccumSumLoop(0, 1, 5), 1);
+        b.emit(Op::GetSlot(0), 1);
+        assert_native_int(b.build(), 10);
+
+        // The counter slot is left at the limit.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(1), 1);
+        b.emit(Op::AccumSumLoop(0, 1, 5), 1);
+        b.emit(Op::GetSlot(1), 1);
+        assert_native_int(b.build(), 5);
+    }
+
+    #[test]
+    fn native_fused_loop_ops() {
+        // sum=0; i=0; if i<5 { do { sum+=i } while (++i < 5) }; return sum  → 10
+        // built with the fused loop super-ops. Targets are computed by hand
+        // since `patch_jump` only handles the plain jump ops.
+        //  0 LoadInt 0           6 GetSlot 1
+        //  1 SetSlot 0 (sum)     7 Add
+        //  2 LoadInt 0           8 SetSlot 0
+        //  3 SetSlot 1 (i)       9 SlotIncLtIntJumpBack(1,5,5)
+        //  4 SlotLtIntJumpIfFalse(1,5,10)   10 GetSlot 0
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(1), 1);
+        b.emit(Op::SlotLtIntJumpIfFalse(1, 5, 10), 1);
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::GetSlot(1), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::SlotIncLtIntJumpBack(1, 5, 5), 1);
+        b.emit(Op::GetSlot(0), 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "fused loop should lower natively");
+        assert_native_int(chunk, 10);
+    }
+
+    #[test]
+    fn native_stack_shuffles() {
+        // Swap: [3,7] → [7,3]; 7 - 3 = 4.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::Swap, 1);
+        b.emit(Op::Sub, 1);
+        assert_native_int(b.build(), 4);
+
+        // Dup2: [2,5] → [2,5,2,5]; +,+,+ = 14.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::Dup2, 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::Add, 1);
+        assert_native_int(b.build(), 14);
+
+        // Rot: [1,2,3] → [2,3,1]; 3-1=2, 2-2=0.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::Rot, 1);
+        b.emit(Op::Sub, 1);
+        b.emit(Op::Sub, 1);
+        assert_native_int(b.build(), 0);
+    }
+
+    #[test]
+    fn native_logical_and_spaceship() {
+        // LogAnd(1,2) = true; Inc → 2 (Bool is int-like for Inc).
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LogAnd, 1);
+        b.emit(Op::Inc, 1);
+        assert_native_int(b.build(), 2);
+
+        // LogOr(0,0) = false; Inc → 1.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::LogOr, 1);
+        b.emit(Op::Inc, 1);
+        assert_native_int(b.build(), 1);
+
+        // Spaceship: 3 <=> 7 = -1.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::Spaceship, 1);
+        assert_native_int(b.build(), -1);
+
+        // Float spaceship: 5.0 <=> 5.0 = 0; mixed int/float promotes.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::LoadFloat(5.0), 1);
+        b.emit(Op::Spaceship, 1);
+        assert_native_int(b.build(), 0);
+    }
+
+    #[test]
+    fn native_keep_jumps() {
+        // JumpIfTrueKeep: 5 is truthy ⇒ jump keeping 5 ⇒ result 5.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(5), 1);
+        let jt = b.emit(Op::JumpIfTrueKeep(0), 1);
+        b.emit(Op::Pop, 1); // not-taken path rebuilds a depth-1 Int stack
+        b.emit(Op::LoadInt(20), 1);
+        let l = b.current_pos();
+        b.patch_jump(jt, l);
+        assert_native_int(b.build(), 5);
+
+        // JumpIfFalseKeep: 0 is falsy ⇒ jump keeping 0 ⇒ result 0.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        let jf = b.emit(Op::JumpIfFalseKeep(0), 1);
+        b.emit(Op::Pop, 1);
+        b.emit(Op::LoadInt(7), 1);
+        let l = b.current_pos();
+        b.patch_jump(jf, l);
+        assert_native_int(b.build(), 0);
     }
 
     #[test]
