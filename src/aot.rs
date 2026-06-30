@@ -607,10 +607,59 @@ fn heap_op_effect(op: &Op) -> Option<(usize, Option<Kind>)> {
     Some(match op {
         Op::StringRepeat => (2, Some(Kind::Obj)),
         Op::StringLen => (1, Some(Kind::Int)),
+        // String comparisons: pop 2 (stringified operands), push Bool; `StrCmp`
+        // pushes Int (-1/0/1). Pure stack ops (no named var, no alias hazard).
+        Op::StrEq | Op::StrNe | Op::StrLt | Op::StrGt | Op::StrLe | Op::StrGe => {
+            (2, Some(Kind::Bool))
+        }
+        Op::StrCmp => (2, Some(Kind::Int)),
         Op::MakeArray(n) => (*n as usize, Some(Kind::Obj)),
         Op::MakeHash(n) => (*n as usize, Some(Kind::Obj)),
         Op::Range => (2, Some(Kind::Obj)),
         Op::RangeStep => (3, Some(Kind::Obj)),
+        // Input + shell/string expansion sources (host-dispatched in the shim;
+        // pure stack effect, push a boxed string/array). Keep these on the
+        // native driver instead of the threaded fallback.
+        Op::ReadLine => (0, Some(Kind::Obj)),
+        Op::Glob | Op::GlobRecursive => (1, Some(Kind::Obj)),
+        Op::TildeExpand | Op::BraceExpand | Op::WordSplit => (1, Some(Kind::Obj)),
+        // Shell-conditional predicates → Bool: glob match (`[[ x = pat ]]`/case),
+        // regex match (`=~`), file tests (`-f`/`-d`/...). Pure stack effect.
+        Op::StrMatch | Op::RegexMatch => (2, Some(Kind::Bool)),
+        Op::TestFile(_) => (1, Some(Kind::Bool)),
+        // `${var...}` parameter expansion: pops `argc` modifier args + the name,
+        // pushes the expanded value (Obj). The arg count per modifier MUST match
+        // the interpreter exactly. The name is a stack value (not a global index),
+        // so no register-alias hazard.
+        Op::ExpandParam(m) => {
+            use crate::op::param_mod::*;
+            let argc = match *m {
+                DEFAULT | ASSIGN | ERROR | ALTERNATE | STRIP_SHORT | STRIP_LONG
+                | RSTRIP_SHORT | RSTRIP_LONG => 1,
+                SUBST_FIRST | SUBST_ALL | SLICE => 2,
+                _ => 0,
+            };
+            (argc + 1, Some(Kind::Obj))
+        }
+        // ── AWK string/print ops ──────────────────────────────────────────
+        // Dispatched through the frontend awk host in the shim; the awk record /
+        // fields / arrays live in that host (not in fusevm registers), so these
+        // have a pure operand-stack effect and no register-alias hazard. Results
+        // are boxed (`Obj`) since awk values carry numeric-string duality. The
+        // `u8` payload is the operand count (matching the op's contract). NOT
+        // differential-testable in fusevm core (needs the awk host) — verified
+        // end-to-end in awkrs.
+        Op::AwkToLower | Op::AwkToUpper => (1, Some(Kind::Obj)),
+        Op::AwkIndex => (2, Some(Kind::Obj)),
+        Op::AwkLength(n) | Op::AwkSubstr(n) | Op::AwkSprintf(n) => {
+            (*n as usize, Some(Kind::Obj))
+        }
+        Op::AwkPrint(n) | Op::AwkPrintf(n) => (*n as usize, None),
+        // NOTE: `split`/`sub`/`gsub`/`match` are intentionally NOT lowered here.
+        // The engine could (pure stack effect, counts boxed), but awkrs's own AOT
+        // compiler rejects them upstream ("unsupported builtin call"), so they
+        // can't be verified end-to-end yet. Lowering them requires the awkrs
+        // frontend to emit them first — added here only once verifiable.
         // Named array/hash element ops operate on VM-scope heap state
         // (`self.globals[name]`) entirely inside the shim; the native code only
         // stages the stack operands and boxes the result. SOUND ONLY when the
@@ -626,6 +675,13 @@ fn heap_op_effect(op: &Op) -> Option<(usize, Option<Kind>)> {
         Op::HashSet(_) => (2, None),
         Op::DeclareArray(_) => (0, None),
         Op::DeclareHash(_) => (0, None),
+        // Whole-array / hash-view ops, also on `self.globals[name]`.
+        Op::GetArray(_) => (0, Some(Kind::Obj)),
+        Op::SetArray(_) => (1, None),
+        Op::HashKeys(_) => (0, Some(Kind::Obj)),
+        Op::HashValues(_) => (0, Some(Kind::Obj)),
+        Op::HashDelete(_) => (1, Some(Kind::Obj)),
+        Op::HashExists(_) => (1, Some(Kind::Bool)),
         _ => return None,
     })
 }
@@ -644,7 +700,13 @@ fn heap_op_name(op: &Op) -> Option<u16> {
         | Op::HashGet(n)
         | Op::HashSet(n)
         | Op::DeclareArray(n)
-        | Op::DeclareHash(n) => Some(*n),
+        | Op::DeclareHash(n)
+        | Op::GetArray(n)
+        | Op::SetArray(n)
+        | Op::HashKeys(n)
+        | Op::HashValues(n)
+        | Op::HashDelete(n)
+        | Op::HashExists(n) => Some(*n),
         _ => None,
     }
 }
@@ -2119,12 +2181,19 @@ fn build_entry_native<M: Module>(
                             b.def_var(ivars[base], b.inst_results(call)[0]);
                             kinds.push(Kind::Obj);
                         }
-                        Some(_) => {
-                            // Scalar result (e.g. StringLen → Int): pop it back.
+                        Some(Kind::Float) => {
+                            let vm2 = b.use_var(vm_var);
+                            let call = b.ins().call(popf_ref, &[vm2]);
+                            b.def_var(fvars[base], b.inst_results(call)[0]);
+                            kinds.push(Kind::Float);
+                        }
+                        // Int/Bool/Status scalar result: pop into an i64 register
+                        // under its exact kind (e.g. StringLen→Int, HashExists→Bool).
+                        Some(k) => {
                             let vm2 = b.use_var(vm_var);
                             let call = b.ins().call(popi_ref, &[vm2]);
                             b.def_var(ivars[base], b.inst_results(call)[0]);
-                            kinds.push(Kind::Int);
+                            kinds.push(k);
                         }
                         None => {}
                     }
@@ -4226,6 +4295,147 @@ mod tests {
         b.emit(Op::LoadConst(k), 1);
         b.emit(Op::HashGet(0), 1); // → 1
         assert_native_matches_interp(b.build());
+    }
+
+    #[test]
+    fn native_expand_param_ops_lower() {
+        // `${var:-def}` (1 arg + name = 2 pops) and `${#var}` (LENGTH: 0 args +
+        // name = 1 pop). No host ⇒ "" deterministically; pop counts must match
+        // the interpreter exactly or the boxed stack desyncs.
+        let mut b = ChunkBuilder::new();
+        let name = b.add_constant(Value::str("v"));
+        let def = b.add_constant(Value::str("d"));
+        b.emit(Op::LoadConst(name), 1);
+        b.emit(Op::LoadConst(def), 1);
+        b.emit(Op::ExpandParam(crate::op::param_mod::DEFAULT), 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "ExpandParam(DEFAULT) lowers");
+        assert_native_matches_interp(chunk);
+
+        let mut b = ChunkBuilder::new();
+        let name = b.add_constant(Value::str("v"));
+        b.emit(Op::LoadConst(name), 1);
+        b.emit(Op::ExpandParam(crate::op::param_mod::LENGTH), 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "ExpandParam(LENGTH) lowers");
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_shell_predicate_ops_lower() {
+        // Glob/regex match (no host ⇒ deterministic) and file tests lower as
+        // boxed-heap Bool predicates; result consumed by MakeArray for a valid
+        // end. Verified against the interpreter.
+        let mut b = ChunkBuilder::new();
+        let s = b.add_constant(Value::str("abc"));
+        let p = b.add_constant(Value::str("abc"));
+        b.emit(Op::LoadConst(s), 1);
+        b.emit(Op::LoadConst(p), 1);
+        b.emit(Op::StrMatch, 1); // no host ⇒ s == pat ⇒ true
+        b.emit(Op::MakeArray(1), 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "StrMatch lowers");
+        assert_native_matches_interp(chunk);
+
+        // TestFile: "/" is a directory ⇒ true.
+        let mut b = ChunkBuilder::new();
+        let root = b.add_constant(Value::str("/"));
+        b.emit(Op::LoadConst(root), 1);
+        b.emit(Op::TestFile(crate::op::file_test::IS_DIR), 1);
+        b.emit(Op::MakeArray(1), 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "TestFile lowers");
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_expansion_source_ops_lower() {
+        // Host-dispatched string-expansion ops lower as boxed sources; with no
+        // host installed both interp and native take the same fallback, so the
+        // result matches. (Exercises the (1 → Obj) general-arm path.)
+        for op in [Op::BraceExpand, Op::WordSplit, Op::TildeExpand] {
+            let mut b = ChunkBuilder::new();
+            let s = b.add_constant(Value::str("a b c"));
+            b.emit(Op::LoadConst(s), 1);
+            b.emit(op, 1);
+            let chunk = b.build();
+            assert!(native_lowerable(&chunk), "expansion op lowers");
+            assert_native_matches_interp(chunk);
+        }
+    }
+
+    #[test]
+    fn native_string_compares_lower() {
+        // StrCmp → Int (-1/0/1), a valid program result.
+        let mut b = ChunkBuilder::new();
+        let a = b.add_constant(Value::str("abc"));
+        let c = b.add_constant(Value::str("abd"));
+        b.emit(Op::LoadConst(a), 1);
+        b.emit(Op::LoadConst(c), 1);
+        b.emit(Op::StrCmp, 1); // -1
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "StrCmp lowers");
+        assert_native_matches_interp(chunk);
+
+        // StrEq / StrLt → Bool, consumed by MakeArray so it's a valid end.
+        for (op, l, r) in [
+            (Op::StrEq, "x", "x"),
+            (Op::StrEq, "x", "y"),
+            (Op::StrLt, "a", "b"),
+            (Op::StrGe, "b", "a"),
+        ] {
+            let mut b = ChunkBuilder::new();
+            let lc = b.add_constant(Value::str(l));
+            let rc = b.add_constant(Value::str(r));
+            b.emit(Op::LoadConst(lc), 1);
+            b.emit(Op::LoadConst(rc), 1);
+            b.emit(op, 1);
+            b.emit(Op::MakeArray(1), 1); // [bool]
+            let chunk = b.build();
+            assert!(native_lowerable(&chunk), "string compare lowers");
+            assert_native_matches_interp(chunk);
+        }
+    }
+
+    #[test]
+    fn native_whole_array_and_hash_view_ops_lower() {
+        // SetArray/GetArray whole-array round-trip: a = [1,2]; @a → [1,2].
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::MakeArray(2), 1);
+        b.emit(Op::SetArray(0), 1); // a = [1,2]
+        b.emit(Op::GetArray(0), 1); // → [1,2]
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "GetArray/SetArray lower");
+        assert_native_matches_interp(chunk);
+
+        // HashDelete returns the removed value: h{"x"}=5; delete h{"x"} → 5.
+        let mut b = ChunkBuilder::new();
+        let x = b.add_constant(Value::str("x"));
+        b.emit(Op::DeclareHash(0), 1);
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::LoadConst(x), 1);
+        b.emit(Op::HashSet(0), 1);
+        b.emit(Op::LoadConst(x), 1);
+        b.emit(Op::HashDelete(0), 1); // → 5
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "HashDelete lowers");
+        assert_native_matches_interp(chunk);
+
+        // HashExists (Bool result) consumed by MakeArray: [exists h{"x"}].
+        let mut b = ChunkBuilder::new();
+        let x = b.add_constant(Value::str("x"));
+        b.emit(Op::DeclareHash(0), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadConst(x), 1);
+        b.emit(Op::HashSet(0), 1);
+        b.emit(Op::LoadConst(x), 1);
+        b.emit(Op::HashExists(0), 1); // Bool(true)
+        b.emit(Op::MakeArray(1), 1); // [true]
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "HashExists (bool result) lowers");
+        assert_native_matches_interp(chunk);
     }
 
     #[test]
