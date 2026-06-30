@@ -205,6 +205,88 @@ pub extern "C" fn fusevm_aot_set_float_result(vm: *mut VM, f: f64) {
     unsafe { (*vm).aot_set_float_result(f) }
 }
 
+/// Box the boxed-stack top into the value arena, returning its handle
+/// (`VM::aot_box`). Used to thread a heap value through a register.
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_box(vm: *mut VM) -> i64 {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_box() }
+}
+
+/// Push the arena value for `handle` back onto the boxed stack
+/// (`VM::aot_unbox`), so a shimmed op can consume it.
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_unbox(vm: *mut VM, handle: i64) {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_unbox(handle) }
+}
+
+/// Store a boxed (heap) result from a register handle
+/// (`VM::aot_set_obj_result`).
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_set_obj_result(vm: *mut VM, handle: i64) {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_set_obj_result(handle) }
+}
+
+/// Clone the value behind `handle` into a fresh owned handle, returned
+/// (`VM::aot_clone`). Used when reading an `Obj` slot.
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_clone(vm: *mut VM, handle: i64) -> i64 {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_clone(handle) }
+}
+
+/// Free an owned handle (`VM::aot_free`); negative is the empty-slot sentinel.
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_free(vm: *mut VM, handle: i64) {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_free(handle) }
+}
+
+/// Deopt writeback of an `Obj` slot from a register handle
+/// (`VM::aot_store_slot_obj`).
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_store_slot_obj(vm: *mut VM, idx: u32, handle: i64) {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_store_slot_obj(idx, handle) }
+}
+
+/// Global analog of [`fusevm_aot_store_slot_obj`] (`VM::aot_store_global_obj`).
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_store_global_obj(vm: *mut VM, idx: u32, handle: i64) {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_store_global_obj(idx, handle) }
+}
+
 /// Store an error result (by code) from natively-lowered AOT code that hit a
 /// runtime fault (e.g. awk division by zero). The native side branches to a
 /// block that calls this and returns early, leaving `aot_result` an `Error`.
@@ -464,6 +546,12 @@ enum Kind {
     Bool,
     Float,
     Status,
+    /// A boxed heap value (string/array/hash/…) that can't fit a scalar
+    /// register. Carried as an `i64` *handle* into the VM's value arena (so it
+    /// rides the `ivars`, like an integer); produced by heap sources and
+    /// consumed by heap ops run through the `exec_op` shim. Not numeric and not
+    /// int-like — feeding it to arithmetic/bitwise deopts.
+    Obj,
 }
 
 impl Kind {
@@ -507,16 +595,75 @@ fn var_ty_kind(plan: &NativePlan, key: u32) -> Kind {
     plan.var_kinds.get(&key).copied().unwrap_or(Kind::Int)
 }
 
+/// Stack effect of a "boxed heap op" that the native path runs through the
+/// `exec_op` shim: `(operands_popped, pushed_result_kind)`. The operands are
+/// staged onto the boxed stack (scalars spilled by kind, `Obj` handles unboxed),
+/// the op runs, then its result is reloaded — boxed into the arena for an `Obj`
+/// result, or popped into a register for a scalar one (`None` ⇒ pushes nothing).
+/// Pop counts MUST exactly match the interpreter's op (else the boxed stack
+/// desyncs). `Concat` has its own arm; everything here is fixed- or
+/// operand-encoded-arity with no register-resident operands of its own.
+fn heap_op_effect(op: &Op) -> Option<(usize, Option<Kind>)> {
+    Some(match op {
+        Op::StringRepeat => (2, Some(Kind::Obj)),
+        Op::StringLen => (1, Some(Kind::Int)),
+        Op::MakeArray(n) => (*n as usize, Some(Kind::Obj)),
+        Op::MakeHash(n) => (*n as usize, Some(Kind::Obj)),
+        Op::Range => (2, Some(Kind::Obj)),
+        Op::RangeStep => (3, Some(Kind::Obj)),
+        // Named array/hash element ops operate on VM-scope heap state
+        // (`self.globals[name]`) entirely inside the shim; the native code only
+        // stages the stack operands and boxes the result. SOUND ONLY when the
+        // name is not also a register-cached global — `analyze_native` bails on
+        // that overlap (see `heap_op_name`).
+        Op::ArrayGet(_) => (1, Some(Kind::Obj)),
+        Op::ArraySet(_) => (2, None),
+        Op::ArrayPush(_) => (1, None),
+        Op::ArrayLen(_) => (0, Some(Kind::Int)),
+        Op::ArrayPop(_) => (0, Some(Kind::Obj)),
+        Op::ArrayShift(_) => (0, Some(Kind::Obj)),
+        Op::HashGet(_) => (1, Some(Kind::Obj)),
+        Op::HashSet(_) => (2, None),
+        Op::DeclareArray(_) => (0, None),
+        Op::DeclareHash(_) => (0, None),
+        _ => return None,
+    })
+}
+
+/// Name-pool index of a heap op that reads/writes `self.globals[name]` in the
+/// shim. Such a name must NOT also be a register-cached global (the native path
+/// would hold a stale register for it), so `analyze_native` bails on overlap.
+fn heap_op_name(op: &Op) -> Option<u16> {
+    match op {
+        Op::ArrayGet(n)
+        | Op::ArraySet(n)
+        | Op::ArrayPush(n)
+        | Op::ArrayLen(n)
+        | Op::ArrayPop(n)
+        | Op::ArrayShift(n)
+        | Op::HashGet(n)
+        | Op::HashSet(n)
+        | Op::DeclareArray(n)
+        | Op::DeclareHash(n) => Some(*n),
+        _ => None,
+    }
+}
+
 /// Imported-shim handles used to emit a deopt exit.
 struct DeoptRefs {
     store_slot_int: FuncRef,
     store_slot_float: FuncRef,
+    store_slot_obj: FuncRef,
     store_global_int: FuncRef,
     store_global_float: FuncRef,
+    store_global_obj: FuncRef,
     push_int: FuncRef,
     push_float: FuncRef,
     push_bool: FuncRef,
     push_status: FuncRef,
+    /// Unbox a register handle back onto the boxed stack (for `Kind::Obj`
+    /// operand positions when spilling at a deopt).
+    unbox: FuncRef,
     resume: FuncRef,
 }
 
@@ -549,10 +696,16 @@ fn emit_deopt(
         let v = b.use_var(sv);
         let vm = b.use_var(vm_var);
         let idx = b.ins().iconst(types::I32, i as i64);
-        if var_ty_kind(plan, i as u32) == Kind::Float {
-            b.ins().call(refs.store_slot_float, &[vm, idx, v]);
-        } else {
-            b.ins().call(refs.store_slot_int, &[vm, idx, v]);
+        match var_ty_kind(plan, i as u32) {
+            Kind::Float => {
+                b.ins().call(refs.store_slot_float, &[vm, idx, v]);
+            }
+            Kind::Obj => {
+                b.ins().call(refs.store_slot_obj, &[vm, idx, v]);
+            }
+            _ => {
+                b.ins().call(refs.store_slot_int, &[vm, idx, v]);
+            }
         }
     }
     for (i, &gv) in global_vars.iter().enumerate() {
@@ -562,10 +715,16 @@ fn emit_deopt(
         let v = b.use_var(gv);
         let vm = b.use_var(vm_var);
         let idx = b.ins().iconst(types::I32, i as i64);
-        if var_ty_kind(plan, i as u32 | GLOBAL_TAG) == Kind::Float {
-            b.ins().call(refs.store_global_float, &[vm, idx, v]);
-        } else {
-            b.ins().call(refs.store_global_int, &[vm, idx, v]);
+        match var_ty_kind(plan, i as u32 | GLOBAL_TAG) {
+            Kind::Float => {
+                b.ins().call(refs.store_global_float, &[vm, idx, v]);
+            }
+            Kind::Obj => {
+                b.ins().call(refs.store_global_obj, &[vm, idx, v]);
+            }
+            _ => {
+                b.ins().call(refs.store_global_int, &[vm, idx, v]);
+            }
         }
     }
     // Operand stack: spill bottom-most first (interpreter order).
@@ -587,6 +746,12 @@ fn emit_deopt(
             Kind::Int => {
                 let v = b.use_var(ivars[pos]);
                 b.ins().call(refs.push_int, &[vm, v]);
+            }
+            // Obj: the register holds an arena handle; unbox it back onto the
+            // boxed stack so the resumed interpreter sees the real value.
+            Kind::Obj => {
+                let v = b.use_var(ivars[pos]);
+                b.ins().call(refs.unbox, &[vm, v]);
             }
         }
     }
@@ -876,10 +1041,25 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                         max_depth = max_depth.max(st.len());
                         succs.push((ip + 1, st, inits));
                     }
+                    // A heap constant (string/array/…) loads as a boxed handle:
+                    // the shim pushes the real value, the native code boxes it
+                    // into the arena and threads the handle (`Kind::Obj`).
                     _ => {
-                        deopt_points.insert(ip);
+                        st.push(Kind::Obj);
+                        max_depth = max_depth.max(st.len());
+                        succs.push((ip + 1, st, inits));
                     }
                 }
+            }
+            // String concat: pops two values (scalar or boxed), pushes a boxed
+            // string. Runs through the shim — scalar operands are spilled by
+            // kind, boxed operands are unboxed — then the result is re-boxed.
+            Op::Concat => {
+                let _b = st.pop()?;
+                let _a = st.pop()?;
+                st.push(Kind::Obj);
+                max_depth = max_depth.max(st.len());
+                succs.push((ip + 1, st, inits));
             }
             // Arithmetic promotes: result is Float if either operand is Float,
             // else Int — mirroring the interpreter's `arith_int_fast`.
@@ -1243,7 +1423,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             // storable as a typed register); its kind becomes the slot's kind.
             Op::SetSlot(s) => {
                 let k = st.pop()?;
-                deopt_unless!(k == Kind::Int || k == Kind::Float);
+                deopt_unless!(k == Kind::Int || k == Kind::Float || k == Kind::Obj);
                 let key = u32::from(*s);
                 if !set_var_kind(&mut var_kind, key, k) {
                     return None; // mixed-kind slot
@@ -1252,11 +1432,11 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 ni.insert(key); // this slot is now definitely assigned
                 succs.push((ip + 1, st, ni));
             }
-            // Globals mirror slots: `SetVar`/`DeclareVar` store Int or Float and
-            // set the global's kind; `GetVar` (above) reads it.
+            // Globals mirror slots: `SetVar`/`DeclareVar` store Int, Float, or a
+            // boxed `Obj` and set the global's kind; `GetVar` (above) reads it.
             Op::SetVar(g) | Op::DeclareVar(g) => {
                 let k = st.pop()?;
-                deopt_unless!(k == Kind::Int || k == Kind::Float);
+                deopt_unless!(k == Kind::Int || k == Kind::Float || k == Kind::Obj);
                 let key = u32::from(*g) | GLOBAL_TAG;
                 if !set_var_kind(&mut var_kind, key, k) {
                     return None;
@@ -1271,6 +1451,9 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             }
             Op::Dup => {
                 let k = *st.last()?;
+                // Duplicating a boxed handle would alias one arena slot to two
+                // owners (double-free on consume); deopt instead.
+                deopt_unless!(k != Kind::Obj);
                 st.push(k);
                 max_depth = max_depth.max(st.len());
                 succs.push((ip + 1, st, inits));
@@ -1298,6 +1481,20 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                     leaders.insert(ip + 1);
                 }
                 succs.push((t, st.clone(), inits.clone()));
+                succs.push((ip + 1, st, inits));
+            }
+            // Boxed heap ops (string repeat/len, array/hash construction,
+            // ranges): pop their operands, push the result kind (Obj or scalar).
+            // Run through the shim with box/unbox staging in codegen.
+            op if heap_op_effect(op).is_some() => {
+                let (pops, res) = heap_op_effect(op).unwrap();
+                for _ in 0..pops {
+                    st.pop()?;
+                }
+                if let Some(k) = res {
+                    st.push(k);
+                    max_depth = max_depth.max(st.len());
+                }
                 succs.push((ip + 1, st, inits));
             }
             // A non-lowerable op: deopt here rather than bail the whole chunk.
@@ -1351,12 +1548,26 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
         }
     }
 
+    // Named array/hash ops read/write `self.globals[name]` inside the shim. If
+    // that same name is also a register-cached global (`GetVar`/`SetVar`), the
+    // register holds the live value and the shim would see a stale
+    // `self.globals[name]` — so bail to the threaded path on any such overlap.
+    for &ip in state.keys() {
+        if let Some(name) = heap_op_name(&ops[ip]) {
+            if var_kind.contains_key(&(u32::from(name) | GLOBAL_TAG)) {
+                return None;
+            }
+        }
+    }
+
     // The result is the stack top when control falls off the end; it must be
     // numeric (a `Bool` there would box to the wrong `Value` variant).
     let end_kinds = match end_state {
         Some(es) => {
             if let Some(top) = es.last() {
-                if !top.is_numeric() {
+                // A numeric or boxed (`Obj`) top can be boxed as the result; a
+                // bare `Bool` cannot (it would box to the wrong Value variant).
+                if !top.is_numeric() && *top != Kind::Obj {
                     return None;
                 }
             }
@@ -1527,6 +1738,21 @@ fn build_entry_native<M: Module>(
         .declare_function("fusevm_aot_pop_float", Linkage::Import, &popf_sig)
         .map_err(|e| format!("aot: declare pop_float: {e}"))?;
 
+    // Boxed-value (heap) shims: box (vm) -> i64 handle, unbox/set_obj_result
+    // (vm, i64). `unbox`/`set_obj_result` share `pushi_sig` ((vm, i64)).
+    let mut box_sig = module.make_signature();
+    box_sig.params.push(AbiParam::new(ptr_ty));
+    box_sig.returns.push(AbiParam::new(types::I64));
+    let box_id = module
+        .declare_function("fusevm_aot_box", Linkage::Import, &box_sig)
+        .map_err(|e| format!("aot: declare box: {e}"))?;
+    let unbox_id = module
+        .declare_function("fusevm_aot_unbox", Linkage::Import, &pushi_sig)
+        .map_err(|e| format!("aot: declare unbox: {e}"))?;
+    let obj_res_id = module
+        .declare_function("fusevm_aot_set_obj_result", Linkage::Import, &pushi_sig)
+        .map_err(|e| format!("aot: declare set_obj_result: {e}"))?;
+
     // Deopt writeback shims: store_slot/global (vm, i32, i64|f64) and
     // resume (vm, i32).
     let mut ssi_sig = module.make_signature();
@@ -1550,6 +1776,25 @@ fn build_entry_native<M: Module>(
     let sgf_id = module
         .declare_function("fusevm_aot_store_global_float", Linkage::Import, &ssf_sig)
         .map_err(|e| format!("aot: declare store_global_float: {e}"))?;
+    // Obj (boxed) slot/global writeback share the (vm, i32, i64) shape.
+    let ssobj_id = module
+        .declare_function("fusevm_aot_store_slot_obj", Linkage::Import, &ssi_sig)
+        .map_err(|e| format!("aot: declare store_slot_obj: {e}"))?;
+    let sgobj_id = module
+        .declare_function("fusevm_aot_store_global_obj", Linkage::Import, &ssi_sig)
+        .map_err(|e| format!("aot: declare store_global_obj: {e}"))?;
+
+    // Heap-handle ownership shims: clone (vm, i64) -> i64, free (vm, i64).
+    let mut clone_sig = module.make_signature();
+    clone_sig.params.push(AbiParam::new(ptr_ty));
+    clone_sig.params.push(AbiParam::new(types::I64));
+    clone_sig.returns.push(AbiParam::new(types::I64));
+    let clone_id = module
+        .declare_function("fusevm_aot_clone", Linkage::Import, &clone_sig)
+        .map_err(|e| format!("aot: declare clone: {e}"))?;
+    let free_id = module
+        .declare_function("fusevm_aot_free", Linkage::Import, &pushi_sig)
+        .map_err(|e| format!("aot: declare free: {e}"))?;
 
     let mut resume_sig = module.make_signature();
     resume_sig.params.push(AbiParam::new(ptr_ty));
@@ -1602,15 +1847,23 @@ fn build_entry_native<M: Module>(
         let popi_ref = module.declare_func_in_func(popi_id, b.func);
         let sres_ref = module.declare_func_in_func(sres_id, b.func);
         let push_status_ref = module.declare_func_in_func(push_status_id, b.func);
+        let box_ref = module.declare_func_in_func(box_id, b.func);
+        let unbox_ref = module.declare_func_in_func(unbox_id, b.func);
+        let obj_res_ref = module.declare_func_in_func(obj_res_id, b.func);
+        let clone_ref = module.declare_func_in_func(clone_id, b.func);
+        let free_ref = module.declare_func_in_func(free_id, b.func);
         let deopt_refs = DeoptRefs {
             store_slot_int: module.declare_func_in_func(ssi_id, b.func),
             store_slot_float: module.declare_func_in_func(ssf_id, b.func),
+            store_slot_obj: module.declare_func_in_func(ssobj_id, b.func),
             store_global_int: module.declare_func_in_func(sgi_id, b.func),
             store_global_float: module.declare_func_in_func(sgf_id, b.func),
+            store_global_obj: module.declare_func_in_func(sgobj_id, b.func),
             push_int: pushi_ref,
             push_float: pushf_ref,
             push_bool: pushb_ref,
             push_status: push_status_ref,
+            unbox: unbox_ref,
             resume: module.declare_func_in_func(resume_id, b.func),
         };
 
@@ -1670,17 +1923,25 @@ fn build_entry_native<M: Module>(
         if !slot_vars.is_empty() || !global_vars.is_empty() {
             let zi = b.ins().iconst(types::I64, 0);
             let zf = b.ins().f64const(Ieee64::with_bits(0f64.to_bits()));
+            // `Obj` slots start at the -1 "empty handle" sentinel so the first
+            // `SetSlot` frees nothing; scalar slots zero-init (never read before
+            // assignment, per definite-assignment).
+            let neg1 = b.ins().iconst(types::I64, -1);
             for (i, &sv) in slot_vars.iter().enumerate() {
-                let z = if var_ty(i as u32) == types::F64 { zf } else { zi };
-                b.def_var(sv, z);
+                let init = match var_ty_kind(plan, i as u32) {
+                    Kind::Obj => neg1,
+                    Kind::Float => zf,
+                    _ => zi,
+                };
+                b.def_var(sv, init);
             }
             for (i, &gv) in global_vars.iter().enumerate() {
-                let z = if var_ty(i as u32 | GLOBAL_TAG) == types::F64 {
-                    zf
-                } else {
-                    zi
+                let init = match var_ty_kind(plan, i as u32 | GLOBAL_TAG) {
+                    Kind::Obj => neg1,
+                    Kind::Float => zf,
+                    _ => zi,
                 };
-                b.def_var(gv, z);
+                b.def_var(gv, init);
             }
         }
         if n == 0 {
@@ -1756,7 +2017,116 @@ fn build_entry_native<M: Module>(
                             b.def_var(fvars[idx], v);
                             kinds.push(Kind::Float);
                         }
-                        _ => unreachable!("analyze_native admitted only numeric constants"),
+                        // Heap constant: run the shim (pushes the real Value onto
+                        // the boxed stack), then box it into the arena and thread
+                        // the handle through a register as `Kind::Obj`.
+                        _ => {
+                            let vm = b.use_var(vm_var);
+                            let ipc = b.ins().iconst(types::I64, ip as i64);
+                            b.ins().call(exec_ref, &[vm, ipc]);
+                            let vm2 = b.use_var(vm_var);
+                            let call = b.ins().call(box_ref, &[vm2]);
+                            let h = b.inst_results(call)[0];
+                            b.def_var(ivars[idx], h);
+                            kinds.push(Kind::Obj);
+                        }
+                    }
+                }
+                // Concat: spill both operands onto the boxed stack (scalars by
+                // kind, `Obj` handles unboxed), run the shim (pops 2, pushes the
+                // joined string), then box the result handle. Net: pop 2, push 1
+                // `Obj`. vm.stack is empty before and after.
+                Op::Concat => {
+                    let ky = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let kx = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    // Bottom-most first (interpreter order): x then y.
+                    for (pos, k) in [(ix, kx), (iy, ky)] {
+                        let vm = b.use_var(vm_var);
+                        match k {
+                            Kind::Float => {
+                                let v = b.use_var(fvars[pos]);
+                                b.ins().call(pushf_ref, &[vm, v]);
+                            }
+                            Kind::Bool => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(pushb_ref, &[vm, v]);
+                            }
+                            Kind::Status => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(push_status_ref, &[vm, v]);
+                            }
+                            Kind::Int => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(pushi_ref, &[vm, v]);
+                            }
+                            Kind::Obj => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(unbox_ref, &[vm, v]);
+                            }
+                        }
+                    }
+                    let vm = b.use_var(vm_var);
+                    let ipc = b.ins().iconst(types::I64, ip as i64);
+                    b.ins().call(exec_ref, &[vm, ipc]);
+                    let vm2 = b.use_var(vm_var);
+                    let call = b.ins().call(box_ref, &[vm2]);
+                    let h = b.inst_results(call)[0];
+                    b.def_var(ivars[ix], h);
+                    kinds.push(Kind::Obj);
+                }
+                // Boxed heap ops (string repeat/len, array/hash construction,
+                // ranges): stage the top `pops` operands onto the boxed stack
+                // (scalars by kind, Obj handles unboxed; bottom-most first), run
+                // the shim, then reload the result (box an Obj, pop a scalar).
+                op if heap_op_effect(op).is_some() => {
+                    let (pops, res) = heap_op_effect(op).unwrap();
+                    let base = kinds.len() - pops;
+                    for pos in base..kinds.len() {
+                        let vm = b.use_var(vm_var);
+                        match kinds[pos] {
+                            Kind::Float => {
+                                let v = b.use_var(fvars[pos]);
+                                b.ins().call(pushf_ref, &[vm, v]);
+                            }
+                            Kind::Bool => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(pushb_ref, &[vm, v]);
+                            }
+                            Kind::Status => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(push_status_ref, &[vm, v]);
+                            }
+                            Kind::Int => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(pushi_ref, &[vm, v]);
+                            }
+                            Kind::Obj => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(unbox_ref, &[vm, v]);
+                            }
+                        }
+                    }
+                    let vm = b.use_var(vm_var);
+                    let ipc = b.ins().iconst(types::I64, ip as i64);
+                    b.ins().call(exec_ref, &[vm, ipc]);
+                    kinds.truncate(base);
+                    match res {
+                        Some(Kind::Obj) => {
+                            let vm2 = b.use_var(vm_var);
+                            let call = b.ins().call(box_ref, &[vm2]);
+                            b.def_var(ivars[base], b.inst_results(call)[0]);
+                            kinds.push(Kind::Obj);
+                        }
+                        Some(_) => {
+                            // Scalar result (e.g. StringLen → Int): pop it back.
+                            let vm2 = b.use_var(vm_var);
+                            let call = b.ins().call(popi_ref, &[vm2]);
+                            b.def_var(ivars[base], b.inst_results(call)[0]);
+                            kinds.push(Kind::Int);
+                        }
+                        None => {}
                     }
                 }
                 // `a` is the lower slot, `b`(=y) the top; matches the
@@ -2245,6 +2615,10 @@ fn build_entry_native<M: Module>(
                                 let v = b.use_var(ivars[pos]);
                                 b.ins().call(pushi_ref, &[vm, v]);
                             }
+                            Kind::Obj => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(unbox_ref, &[vm, v]);
+                            }
                         }
                     }
                     let vm = b.use_var(vm_var);
@@ -2339,28 +2713,56 @@ fn build_entry_native<M: Module>(
                     let k = var_ty_kind(plan, *slot as u32);
                     let v = b.use_var(slot_vars[*slot as usize]);
                     let idx = kinds.len();
-                    store_raw(&mut b, &ivars, &fvars, idx, k, v);
+                    if k == Kind::Obj {
+                        // Reading clones the value into a fresh owned handle; the
+                        // slot keeps its own handle.
+                        let vm = b.use_var(vm_var);
+                        let call = b.ins().call(clone_ref, &[vm, v]);
+                        b.def_var(ivars[idx], b.inst_results(call)[0]);
+                    } else {
+                        store_raw(&mut b, &ivars, &fvars, idx, k, v);
+                    }
                     kinds.push(k);
                 }
                 Op::SetSlot(slot) => {
                     let k = kinds.pop().unwrap(); // == the slot's kind
                     let idx = kinds.len();
                     let v = load_raw(&mut b, &ivars, &fvars, idx, k);
-                    b.def_var(slot_vars[*slot as usize], v);
+                    let sv = slot_vars[*slot as usize];
+                    if k == Kind::Obj {
+                        // Free the slot's previous handle (init sentinel -1 ⇒
+                        // no-op) before it is overwritten.
+                        let old = b.use_var(sv);
+                        let vm = b.use_var(vm_var);
+                        b.ins().call(free_ref, &[vm, old]);
+                    }
+                    b.def_var(sv, v);
                 }
-                // Globals mirror slots (Int or Float register variables).
+                // Globals mirror slots (Int/Float/Obj register variables).
                 Op::GetVar(g) => {
                     let k = var_ty_kind(plan, *g as u32 | GLOBAL_TAG);
                     let v = b.use_var(global_vars[*g as usize]);
                     let idx = kinds.len();
-                    store_raw(&mut b, &ivars, &fvars, idx, k, v);
+                    if k == Kind::Obj {
+                        let vm = b.use_var(vm_var);
+                        let call = b.ins().call(clone_ref, &[vm, v]);
+                        b.def_var(ivars[idx], b.inst_results(call)[0]);
+                    } else {
+                        store_raw(&mut b, &ivars, &fvars, idx, k, v);
+                    }
                     kinds.push(k);
                 }
                 Op::SetVar(g) | Op::DeclareVar(g) => {
                     let k = kinds.pop().unwrap();
                     let idx = kinds.len();
                     let v = load_raw(&mut b, &ivars, &fvars, idx, k);
-                    b.def_var(global_vars[*g as usize], v);
+                    let gv = global_vars[*g as usize];
+                    if k == Kind::Obj {
+                        let old = b.use_var(gv);
+                        let vm = b.use_var(vm_var);
+                        b.ins().call(free_ref, &[vm, old]);
+                    }
+                    b.def_var(gv, v);
                 }
                 // Slot read-modify-write super-ops (slots are i64 registers).
                 op @ (Op::PreIncSlot(slot) | Op::PreDecSlot(slot)) => {
@@ -2448,7 +2850,13 @@ fn build_entry_native<M: Module>(
                     terminated = true;
                 }
                 Op::Pop => {
-                    kinds.pop().unwrap();
+                    let k = kinds.pop().unwrap();
+                    if k == Kind::Obj {
+                        // Discarding a boxed value frees its handle.
+                        let h = b.use_var(ivars[kinds.len()]);
+                        let vm = b.use_var(vm_var);
+                        b.ins().call(free_ref, &[vm, h]);
+                    }
                 }
                 Op::Dup => {
                     let k = *kinds.last().unwrap();
@@ -2669,6 +3077,11 @@ fn build_entry_native<M: Module>(
                 Kind::Status => {
                     let v = b.use_var(ivars[idx]);
                     b.ins().call(sres_ref, &[vm, v]);
+                }
+                // Obj: the register holds an arena handle; box it as the result.
+                Kind::Obj => {
+                    let v = b.use_var(ivars[idx]);
+                    b.ins().call(obj_res_ref, &[vm, v]);
                 }
                 // Int (Bool is rejected as a result by analysis).
                 _ => {
@@ -2932,6 +3345,22 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
     builder.symbol("fusevm_aot_resume", fusevm_aot_resume as *const u8);
     builder.symbol("fusevm_aot_pop_int", fusevm_aot_pop_int as *const u8);
     builder.symbol("fusevm_aot_push_status", fusevm_aot_push_status as *const u8);
+    builder.symbol("fusevm_aot_box", fusevm_aot_box as *const u8);
+    builder.symbol("fusevm_aot_unbox", fusevm_aot_unbox as *const u8);
+    builder.symbol("fusevm_aot_clone", fusevm_aot_clone as *const u8);
+    builder.symbol("fusevm_aot_free", fusevm_aot_free as *const u8);
+    builder.symbol(
+        "fusevm_aot_store_slot_obj",
+        fusevm_aot_store_slot_obj as *const u8,
+    );
+    builder.symbol(
+        "fusevm_aot_store_global_obj",
+        fusevm_aot_store_global_obj as *const u8,
+    );
+    builder.symbol(
+        "fusevm_aot_set_obj_result",
+        fusevm_aot_set_obj_result as *const u8,
+    );
     builder.symbol(
         "fusevm_aot_set_status_result",
         fusevm_aot_set_status_result as *const u8,
@@ -3113,11 +3542,14 @@ mod tests {
 
     #[test]
     fn native_lowerable_rejects_unsupported_and_unsafe() {
-        // An unsupported op (string concat) routes to the threaded fallback.
+        // A heap constant now lowers natively as a boxed handle (Kind::Obj),
+        // returned as the program result — verified against the interpreter.
         let mut s = ChunkBuilder::new();
         let c = s.add_constant(Value::str("x"));
         s.emit(Op::LoadConst(c), 1);
-        assert!(!native_lowerable(&s.build()), "LoadConst not lowered");
+        let schunk = s.build();
+        assert!(native_lowerable(&schunk), "heap LoadConst lowers as Obj");
+        assert_native_matches_interp(schunk);
 
         // A boolean left as the program result would box to the wrong Value
         // variant (`Bool` vs the native path's `Int`), so it is rejected.
@@ -3591,7 +4023,7 @@ mod tests {
         let mut b = ChunkBuilder::new();
         b.emit(Op::LoadInt(1), 1);
         b.emit(Op::LoadInt(2), 1);
-        b.emit(Op::Concat, 1); // deopt; slot 0 never assigned natively
+        b.emit(Op::LoadUndef, 1); // not lowered → deopt; slot 0 never assigned
         b.emit(Op::Pop, 1);
         b.emit(Op::GetSlot(0), 1); // interpreter reads an unassigned slot → Undef
         let chunk = b.build();
@@ -3720,6 +4152,238 @@ mod tests {
     }
 
     #[test]
+    fn native_boxed_concat_lowers() {
+        // Heap string constants + Concat now lower natively via boxed handles
+        // (no deopt): each LoadConst boxes into the arena, Concat unboxes/joins/
+        // re-boxes, and the Obj result is returned. Must match the interpreter.
+        let mut b = ChunkBuilder::new();
+        let a = b.add_constant(Value::str("a"));
+        let c = b.add_constant(Value::str("b"));
+        b.emit(Op::LoadConst(a), 1);
+        b.emit(Op::LoadConst(c), 1);
+        b.emit(Op::Concat, 1); // "ab"
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "boxed concat should lower natively");
+        assert_native_matches_interp(chunk);
+
+        // Mixed scalar/boxed operands: "n=" . (2 + 3) → "n=5". The arithmetic
+        // runs in registers, the Int is spilled, the string is unboxed.
+        let mut b = ChunkBuilder::new();
+        let pre = b.add_constant(Value::str("n="));
+        b.emit(Op::LoadConst(pre), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::Concat, 1);
+        assert_native_matches_interp(b.build());
+
+        // Three-way concat (boxed result fed back into Concat): "a"."b"."c".
+        let mut b = ChunkBuilder::new();
+        let k = |s| Value::str(s);
+        let (x, y, z) = (b.add_constant(k("a")), b.add_constant(k("b")), b.add_constant(k("c")));
+        b.emit(Op::LoadConst(x), 1);
+        b.emit(Op::LoadConst(y), 1);
+        b.emit(Op::Concat, 1);
+        b.emit(Op::LoadConst(z), 1);
+        b.emit(Op::Concat, 1);
+        assert_native_matches_interp(b.build());
+    }
+
+    #[test]
+    fn native_named_array_hash_ops_lower() {
+        // Array element round-trip: a[0]=42; a[0] → 42 (boxed Obj result).
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::DeclareArray(0), 1);
+        b.emit(Op::LoadInt(42), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::ArraySet(0), 1); // a[0] = 42  (stack [value, index])
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::ArrayGet(0), 1); // → 42
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "array element ops lower");
+        assert_native_matches_interp(chunk);
+
+        // Push in a loop, then length → 3 (scalar Int result).
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::DeclareArray(0), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1); // i = 0
+        b.emit(Op::GetSlot(0), 1); // leader ip 3
+        b.emit(Op::ArrayPush(0), 1); // push i
+        b.emit(Op::SlotIncLtIntJumpBack(0, 3, 3), 1); // i++; if i<3 goto 3
+        b.emit(Op::ArrayLen(0), 1); // → 3
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "array push loop + len lowers");
+        assert_native_matches_interp(chunk);
+
+        // Hash element round-trip: h{"k"}=1; h{"k"} → 1.
+        let mut b = ChunkBuilder::new();
+        let k = b.add_constant(Value::str("k"));
+        b.emit(Op::DeclareHash(0), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadConst(k), 1);
+        b.emit(Op::HashSet(0), 1); // h{"k"} = 1  (stack [value, key])
+        b.emit(Op::LoadConst(k), 1);
+        b.emit(Op::HashGet(0), 1); // → 1
+        assert_native_matches_interp(b.build());
+    }
+
+    #[test]
+    fn native_array_global_alias_bails() {
+        // Name 0 used as BOTH a register-cached global (SetVar/GetVar) and a
+        // named array (ArrayPush) → the register would shadow the shim's view of
+        // self.globals[0], so the chunk must fall back to threaded (not lower),
+        // and threaded must still match the interpreter.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::DeclareArray(0), 1);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::SetVar(0), 1); // name 0 as a global register
+        b.emit(Op::LoadInt(9), 1);
+        b.emit(Op::ArrayPush(0), 1); // name 0 as an array → overlap
+        b.emit(Op::GetVar(0), 1);
+        let chunk = b.build();
+        assert!(!native_lowerable(&chunk), "global/array name overlap must bail");
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_heap_ops_lower() {
+        // String repeat/len, array & hash construction, and ranges now lower as
+        // boxed heap ops (staged operands → shim → reloaded result), matching
+        // the interpreter.
+        let mut b = ChunkBuilder::new();
+        let ab = b.add_constant(Value::str("ab"));
+        b.emit(Op::LoadConst(ab), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::StringRepeat, 1); // "ababab"
+        assert_native_matches_interp(b.build());
+
+        let mut b = ChunkBuilder::new();
+        let hello = b.add_constant(Value::str("hello"));
+        b.emit(Op::LoadConst(hello), 1);
+        b.emit(Op::StringLen, 1); // Int 5 (scalar result)
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "StringLen lowers");
+        assert_native_matches_interp(chunk);
+
+        // MakeArray with mixed scalar/computed/boxed elements: [1, "x", 2+3].
+        let mut b = ChunkBuilder::new();
+        let x = b.add_constant(Value::str("x"));
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadConst(x), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::MakeArray(3), 1);
+        assert_native_matches_interp(b.build());
+
+        // Range and a StringLen of nothing-special; both boxed-Obj / scalar.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::Range, 1); // [1,2,3,4,5]
+        assert_native_matches_interp(b.build());
+
+        // MakeHash(2): {"k" => 1}.
+        let mut b = ChunkBuilder::new();
+        let kk = b.add_constant(Value::str("k"));
+        b.emit(Op::LoadConst(kk), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::MakeHash(2), 1);
+        assert_native_matches_interp(b.build());
+    }
+
+    #[test]
+    fn native_obj_slot_accumulator_loop_lowers() {
+        // The classic heap-in-loop case now runs fully native: an Obj-typed slot
+        // holds a string accumulator, concatenated each iteration. Ownership
+        // (clone-on-read, free-on-overwrite, take-on-consume) keeps it correct;
+        // the arena stays bounded. Result must match the interpreter ("xxx").
+        let mut b = ChunkBuilder::new();
+        let empty = b.add_constant(Value::str(""));
+        let x = b.add_constant(Value::str("x"));
+        b.emit(Op::LoadInt(0), 1); // i = 0
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::LoadConst(empty), 1); // s = "" (Obj slot)
+        b.emit(Op::SetSlot(1), 1);
+        // loop body (leader at ip 4):
+        b.emit(Op::GetSlot(1), 1); // s   (clone)
+        b.emit(Op::LoadConst(x), 1); // "x"
+        b.emit(Op::Concat, 1); // s . "x"
+        b.emit(Op::SetSlot(1), 1); // s = ...
+        b.emit(Op::SlotIncLtIntJumpBack(0, 3, 4), 1); // i++; if i<3 goto 4
+        b.emit(Op::GetSlot(1), 1); // result: s
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "Obj-slot accumulator loop lowers");
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_obj_accumulator_differential_fuzz() {
+        // Stress the handle-ownership/freelist across many iteration counts and
+        // string pieces: every accumulator loop must lower and match the interp.
+        // (A double-free / use-after-free or leak-as-wrong-value would diverge.)
+        let mut seed: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        for _ in 0..200 {
+            let iters = (next() % 12) as i32; // 0..11 iterations
+            let piece = ["x", "ab", "", "Z9"][(next() % 4) as usize];
+            let mut b = ChunkBuilder::new();
+            let empty = b.add_constant(Value::str("acc:"));
+            let p = b.add_constant(Value::str(piece));
+            b.emit(Op::LoadInt(0), 1);
+            b.emit(Op::SetSlot(0), 1);
+            b.emit(Op::LoadConst(empty), 1);
+            b.emit(Op::SetSlot(1), 1);
+            b.emit(Op::GetSlot(1), 1); // leader ip 4
+            b.emit(Op::LoadConst(p), 1);
+            b.emit(Op::Concat, 1);
+            b.emit(Op::SetSlot(1), 1);
+            b.emit(Op::SlotIncLtIntJumpBack(0, iters, 4), 1);
+            b.emit(Op::GetSlot(1), 1);
+            let chunk = b.build();
+            // iters<=0 still executes the body once (post-inc test), matching
+            // the interpreter; either way native must agree.
+            assert_native_matches_interp(chunk);
+        }
+    }
+
+    #[test]
+    fn native_obj_global_roundtrip_lowers() {
+        // An Obj global: store a string, read it back as the result.
+        let mut b = ChunkBuilder::new();
+        let s = b.add_constant(Value::str("hi"));
+        b.emit(Op::LoadConst(s), 1);
+        b.emit(Op::SetVar(0), 1);
+        b.emit(Op::GetVar(0), 1);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "Obj global round-trips");
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn native_boxed_value_then_deopt_spills() {
+        // A boxed value live across a deopt point must be unboxed back onto the
+        // stack so the resumed interpreter sees the real string, not a handle.
+        // StringRepeat isn't lowered → deopt after the boxed Concat.
+        let mut b = ChunkBuilder::new();
+        let s = b.add_constant(Value::str("ab"));
+        b.emit(Op::LoadConst(s), 1);
+        let two = b.add_constant(Value::str("x"));
+        b.emit(Op::LoadConst(two), 1);
+        b.emit(Op::Concat, 1); // boxed "abx"
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::StringRepeat, 1); // not lowered → deopt; spills the Obj
+        assert_native_matches_interp(b.build());
+    }
+
+    #[test]
     fn native_type_mismatch_deopts() {
         // A Bool (comparison result) fed into Add is a type mismatch for the
         // native path; it deopts and the interpreter float-promotes. The native
@@ -3763,12 +4427,14 @@ mod tests {
         }
         assert_native_matches_interp(chunk);
 
-        // A chunk that is ONLY a heap-const load has nothing to lower → still
-        // falls back to threaded (no deopt overhead for zero gain).
+        // A chunk that is ONLY a heap-const load now lowers as a boxed Obj
+        // source returning that value — matching the interpreter.
         let mut b = ChunkBuilder::new();
         let c = b.add_constant(Value::str("x"));
         b.emit(Op::LoadConst(c), 1);
-        assert!(!native_lowerable(&b.build()), "all-deopt chunk falls back");
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "heap LoadConst lowers as Obj");
+        assert_native_matches_interp(chunk);
     }
 
     #[test]

@@ -187,6 +187,18 @@ pub struct VM {
     /// [`VM::aot_finish`]; the caller takes it after the driver returns.
     #[cfg(feature = "aot")]
     aot_result: Option<VMResult>,
+    /// Value arena for natively-lowered heap values. The native fast path keeps
+    /// scalars in registers, but a boxed value (string/array/…) can't fit one,
+    /// so it lives here and the register holds an `i64` *handle* (an index). See
+    /// [`VM::aot_box`] / [`VM::aot_unbox`].
+    #[cfg(feature = "aot")]
+    aot_arena: Vec<Value>,
+    /// Freelist of reusable [`VM::aot_arena`] slots. Native heap handles are
+    /// owned (one live owner each): consuming a handle (`aot_unbox`, result,
+    /// pop) frees its slot here so a loop that rebuilds a value each iteration
+    /// reuses arena slots instead of growing without bound.
+    #[cfg(feature = "aot")]
+    aot_free: Vec<u32>,
 }
 
 /// Result of VM execution
@@ -254,6 +266,10 @@ impl VM {
             block_eligible_cached: None,
             #[cfg(feature = "aot")]
             aot_result: None,
+            #[cfg(feature = "aot")]
+            aot_arena: Vec::new(),
+            #[cfg(feature = "aot")]
+            aot_free: Vec::new(),
         }
     }
 
@@ -2715,6 +2731,107 @@ impl VM {
     #[cfg(feature = "aot")]
     pub(crate) fn aot_set_float_result(&mut self, f: f64) {
         self.aot_result = Some(VMResult::Ok(Value::Float(f)));
+    }
+
+    /// Allocate an arena slot holding `v`, returning its handle. Reuses a freed
+    /// slot when available so loops that rebuild values stay bounded.
+    #[cfg(feature = "aot")]
+    fn aot_alloc(&mut self, v: Value) -> i64 {
+        if let Some(h) = self.aot_free.pop() {
+            self.aot_arena[h as usize] = v;
+            h as i64
+        } else {
+            let h = self.aot_arena.len() as i64;
+            self.aot_arena.push(v);
+            h
+        }
+    }
+
+    /// Take the value out of an arena slot, freeing the slot for reuse. A handle
+    /// is owned by exactly one place, so consuming it returns its slot.
+    #[cfg(feature = "aot")]
+    fn aot_take(&mut self, handle: i64) -> Value {
+        match self.aot_arena.get_mut(handle as usize) {
+            Some(slot) => {
+                let v = std::mem::replace(slot, Value::Undef);
+                self.aot_free.push(handle as u32);
+                v
+            }
+            None => Value::Undef,
+        }
+    }
+
+    /// Box the boxed-stack top into the value arena, returning its owning handle.
+    /// A shimmed op leaves its (boxed) result on `self.stack`; the native code
+    /// stashes it here and threads the handle through a register, the way scalars
+    /// are threaded directly.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_box(&mut self) -> i64 {
+        let v = self.stack.pop().unwrap_or(Value::Undef);
+        self.aot_alloc(v)
+    }
+
+    /// Push the value for `handle` back onto the boxed stack so a shimmed op can
+    /// consume it, *consuming* the handle (its slot is freed). The inverse of
+    /// [`VM::aot_box`]; every owned handle is unboxed exactly once.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_unbox(&mut self, handle: i64) {
+        let v = self.aot_take(handle);
+        self.stack.push(v);
+    }
+
+    /// Clone the value behind `handle` into a fresh owned handle (used when a
+    /// slot is *read*: the slot keeps its handle, the stack gets its own copy).
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_clone(&mut self, handle: i64) -> i64 {
+        let v = self
+            .aot_arena
+            .get(handle as usize)
+            .cloned()
+            .unwrap_or(Value::Undef);
+        self.aot_alloc(v)
+    }
+
+    /// Free an owned handle without using its value (e.g. a slot overwritten, or
+    /// an `Obj` popped). A negative handle is the "empty slot" sentinel: no-op.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_free(&mut self, handle: i64) {
+        if handle >= 0 && (handle as usize) < self.aot_arena.len() {
+            self.aot_arena[handle as usize] = Value::Undef;
+            self.aot_free.push(handle as u32);
+        }
+    }
+
+    /// Store an explicit boxed (heap) result from a register handle (consuming
+    /// it). The arena analog of [`VM::aot_set_int_result`].
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_set_obj_result(&mut self, handle: i64) {
+        let v = self.aot_take(handle);
+        self.aot_result = Some(VMResult::Ok(v));
+    }
+
+    /// Write a register-held `Obj` slot/global back to the VM on deopt: store a
+    /// *clone* of the handle's value (the run ends in the interpreter afterward,
+    /// so the arena is abandoned — cloning avoids disturbing other live handles).
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_store_slot_obj(&mut self, idx: u32, handle: i64) {
+        let v = self
+            .aot_arena
+            .get(handle as usize)
+            .cloned()
+            .unwrap_or(Value::Undef);
+        self.set_slot(idx as u16, v);
+    }
+
+    /// Global analog of [`VM::aot_store_slot_obj`].
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_store_global_obj(&mut self, idx: u32, handle: i64) {
+        let v = self
+            .aot_arena
+            .get(handle as usize)
+            .cloned()
+            .unwrap_or(Value::Undef);
+        self.set_var(idx as u16, v);
     }
 
     /// Spill a scalar from a native register onto the boxed operand stack, so a

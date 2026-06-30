@@ -183,7 +183,7 @@
         analysis &mdash; for free. <span class="highlight">The VM doesn&rsquo;t care which language produced the bytecodes.</span></p>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
-        stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. vimlrs and elisprs each register their own. They don&rsquo;t conflict &mdash;
+        stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. elisprs registers 10. vimlrs takes the other route &mdash; ~510 builtin IDs through <code>CallBuiltin</code> rather than extended ops. They don&rsquo;t conflict &mdash;
         each frontend owns its own ID space via <code>Extended(u16, u8)</code>. Process control ops
         (pipes, redirects, globs, file tests) are first-class because multiple frontends need them.</p>
       </section>
@@ -575,6 +575,19 @@ b.emit(Op::AwkSubstr(<span class="var">3</span>), <span class="var">1</span>);  
   │    Extended(2, _)   → PrintColumns                            │
   │    ...                                                        │
   │    Extended(94, _)  → GetlineCmd                              │
+  │                                                              │
+  │  vimlrs frontend (dispatches via CallBuiltin, not Extended):  │
+  │    CallBuiltin(3000, _) → GetVar                              │
+  │    CallBuiltin(3001, _) → SetVar                              │
+  │    ...                                                        │
+  │    CallBuiltin(3520, _) → FoldTextResult   (~510 IDs)         │
+  │                                                              │
+  │  elisprs frontend:                                            │
+  │    Extended(0, _)   → Truthy                                  │
+  │    Extended(1, _)   → Call                                    │
+  │    Extended(2, _)   → GetVar                                  │
+  │    ...                                                        │
+  │    Extended(9, _)   → MakeClosure                             │
   │                                                              │
   │  No conflicts — each frontend owns its own ID space.         │
   └──────────────────────────────────────────────────────────────┘

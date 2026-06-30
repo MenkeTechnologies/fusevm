@@ -201,7 +201,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
 }));
 ```
 
-stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. vimlrs and elisprs each register their own. They don't conflict — each frontend owns its own ID space.
+stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. elisprs registers 10. vimlrs takes the other route — ~510 builtin IDs through `CallBuiltin` rather than extended ops. They don't conflict — each frontend owns its own ID space.
 
 ### Shell Host (0.10.0+)
 

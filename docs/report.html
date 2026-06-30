@@ -209,7 +209,7 @@
       <div class="feature-grid" style="margin-top:1.2rem;">
         <div class="feature-card">
           <h4>Multi-Frontend by Design</h4>
-          <p>Every other entry in the table above grew its VM as the runtime for exactly one language. fusevm inverts the relationship: the <code>Op</code> enum is the spec, frontends register language-specific ops through <code>Extended(u16, u8)</code> + <code>ExtendedWide(u16, usize)</code> against a handler table. Five frontends ship today &mdash; <a href="https://github.com/MenkeTechnologies/strykelang" style="color:var(--cyan);">strykelang</a> (~450 ext ops), <a href="https://github.com/MenkeTechnologies/zshrs" style="color:var(--cyan);">zshrs</a> (~20 ext ops), <a href="https://github.com/MenkeTechnologies/awkrs" style="color:var(--cyan);">awkrs</a> (~95 ext ops), plus <a href="https://github.com/MenkeTechnologies/vimlrs" style="color:var(--cyan);">vimlrs</a> and <a href="https://github.com/MenkeTechnologies/elisprs" style="color:var(--cyan);">elisprs</a> &mdash; and they don't conflict.</p>
+          <p>Every other entry in the table above grew its VM as the runtime for exactly one language. fusevm inverts the relationship: the <code>Op</code> enum is the spec, frontends register language-specific ops through <code>Extended(u16, u8)</code> + <code>ExtendedWide(u16, usize)</code> against a handler table. Five frontends ship today &mdash; <a href="https://github.com/MenkeTechnologies/strykelang" style="color:var(--cyan);">strykelang</a> (~450 ext ops), <a href="https://github.com/MenkeTechnologies/zshrs" style="color:var(--cyan);">zshrs</a> (~20 ext ops), <a href="https://github.com/MenkeTechnologies/awkrs" style="color:var(--cyan);">awkrs</a> (~95 ext ops), <a href="https://github.com/MenkeTechnologies/elisprs" style="color:var(--cyan);">elisprs</a> (10 ext ops), and <a href="https://github.com/MenkeTechnologies/vimlrs" style="color:var(--cyan);">vimlrs</a> (which instead routes ~510 builtin IDs through <code>CallBuiltin</code>) &mdash; and they don't conflict.</p>
         </div>
         <div class="feature-card">
           <h4>By Per-File Density</h4>
@@ -294,11 +294,11 @@
   Frontend source (.stk / .zsh / .awk / .vim / .el)
        │
        ▼
-  ┌─────────────────────────┐
-  │   Frontend compiler     │   stryke: ~450 ext ops   vimlrs:  own space
-  │   (lexer → parser →     │   zshrs:  ~20  ext ops   elisprs: own space
-  │   AST → bytecode)       │   awkrs:  ~95  ext ops
-  └────────┬────────────────┘
+  ┌─────────────────────────┐   stryke:  ~450 ext ops
+  │   Frontend compiler     │   zshrs:    ~20 ext ops
+  │   (lexer → parser →     │   awkrs:    ~95 ext ops
+  │   AST → bytecode)       │   vimlrs:  ~510 builtin IDs (CallBuiltin)
+  └────────┬────────────────┘   elisprs:   10 ext ops
            │  b.emit(Op, line)
            ▼
   ┌─────────────────────────┐
