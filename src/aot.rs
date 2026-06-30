@@ -83,12 +83,16 @@
 //!
 //! # Deopt (one-way exit to the interpreter)
 //!
-//! A chunk no longer has to be lowerable end to end. A non-lowerable op
-//! (a string/array/hash/heap op) reached on a native path becomes a **deopt
-//! point**: the analysis lowers everything around it and stops propagating past
-//! it, and codegen emits a deopt there. So a hot numeric loop alongside an
-//! occasional string op runs native, deopting only where it must — the chunk
-//! falls back to the threaded path wholesale only when nothing is lowerable.
+//! A chunk no longer has to be lowerable end to end. Anything the native path
+//! can't handle at a given op — a string/array/hash/heap op, a heap constant
+//! load, or an *operand-type* mismatch (a `Bool` fed to `Add`, a non-scalar
+//! stored to a slot) — becomes a **deopt point**: the analysis lowers everything
+//! around it and stops propagating past it, and codegen emits a deopt there. So
+//! a hot numeric loop alongside an occasional string op runs native, deopting
+//! only where it must. The chunk falls back to threaded wholesale only for the
+//! genuinely structural reasons that leave nothing to lower (stack underflow, an
+//! inconsistent kind join, a mixed-kind slot, a non-numeric final result, or a
+//! conditionally-assigned slot at a deopt point).
 //!
 //! For cases the register model can't represent, native code takes a *deopt*:
 //! `emit_deopt` writes the **definitely-assigned** register-cached slots/globals
@@ -776,6 +780,18 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
         let (mut st, inits) = state.get(&ip)?.clone();
         max_depth = max_depth.max(st.len());
 
+        // In a per-op arm: when the op can't be lowered with these operand kinds,
+        // make it a deopt point (the interpreter runs it) rather than bailing the
+        // whole chunk. `continue` skips the (now empty) successor propagation.
+        macro_rules! deopt_unless {
+            ($ok:expr) => {
+                if !($ok) {
+                    deopt_points.insert(ip);
+                    continue;
+                }
+            };
+        }
+
         // Bound the slot/global spaces we'd materialize as registers — over
         // every slot or global any op touches.
         let mut tslot = [0u16; 2];
@@ -870,9 +886,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::Add | Op::Sub | Op::Mul => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 let r = if a.promotes_float() || b.promotes_float() {
                     Kind::Float
                 } else {
@@ -887,9 +901,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::Mod => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 let r = if a.promotes_float() || b.promotes_float() {
                     Kind::Float
                 } else {
@@ -904,9 +916,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::Div => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
@@ -914,9 +924,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::Pow => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
@@ -941,26 +949,20 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             | Op::LogFloat
             | Op::Log2Float
             | Op::Log10Float => {
-                if !st.pop()?.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(st.pop()?.is_numeric());
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
             // `to_int` of the operand → Int (Float truncates toward zero,
             // saturating like `f as i64`).
             Op::TruncInt => {
-                if !st.pop()?.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(st.pop()?.is_numeric());
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }
             // Integer absolute value (wrapping); int-like operand only.
             Op::AbsInt => {
-                if !st.pop()?.is_intlike() {
-                    return None;
-                }
+                deopt_unless!(st.pop()?.is_intlike());
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }
@@ -968,9 +970,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::PowFloat | Op::Atan2Float => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
@@ -979,9 +979,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::GcdInt | Op::LcmInt => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_intlike() || !b.is_intlike() {
-                    return None;
-                }
+                deopt_unless!(a.is_intlike() && b.is_intlike());
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }
@@ -991,9 +989,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::AwkDivJit | Op::AwkModJit | Op::AwkDiv | Op::AwkMod => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
@@ -1001,26 +997,20 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::AwkLshiftJit | Op::AwkRshiftJit => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
             // awk compl — one operand, error on negative, Float result.
             Op::AwkComplJit => {
-                if !st.pop()?.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(st.pop()?.is_numeric());
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
             // awk sqrt/log — one operand, Float result. Negative input warns to
             // stderr and yields NaN (no error/halt), so no fallback is needed.
             Op::AwkSqrtJit | Op::AwkLogJit => {
-                if !st.pop()?.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(st.pop()?.is_numeric());
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
@@ -1053,9 +1043,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             }
             Op::Negate => {
                 let a = st.pop()?;
-                if !a.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric());
                 // Int → Int; Float/Status → Float (`-to_float`).
                 st.push(if a == Kind::Int { Kind::Int } else { Kind::Float });
                 succs.push((ip + 1, st, inits));
@@ -1069,9 +1057,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 st.push(Kind::Bool);
                 succs.push((ip + 1, st, inits));
             }
@@ -1082,9 +1068,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             }
             // Inc/Dec coerce to int and yield int; int-like operands only.
             Op::Inc | Op::Dec => {
-                if !st.pop()?.is_intlike() {
-                    return None;
-                }
+                deopt_unless!(st.pop()?.is_intlike());
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }
@@ -1098,16 +1082,12 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_intlike() || !b.is_intlike() {
-                    return None;
-                }
+                deopt_unless!(a.is_intlike() && b.is_intlike());
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }
             Op::BitNot => {
-                if !st.pop()?.is_intlike() {
-                    return None;
-                }
+                deopt_unless!(st.pop()?.is_intlike());
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }
@@ -1154,9 +1134,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             Op::Spaceship => {
                 let b = st.pop()?;
                 let a = st.pop()?;
-                if !a.is_numeric() || !b.is_numeric() {
-                    return None;
-                }
+                deopt_unless!(a.is_numeric() && b.is_numeric());
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }
@@ -1265,9 +1243,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             // storable as a typed register); its kind becomes the slot's kind.
             Op::SetSlot(s) => {
                 let k = st.pop()?;
-                if k != Kind::Int && k != Kind::Float {
-                    return None;
-                }
+                deopt_unless!(k == Kind::Int || k == Kind::Float);
                 let key = u32::from(*s);
                 if !set_var_kind(&mut var_kind, key, k) {
                     return None; // mixed-kind slot
@@ -1280,9 +1256,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             // set the global's kind; `GetVar` (above) reads it.
             Op::SetVar(g) | Op::DeclareVar(g) => {
                 let k = st.pop()?;
-                if k != Kind::Int && k != Kind::Float {
-                    return None;
-                }
+                deopt_unless!(k == Kind::Int || k == Kind::Float);
                 let key = u32::from(*g) | GLOBAL_TAG;
                 if !set_var_kind(&mut var_kind, key, k) {
                     return None;
@@ -3153,14 +3127,15 @@ mod tests {
         cmp.emit(Op::NumLt, 1);
         assert!(!native_lowerable(&cmp.build()), "bool result rejected");
 
-        // Storing a boolean into a slot would also diverge (interp stores Bool,
-        // the native shim stores Int).
+        // Storing a boolean into a slot can't be a typed register, but it now
+        // partial-lowers: the comparison runs native and the SetSlot deopts to
+        // the interpreter. The result must still match.
         let mut bslot = ChunkBuilder::new();
         bslot.emit(Op::LoadInt(1), 1);
         bslot.emit(Op::LoadInt(2), 1);
         bslot.emit(Op::NumLt, 1);
         bslot.emit(Op::SetSlot(0), 1);
-        assert!(!native_lowerable(&bslot.build()), "bool→slot rejected");
+        assert_native_matches_interp(bslot.build());
 
         // Underflow (Add with one operand) is rejected, not miscompiled.
         let mut bad = ChunkBuilder::new();
@@ -3742,6 +3717,31 @@ mod tests {
             // Result must match the interpreter on whichever path was chosen.
             assert_native_matches_interp(b.build());
         }
+    }
+
+    #[test]
+    fn native_type_mismatch_deopts() {
+        // A Bool (comparison result) fed into Add is a type mismatch for the
+        // native path; it deopts and the interpreter float-promotes. The native
+        // prefix still lowers, and the result matches.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::NumLt, 1); // Bool(true)
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::Add, 1); // Bool + Int → deopt → Float
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "type-mismatch chunk partial-lowers");
+        assert_native_matches_interp(chunk);
+
+        // SetSlot of a Bool deopts; the slot is then read back by the interp.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::NumEq, 1); // Bool(true)
+        b.emit(Op::SetSlot(0), 1); // deopt
+        b.emit(Op::GetSlot(0), 1);
+        assert_native_matches_interp(b.build());
     }
 
     #[test]

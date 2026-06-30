@@ -168,7 +168,7 @@
           <div><div class="stat">7,561</div><div class="stat-label">#[test] fns</div></div>
           <!-- test fns derived from: grep -rc '#\[test\]\|#\[tokio::test\]' --include='*.rs' . | awk -F: '{s+=$2}END{print s}' -->
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
-          <div><div class="stat">3</div><div class="stat-label">language frontends</div></div>
+          <div><div class="stat">5</div><div class="stat-label">language frontends</div></div>
         </div>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
@@ -183,7 +183,7 @@
         analysis &mdash; for free. <span class="highlight">The VM doesn&rsquo;t care which language produced the bytecodes.</span></p>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
-        stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. They don&rsquo;t conflict &mdash;
+        stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. vimlrs and elisprs each register their own. They don&rsquo;t conflict &mdash;
         each frontend owns its own ID space via <code>Extended(u16, u8)</code>. Process control ops
         (pipes, redirects, globs, file tests) are first-class because multiple frontends need them.</p>
       </section>
@@ -758,8 +758,8 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
         pools (&gt;16 entries, where reset's resize amortizes), many slots (frame Vec capacity is preserved
         across reuse), or multi-chunk evaluation loops with non-trivial chunk shapes. For uniform tight loops
         on tiny chunks the pool is actually <em>slower</em> (<code>reset</code> does more bookkeeping than
-        <code>VM::new</code> skips), so the API is shipped to let callers choose. All three sibling frontends
-        (strykelang, awkrs, zshrs) drive <code>fusevm::VM</code> through bridge layers backed by a frontend-owned
+        <code>VM::new</code> skips), so the API is shipped to let callers choose. All five sibling frontends
+        (strykelang, awkrs, zshrs, vimlrs, elisprs) drive <code>fusevm::VM</code> through bridge layers backed by a frontend-owned
         <code>VMPool</code>.</p>
       </section>
 
