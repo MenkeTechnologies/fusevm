@@ -128,7 +128,7 @@
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.14.5 · 224 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · 23,781 lines Rust · 7,636 #[test] fns</p>
+          <p class="docs-build-line">fusevm v0.14.5 · 224 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 23,781 lines Rust · 7,636 #[test] fns</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -231,6 +231,43 @@
         resolves forward jumps on <code>.build()</code>. The VM executes via a <code>match</code>-dispatch
         loop over the op array. The JIT compiler analyzes chunks for eligibility and compiles hot paths
         to native code via Cranelift.</p>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Execution tiers — one semantic source of truth</h3>
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        fusevm has four ways to execute a chunk, and they all agree on what every op <em>means</em>
+        because they route through — or fall back to — a single function, <code>VM::exec_op</code>
+        (<code>src/vm.rs</code>), documented in-source as <em>"the single source of truth for op semantics."</em>
+        The interpreter loop calls it per op; the JIT and AOT specialize <em>performance</em> for the hot
+        scalar subset and bail or deopt back to <code>exec_op</code> for everything else. A new op is
+        implemented once and every tier inherits it.</p>
+
+        <table class="arch-table">
+          <tr><th>Tier</th><th>Entry</th><th>How it runs an op</th></tr>
+          <tr>
+            <td><span class="highlight">Interpreter</span></td>
+            <td><code>VM::run</code></td>
+            <td>Dispatch loop calls <code>exec_op(ops, ip, …)</code> per op; the returned <code>ExecFlow</code> says continue or terminate</td>
+          </tr>
+          <tr>
+            <td><span class="highlight">Linear / Block / Tracing JIT</span></td>
+            <td><code>JitCompiler</code> (<code>src/jit.rs</code>)</td>
+            <td>Emits specialized Cranelift IR for the eligible integer/float/slot subset; anything ineligible <strong>bails or deopts back to the interpreter</strong> — back to <code>exec_op</code></td>
+          </tr>
+          <tr>
+            <td><span class="highlight">AOT</span></td>
+            <td><code>aot::compile_object</code> (<code>src/aot.rs</code>)</td>
+            <td>Native driver, one Cranelift block per op; unspecialized ops call <code>exec_op</code> through the <code>extern "C"</code> <code>fusevm_aot_exec_op</code> shim (<code>VM::aot_exec_op</code>)</td>
+          </tr>
+        </table>
+
+        <p style="font-size: 13px; color: var(--text-dim); line-height: 1.7;">
+        Because semantics never fork, the JIT/AOT specialize the scalar (int/float/bool/slot) ops that pay
+        off and lean on <code>exec_op</code> for the string/array/hash/host tail. Deopt is just "resume
+        <code>exec_op</code> at this ip": on a tracing-JIT guard miss, <code>materialize_deopt_frames</code>
+        (<code>src/vm.rs</code>) rebuilds the value stack (<code>stack_buf</code> + per-entry
+        <code>stack_kinds</code>, so floats bit-cast back through <code>f64::from_bits</code>) and the inlined
+        call frames (<code>return_ip</code> + slot values), so the interpreter picks up mid-loop with
+        byte-identical state.</p>
       </section>
 
       <!-- ════════════════════════════════════════════════════════════ -->
@@ -335,7 +372,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         <h2><span class="section-num">[0x03]</span> OP CATEGORIES</h2>
 
         <p style="font-size: 14px; color: var(--text); margin-bottom: 0.8rem;">
-        224 opcodes across 21 sections in <code>src/op.rs</code>. Every op is &le;24 bytes for cache-friendly dispatch.</p>
+        224 opcodes across 17 categories in <code>src/op.rs</code>. Every op is &le;24 bytes for cache-friendly dispatch.</p>
 
         <div class="cat-grid">
           <div class="cat-card">
@@ -745,7 +782,104 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
-        <h2><span class="section-num">[0x08]</span> VMPOOL</h2>
+        <h2><span class="section-num">[0x08]</span> AHEAD-OF-TIME COMPILATION</h2>
+
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        The <code>aot</code> feature (<code>src/aot.rs</code>) compiles a whole <code>Chunk</code> to a native
+        object file via Cranelift's <code>ObjectModule</code>, then links it against the fusevm runtime into a
+        standalone executable — with no interpreter dispatch loop at run time. It's a closed-world compiler
+        shared by every frontend, so AOT lives here once and each frontend's <code>--build</code> calls into
+        it. Enable with <code>cargo add fusevm --features aot</code> (implies <code>jit</code>).</p>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Threaded-code baseline</h3>
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        The bytecode dispatch loop (<code>VM::run</code>) is replaced by a native function with one Cranelift
+        block per op. Each op block calls the per-op runtime step (<code>VM::aot_exec_op</code>, reached
+        through the <code>extern "C"</code> <code>fusevm_aot_exec_op</code> shim), which runs that op via the
+        same <code>VM::exec_op</code> the interpreter uses, and returns the <strong>next instruction
+        index</strong> (or <code>-1</code> to terminate). The native code branches on that through a central
+        <code>dispatch</code> block.</p>
+
+        <div class="diagram">
+  entry → dispatch(0)
+  dispatch(ip): br_table ip → [block_0, …, block_{n-1}]  (default → ret)
+  block_i:      next = exec_op(vm, i);  if next &lt; 0 → ret  else → dispatch(next)
+  ret:          finish(vm); return
+        </div>
+
+        <p style="font-size: 13px; color: var(--text-dim); line-height: 1.7;">
+        Routing every op through <code>dispatch</code> (rather than static fall-through) keeps the lowering
+        uniform for data-dependent targets — <code>Op::Jump</code>, the <code>JumpIf*</code> family, and
+        intra-chunk <code>Op::Call</code>/<code>Op::Return</code>, whose target is only known at run time —
+        without the native code ever reading the <code>VM</code> struct layout. The interpreter dispatch loop
+        is gone; the <em>work</em> each op does is unchanged.</p>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Native op specialization</h3>
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Layered on top of the threaded path, <code>build_entry</code> lowers chunks that are scalar
+        computations directly to native IR (no per-op shim call). <code>analyze_native</code> runs an abstract
+        interpretation over the operand stack — tracking int-vs-bool <code>Kind</code>s, finding basic-block
+        leaders, checking join consistency — and when a region qualifies, <code>build_entry_native</code>
+        emits one Cranelift block per leader with the operand stack held in frontend <code>Variable</code>s
+        (an <code>i64</code> and an <code>f64</code> per stack position). A fully-scalar loop runs entirely in
+        registers; only the final result is boxed back into the VM. This covers:</p>
+
+        <table class="arch-table">
+          <tr><th>Group</th><th>Native-lowered ops</th></tr>
+          <tr><td>Arithmetic / comparison</td><td>Integer and float, with <code>int→float</code> promotion mirroring the interpreter, <code>Mod</code> (integer <code>srem</code> with trap-divisor guards, or an <code>fmod</code> libcall for floats), and <code>Pow</code>/<code>PowFloat</code> via a <code>powf</code> libcall</td></tr>
+          <tr><td>Math intrinsics</td><td><code>Abs</code>/<code>Sqrt</code>/<code>Ceil</code>/<code>Floor</code>/<code>Trunc</code>/<code>Round</code> as single instructions; <code>Sin</code>/<code>Cos</code>/<code>Tan</code>/<code>Exp</code>/<code>Log</code>/<code>Atan2</code> via libcalls; <code>GcdInt</code>/<code>LcmInt</code> as internal Euclid loops; awk scalar ops (<code>AwkDiv</code>/<code>AwkMod</code> + JIT twins, <code>AwkSqrtJit</code>/<code>AwkLogJit</code>)</td></tr>
+          <tr><td>Bitwise / control / stack</td><td>Bitwise/shift, <code>Inc</code>/<code>Dec</code>, booleans (<code>LoadTrue</code>/<code>LoadFalse</code>/<code>LogNot</code>/<code>LogAnd</code>/<code>LogOr</code>), three-way <code>Spaceship</code>, stack shuffles, native control flow (<code>Jump</code>/<code>JumpIf*</code>, incl. value-keeping <code>JumpIf*Keep</code>)</td></tr>
+          <tr><td>Slots &amp; globals</td><td>Integer slots and globals (<code>GetVar</code>/<code>SetVar</code>/<code>DeclareVar</code>) held in SSA registers under a definite-assignment analysis, plus the fused hot-loop slot super-ops (<code>PreIncSlot</code>/…, <code>AddAssignSlotVoid</code>, <code>SlotIncLtIntJumpBack</code>, <code>AccumSumLoop</code> — whose inner <code>while i &lt; limit</code> becomes a real native loop)</td></tr>
+        </table>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Inline / shim boundary</h3>
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Chunks that mix scalar work with heap ops don't fall back wholesale. For <strong>sink ops</strong>
+        (<code>Print</code>/<code>PrintLn</code>) the native code spills the top register scalars onto the boxed
+        <code>vm.stack</code> (per <code>Kind</code>), runs the op via the shim, and continues — so a hot
+        numeric loop with embedded output stays native. For <strong>source ops whose result kind is
+        statically known</strong> (<code>AwkGetFieldNum</code>, always <code>Float</code>) it runs the op via
+        the shim then reloads the pushed value into a register with no type guard. Slots and globals are typed
+        by a chunk-wide inferred kind, so a float accumulator (<code>sum += 0.5</code>) lowers to an
+        <code>f64</code> register.</p>
+
+        <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Partial deopt — one-way exit to the interpreter</h3>
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        Anything the native path can't handle at a given op — a string/array/hash/heap op, a heap constant
+        load, or an operand-type mismatch — becomes a <strong>deopt point</strong>: the analysis lowers
+        everything around it, stops propagating past it, and codegen emits a deopt there. <code>emit_deopt</code>
+        writes the <strong>definitely-assigned</strong> register-cached slots/globals back to the VM (a merely
+        <em>maybe</em>-assigned slot at a deopt point forces a wholesale threaded fallback, since a register
+        can't distinguish a real <code>0</code> from <code>Undef</code>), spills the live operand stack, and
+        calls <code>fusevm_aot_resume</code> to hand the rest of the run to the interpreter at the deopt ip.
+        <code>Op::Div</code> uses this for its rare divide-by-zero (native <code>fdiv</code> on the common
+        path, deopt only on a zero divisor); <code>GetStatus</code> (<code>$?</code>) is lowered as a
+        statically-typed <code>Status</code> source. A chunk falls back to threaded wholesale only for
+        genuinely structural reasons (stack underflow, inconsistent kind join, mixed-kind slot, non-numeric
+        final result).</p>
+
+        <p style="font-size: 13px; color: var(--text-dim); line-height: 1.7;">
+        <code>build_entry</code> is generic over Cranelift's <code>Module</code>, so the in-memory JIT path
+        that validates the compiler (<code>run_chunk_native</code>) and the on-disk <code>ObjectModule</code>
+        path share identical codegen.</p>
+
+        <table class="arch-table">
+          <tr><th>API</th><th>Purpose</th></tr>
+          <tr><td><code>aot::compile_object(&amp;chunk, path)</code></td><td>Emit a relocatable <code>.o</code> exporting <code>fusevm_aot_entry</code> plus the serialized chunk (<code>fusevm_aot_chunk_blob</code> / <code>…_len</code>)</td></tr>
+          <tr><td><code>aot::run_chunk_native(&amp;chunk, register)</code></td><td>Compile in-process via Cranelift and run it — validates codegen end to end</td></tr>
+          <tr><td><code>aot::fusevm_aot_run_embedded()</code></td><td>Runtime entry for a linked binary: rebuilds the VM from the embedded chunk, calls the frontend's <code>fusevm_aot_register_builtins</code>, runs the native entry, maps the result to an exit code</td></tr>
+        </table>
+
+        <p style="font-size: 13px; color: var(--text-dim); line-height: 1.7;">
+        Link the emitted object against a frontend runtime (which provides
+        <code>fusevm_aot_register_builtins</code>) to produce the standalone binary. The <code>staticlib</code>
+        crate-type in <code>Cargo.toml</code> builds <code>libfusevm.a</code> so the object can be linked
+        against the runtime.</p>
+      </section>
+
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <section class="tutorial-section">
+        <h2><span class="section-num">[0x09]</span> VMPOOL</h2>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         <code>VMPool</code> recycles <code>VM</code> instances so callers running many short-lived chunks
@@ -778,7 +912,7 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
-        <h2><span class="section-num">[0x09]</span> BENCHMARKS</h2>
+        <h2><span class="section-num">[0x0A]</span> BENCHMARKS</h2>
 
         <p style="font-size: 13px; line-height: 1.7; color: var(--text-dim);">
         criterion on Apple M-series. <code>cargo bench</code> for all; <code>cargo bench --features jit --bench
@@ -820,7 +954,7 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
-        <h2><span class="section-num">[0x0A]</span> VALUE REPRESENTATION</h2>
+        <h2><span class="section-num">[0x0B]</span> VALUE REPRESENTATION</h2>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         <code>Value</code> is a tagged enum with fast-path immediates for numbers and booleans,
@@ -845,7 +979,7 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
-        <h2><span class="section-num">[0x0B]</span> CHUNK STRUCTURE</h2>
+        <h2><span class="section-num">[0x0C]</span> CHUNK STRUCTURE</h2>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         A <code>Chunk</code> is the unit of compiled bytecodes. It contains everything the VM needs
