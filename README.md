@@ -139,9 +139,25 @@ match vm.run() {
           ┌─────────────────┐     ┌─────────────────────┐
           │   VM::run()     │     │   JitCompiler       │
           │  match-dispatch │     │  Cranelift codegen   │
-          ��  interpreter    │     │  (eligible chunks)   │
+          │   interpreter   │     │  (eligible chunks)   │
           └─────────────────┘     └─────────────────────┘
 ```
+
+### Execution tiers — one semantic source of truth
+
+fusevm has four ways to execute a chunk, and they all agree on what every op *means* because they route through — or fall back to — a single function, `VM::exec_op` (`src/vm.rs`), documented in-source as *"the single source of truth for op semantics."*
+
+| Tier | Entry | How it runs an op |
+|------|-------|-------------------|
+| **Interpreter** | `VM::run` (`src/vm.rs`) | Dispatch loop calls `exec_op(ops, ip, …)` per op; the returned `ExecFlow` says continue or terminate. |
+| **Linear / Block / Tracing JIT** | `JitCompiler` (`src/jit.rs`) | Emits specialized Cranelift IR for the eligible integer/float/slot subset; anything ineligible **bails or deopts back to the interpreter** — i.e. back to `exec_op`. |
+| **AOT** | `aot::compile_object` (`src/aot.rs`) | Native driver, one Cranelift block per op; unspecialized ops call `exec_op` through the `extern "C"` `fusevm_aot_exec_op` shim (`VM::aot_exec_op`). |
+
+Consequences that fall out of the single-source design:
+
+1. **Semantics never fork.** A new op is implemented once, in `exec_op`, and every tier inherits it — the JIT/AOT specialize *performance*, never *behavior*.
+2. **Specialize the hot subset, lean on the interpreter for the tail.** JIT and AOT only lower the scalar (int/float/bool/slot) ops that pay off; string/array/hash/host ops stay in `exec_op`.
+3. **Deopt is just "resume `exec_op` at this ip."** On a tracing-JIT guard miss, `materialize_deopt_frames` (`src/vm.rs`) rebuilds the value stack (`stack_buf` + per-entry `stack_kinds` so floats bit-cast back through `f64::from_bits`) and the inlined call frames (`return_ip` + slot values), so the interpreter picks up mid-loop with byte-identical state.
 
 ---
 
@@ -356,16 +372,82 @@ Cache files are tier-tagged (`.lin.` / `.blk.` / `.trc.`) and keyed by the chunk
 
 ## [0x08] AHEAD-OF-TIME COMPILATION
 
-The `aot` feature compiles a whole `Chunk` to a native object file via
-Cranelift's `ObjectModule`, then links it against the fusevm runtime into a
-standalone executable — with no interpreter dispatch loop at run time.
+The `aot` feature (`src/aot.rs`) compiles a whole `Chunk` to a native object
+file via Cranelift's `ObjectModule`, then links it against the fusevm runtime
+into a standalone executable — with no interpreter dispatch loop at run time.
+It's a closed-world compiler shared by every frontend, so AOT lives here once
+and each frontend's `--build` calls into it.
 
-The closed-world compiler lowers every op to native code: one basic block per
-op that calls the shared per-op runtime step (`VM::exec_op` — the same code the
-interpreter uses, so semantics never fork) and branches on the returned next
-instruction index. Control flow — jumps, the `JumpIf*` family, and intra-chunk
-calls/returns — is native; op semantics live in the linked-in runtime.
-Specializing hot ops to inline IR is layered on top of this foundation.
+### Threaded-code baseline
+
+The bytecode dispatch loop (`VM::run`) is replaced by a native function with one
+Cranelift block per op. Each op block calls the per-op runtime step
+(`VM::aot_exec_op`, reached through the `extern "C"` `fusevm_aot_exec_op` shim),
+which runs that op via the same `VM::exec_op` the interpreter uses, and returns
+the **next instruction index** (or `-1` to terminate). The native code branches
+on that through a central `dispatch` block:
+
+```text
+entry → dispatch(0)
+dispatch(ip): br_table ip → [block_0, …, block_{n-1}]  (default → ret)
+block_i:      next = exec_op(vm, i);  if next < 0 → ret  else → dispatch(next)
+ret:          finish(vm); return
+```
+
+Routing every op through `dispatch` (rather than static fall-through) keeps the
+lowering uniform for data-dependent targets — `Op::Jump`, the `JumpIf*` family,
+and intra-chunk `Op::Call`/`Op::Return`, whose target is only known at run time —
+without the native code ever reading the `VM` struct layout. The interpreter
+dispatch loop is gone; the *work* each op does is unchanged.
+
+### Native op specialization
+
+Layered on top of the threaded path, `build_entry` lowers chunks that are
+scalar computations directly to native IR (no per-op shim call). `analyze_native`
+runs an abstract interpretation over the operand stack — tracking int-vs-bool
+`Kind`s, finding basic-block leaders, checking join consistency — and when a
+region qualifies, `build_entry_native` emits one Cranelift block per leader with
+the operand stack held in frontend `Variable`s (an `i64` and an `f64` per stack
+position; the plan's `Kind`s say which is live). This covers:
+
+- **Integer and float arithmetic/comparison**, including `int→float` promotion mirroring the interpreter, `Mod` (integer `srem` with trap-divisor guards, or an `fmod` libcall for floats), and `Pow`/`PowFloat` via a `powf` libcall.
+- **Math intrinsics** — `Abs`/`Sqrt`/`Ceil`/`Floor`/`Trunc`/`Round` as single instructions; `Sin`/`Cos`/`Tan`/`Exp`/`Log`/`Atan2` via libcalls; `GcdInt`/`LcmInt` as internal Euclid loops; the awk scalar ops (`AwkDiv`/`AwkMod` and their JIT twins, `AwkSqrtJit`/`AwkLogJit` with warn-and-return-NaN on a negative argument).
+- **Bitwise/shift**, `Inc`/`Dec`, booleans (`LoadTrue`/`LoadFalse`/`LogNot`/`LogAnd`/`LogOr`), three-way `Spaceship`, stack shuffles, native control flow (`Jump`/`JumpIf*`, including value-keeping `JumpIf*Keep`).
+- **Integer slots and globals** (`GetVar`/`SetVar`/`DeclareVar`) held in SSA registers under a definite-assignment analysis, plus the fused hot-loop slot super-ops (`PreIncSlot`/…, `AddAssignSlotVoid`, `SlotIncLtIntJumpBack`, and `AccumSumLoop` — whose internal `while i < limit { sum += i; i += 1 }` becomes a real native loop).
+
+A fully-scalar loop runs entirely in registers; only the final result is boxed
+back into the VM.
+
+### Inline/shim boundary
+
+Chunks that mix scalar work with heap ops don't fall back wholesale. For **sink
+ops** (`Print`/`PrintLn`) the native code spills the top register scalars onto
+the boxed `vm.stack` (per `Kind`), runs the op via the shim, and continues — so a
+hot numeric loop with embedded output stays native. For **source ops whose result
+kind is statically known** (`AwkGetFieldNum`, always `Float`) it runs the op via
+the shim then reloads the pushed value into a register with no type guard. Slots
+and globals are typed by a chunk-wide inferred kind, so a float accumulator
+(`sum += 0.5`) lowers to an `f64` register.
+
+### Partial deopt (one-way exit to the interpreter)
+
+Anything the native path can't handle at a given op — a string/array/hash/heap
+op, a heap constant load, or an operand-type mismatch — becomes a **deopt point**:
+the analysis lowers everything around it, stops propagating past it, and codegen
+emits a deopt there. `emit_deopt` writes the **definitely-assigned**
+register-cached slots/globals back to the VM (a merely *maybe*-assigned slot at a
+deopt point forces a wholesale threaded fallback, since a register can't
+distinguish a real `0` from `Undef`), spills the live operand stack, and calls
+`fusevm_aot_resume` to hand the rest of the run to the interpreter at the deopt
+ip. `Op::Div` uses this for its rare divide-by-zero (native `fdiv` on the common
+path, deopt only on a zero divisor); `GetStatus` (`$?`) is lowered as a
+statically-typed `Status` source. A chunk falls back to threaded wholesale only
+for genuinely structural reasons (stack underflow, inconsistent kind join,
+mixed-kind slot, non-numeric final result).
+
+`build_entry` is generic over Cranelift's `Module`, so the in-memory JIT path
+that validates the compiler (`run_chunk_native`) and the on-disk `ObjectModule`
+path share identical codegen.
 
 | API | Purpose |
 |---|---|
@@ -375,7 +457,9 @@ Specializing hot ops to inline IR is layered on top of this foundation.
 
 Link the emitted object against a frontend runtime (which provides
 `fusevm_aot_register_builtins`) to produce the standalone binary. On macOS the
-link needs `-framework CoreFoundation`.
+link needs `-framework CoreFoundation`. The `staticlib` crate-type in
+`Cargo.toml` builds `libfusevm.a` so the object can be linked against the
+runtime.
 
 ---
 
@@ -494,7 +578,7 @@ for _ in 0..1000 {
 |---|---|
 | `VM::new(chunk)` per call | 130 ns |
 | `pool.acquire(chunk)` per call | 163 ns |
-γ
+
 For tiny chunks the pool is *slower* — `reset` does more bookkeeping (drop the old chunk, clear globals, zero the deopt buffer) than `VM::new` skips. The pool wins for chunks where:
 - Globals/name pool is large (>16 entries — reset's resize is amortized vs `vec![Value::Undef; n]`)
 - Many slots get used (frame.slots Vec capacity is preserved across reuse)
