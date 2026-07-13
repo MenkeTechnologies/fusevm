@@ -124,6 +124,23 @@ pub struct VM {
     pub chunk: Chunk,
     /// Last exit status ($?)
     pub last_status: i32,
+    /// Host callback for arithmetic fusevm cannot complete natively (non-numeric
+    /// operand, or integer overflow). `None` — the default — keeps the
+    /// coerce-and-wrap semantics zshrs/awkrs/stryke rely on. See [`NumericHook`].
+    numeric_hook: Option<NumericHook>,
+    /// The inclusive range the VM may keep as a native `Value::Int`. `None` (the
+    /// default) is the whole `i64`. A Lisp with tagged fixnums has a narrower one
+    /// — Emacs's is ±2^61 — and every result outside it is a bignum, so strict
+    /// mode delegates those to the [`NumericHook`] exactly as it delegates an
+    /// `i64` overflow. Only consulted in strict mode.
+    fixnum_range: Option<(i64, i64)>,
+    /// Whether every slot of the current frame held an `Int`/`Float`/`Bool` at
+    /// the last `refresh_slot_buffers`. In strict numeric mode the block JIT is
+    /// skipped when this is false: a slot holding a string or an object handle is
+    /// passed to native code as the integer `0`, which would silently coerce
+    /// exactly the operand the `NumericHook` exists to reject.
+    #[cfg(feature = "jit")]
+    slots_all_numeric: bool,
     /// Extension handler for `Op::Extended`
     ext_handler: Option<ExtensionHandler>,
     /// Extension handler for `Op::ExtendedWide`
@@ -221,6 +238,57 @@ pub(crate) enum ExecFlow {
     Ret(VMResult),
 }
 
+/// The arithmetic or comparison op that delegated to a [`NumericHook`].
+///
+/// `Neg` is unary: its handler receives the operand as `a` and `Value::Undef`
+/// as `b`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    Neg,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Eq,
+    Ne,
+}
+
+/// Host callback for arithmetic fusevm cannot complete natively.
+///
+/// fusevm's numeric ops are awk/shell-flavoured by default: a non-numeric
+/// operand is coerced (`to_float`, so `"a"` becomes `0.0`) and integer overflow
+/// wraps. That is correct for zshrs, awkrs and stryke, and wrong for a frontend
+/// whose language signals on non-numbers or promotes on overflow.
+///
+/// Installing a hook with [`VM::set_numeric_hook`] switches the VM to *strict*
+/// numeric mode, where an op that cannot be computed exactly in `i64`/`f64`
+/// hands off to the host instead of guessing:
+///
+/// - an operand that is not `Int` or `Float` (a string, a `Value::Obj` handle,
+///   a bool, `Undef`) — the host decides whether that is an error (elisp:
+///   `(wrong-type-argument number-or-marker-p "a")`) or a value it knows how to
+///   add (elisp: a marker, or a bignum living in its own object heap);
+/// - integer `Add`/`Sub`/`Mul`/`Neg` that overflows `i64` — the host returns the
+///   exact result (elisp: a bignum), rather than the wrapped one.
+///
+/// `Err` raises a VM error carrying the message. Mixed int/float and
+/// float/float arithmetic never delegates: it is exact in `f64` and stays on
+/// the fast path.
+pub type NumericHook =
+    std::sync::Arc<dyn Fn(NumOp, &Value, &Value) -> Result<Value, String> + Send + Sync>;
+
+/// Whether a value is one fusevm's numeric ops can compute on natively.
+#[inline(always)]
+fn is_native_num(v: &Value) -> bool {
+    matches!(v, Value::Int(_) | Value::Float(_))
+}
+
 impl VM {
     /// Construct a fresh VM bound to the given chunk. Allocates the
     /// per-name slot vector, seeds the call-frame stack with a root
@@ -242,6 +310,10 @@ impl VM {
             ip: 0,
             chunk,
             last_status: 0,
+            numeric_hook: None,
+            fixnum_range: None,
+            #[cfg(feature = "jit")]
+            slots_all_numeric: true,
             ext_handler: None,
             ext_wide_handler: None,
             builtin_table: Vec::new(),
@@ -270,6 +342,60 @@ impl VM {
             aot_arena: Vec::new(),
             #[cfg(feature = "aot")]
             aot_free: Vec::new(),
+        }
+    }
+
+    /// Install a [`NumericHook`], switching this VM to strict numeric mode:
+    /// arithmetic that cannot be computed exactly in `i64`/`f64` — a
+    /// non-numeric operand, or integer overflow — is handed to `hook` instead
+    /// of being coerced or wrapped.
+    ///
+    /// Strict mode also constrains the JIT, which otherwise coerces and wraps
+    /// in native code exactly like the default interpreter: the block tier is
+    /// skipped whenever a live slot holds a non-numeric value, and JIT-compiled
+    /// integer `Add`/`Sub`/`Mul` are emitted with overflow checks that bail back
+    /// to the interpreter (where the hook runs). Native code compiled in strict
+    /// mode is cached separately from the coercing kind, so the two never mix.
+    pub fn set_numeric_hook(&mut self, hook: NumericHook) {
+        self.numeric_hook = Some(hook);
+        #[cfg(feature = "jit")]
+        {
+            // Eligibility is cached per chunk hash and is policy-dependent.
+            self.block_eligible_cached = None;
+        }
+    }
+
+    /// Whether a [`NumericHook`] is installed (strict numeric mode).
+    pub fn is_strict_numeric(&self) -> bool {
+        self.numeric_hook.is_some()
+    }
+
+    /// Narrow the range the VM keeps as a native `Value::Int` (strict mode only).
+    ///
+    /// A Lisp whose integers are tagged has fewer than 64 bits for a fixnum —
+    /// Emacs gets 62, so `most-positive-fixnum` is 2^61-1 — and an arithmetic
+    /// result outside that range is a bignum, *even though it still fits an
+    /// `i64`*. Setting the range makes strict mode delegate those results to the
+    /// [`NumericHook`] alongside true `i64` overflow, so the host can widen them.
+    /// JIT-compiled code carries the same bounds check (two ALU ops folded into
+    /// the overflow accumulator — still no branch on the hot path).
+    ///
+    /// Without this, the host would see only `i64` overflow and integers in the
+    /// 2^61..2^63 band would masquerade as fixnums.
+    pub fn set_fixnum_range(&mut self, lo: i64, hi: i64) {
+        self.fixnum_range = Some((lo, hi));
+        #[cfg(feature = "jit")]
+        {
+            self.block_eligible_cached = None;
+        }
+    }
+
+    /// Whether `n` is representable as a native fixnum under the current range.
+    #[inline(always)]
+    fn in_fixnum_range(&self, n: i64) -> bool {
+        match self.fixnum_range {
+            Some((lo, hi)) => n >= lo && n <= hi,
+            None => true,
         }
     }
 
@@ -407,6 +533,7 @@ impl VM {
             None => return,
         };
         let n = frame.slots.len();
+        let mut all_num = true;
         match n {
             0 => {
                 self.slot_buf.clear();
@@ -417,7 +544,10 @@ impl VM {
                     Value::Int(v) => (*v, SlotKind::Int),
                     Value::Float(f) => (f.to_bits() as i64, SlotKind::Float),
                     Value::Bool(b) => (*b as i64, SlotKind::Int),
-                    _ => (0, SlotKind::Int),
+                    _ => {
+                        all_num = false;
+                        (0, SlotKind::Int)
+                    }
                 };
                 if self.slot_buf.is_empty() {
                     self.slot_buf.push(i);
@@ -439,13 +569,17 @@ impl VM {
                         Value::Int(n) => (*n, SlotKind::Int),
                         Value::Float(f) => (f.to_bits() as i64, SlotKind::Float),
                         Value::Bool(b) => (*b as i64, SlotKind::Int),
-                        _ => (0, SlotKind::Int),
+                        _ => {
+                            all_num = false;
+                            (0, SlotKind::Int)
+                        }
                     };
                     self.slot_buf.push(i);
                     self.slot_kinds_buf.push(kind);
                 }
             }
         }
+        self.slots_all_numeric = all_num;
     }
 
     /// Copy the i64 slot buffer back into the current frame's slots,
@@ -728,37 +862,134 @@ impl VM {
     // ── Type-specialized helpers (avoid to_float coercion on hot paths) ──
 
     /// Pop two values; if both Int, apply int_op. Otherwise promote to float.
+    ///
+    /// `ck_op` is the checked form of `int_op` and is consulted only in strict
+    /// numeric mode (a [`NumericHook`] is installed), where an integer result
+    /// that does not fit `i64` — and any operand that is not a number — goes to
+    /// the host instead of being wrapped or coerced. Returns the error message
+    /// if the hook signalled.
     #[inline(always)]
-    fn arith_int_fast(&mut self, int_op: fn(i64, i64) -> i64, float_op: fn(f64, f64) -> f64) {
+    fn arith_int_fast(
+        &mut self,
+        op: NumOp,
+        int_op: fn(i64, i64) -> i64,
+        ck_op: fn(i64, i64) -> Option<i64>,
+        float_op: fn(f64, f64) -> f64,
+    ) -> Option<String> {
         let len = self.stack.len();
-        if len >= 2 {
-            // Borrow both slots without popping (avoid branch + unwrap_or)
-            let b = &self.stack[len - 1];
-            let a = &self.stack[len - 2];
-            let result = match (a, b) {
-                (Value::Int(x), Value::Int(y)) => Value::Int(int_op(*x, *y)),
-                _ => Value::Float(float_op(a.to_float(), b.to_float())),
-            };
-            self.stack.truncate(len - 2);
-            self.stack.push(result);
+        if len < 2 {
+            return None;
         }
+        // Borrow both slots without popping (avoid branch + unwrap_or)
+        let b = &self.stack[len - 1];
+        let a = &self.stack[len - 2];
+        let result = match (a, b, &self.numeric_hook) {
+            // Fast path, both policies: two fixnums.
+            (Value::Int(x), Value::Int(y), None) => Value::Int(int_op(*x, *y)),
+            (Value::Int(x), Value::Int(y), Some(hook)) => match ck_op(*x, *y) {
+                // Exact, and inside the host's fixnum range.
+                Some(r) if self.in_fixnum_range(r) => Value::Int(r),
+                // Overflowed `i64`, or left the host's fixnum range: either way
+                // only the host can represent it (a bignum).
+                _ => match hook(op, a, b) {
+                    Ok(v) => v,
+                    Err(e) => return Some(e),
+                },
+            },
+            // Mixed int/float and float/float are exact in f64 under either
+            // policy — never delegate.
+            (a, b, _) if is_native_num(a) && is_native_num(b) => {
+                Value::Float(float_op(a.to_float(), b.to_float()))
+            }
+            // A non-number. Coerce (awk/shell) or delegate (strict).
+            (a, b, None) => Value::Float(float_op(a.to_float(), b.to_float())),
+            (a, b, Some(hook)) => match hook(op, a, b) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            },
+        };
+        self.stack.truncate(len - 2);
+        self.stack.push(result);
+        None
     }
 
     /// Pop two values; compare as int if both Int, otherwise float.
     /// Push Bool(true/false).
+    ///
+    /// Comparison cannot overflow, so in strict numeric mode only a non-numeric
+    /// operand delegates to the [`NumericHook`].
     #[inline(always)]
-    fn cmp_int_fast(&mut self, int_cmp: fn(i64, i64) -> bool, float_cmp: fn(f64, f64) -> bool) {
+    fn cmp_int_fast(
+        &mut self,
+        op: NumOp,
+        int_cmp: fn(i64, i64) -> bool,
+        float_cmp: fn(f64, f64) -> bool,
+    ) -> Option<String> {
         let len = self.stack.len();
-        if len >= 2 {
-            let b = &self.stack[len - 1];
-            let a = &self.stack[len - 2];
-            let result = match (a, b) {
-                (Value::Int(x), Value::Int(y)) => int_cmp(*x, *y),
-                _ => float_cmp(a.to_float(), b.to_float()),
-            };
-            self.stack.truncate(len - 2);
-            self.stack.push(Value::Bool(result));
+        if len < 2 {
+            return None;
         }
+        let b = &self.stack[len - 1];
+        let a = &self.stack[len - 2];
+        let result = match (a, b, &self.numeric_hook) {
+            (Value::Int(x), Value::Int(y), _) => Value::Bool(int_cmp(*x, *y)),
+            (a, b, _) if is_native_num(a) && is_native_num(b) => {
+                Value::Bool(float_cmp(a.to_float(), b.to_float()))
+            }
+            (a, b, None) => Value::Bool(float_cmp(a.to_float(), b.to_float())),
+            (a, b, Some(hook)) => match hook(op, a, b) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            },
+        };
+        self.stack.truncate(len - 2);
+        self.stack.push(result);
+        None
+    }
+
+    /// Pop two operands and hand them to the [`NumericHook`]. Only called in
+    /// strict mode, for the ops (`Div`, `Pow`) whose native path is float-only
+    /// and therefore has no overflow case to check — just a type case.
+    #[inline(always)]
+    fn delegate_binary(&mut self, op: NumOp) -> Option<String> {
+        let b = self.pop();
+        let a = self.pop();
+        let hook = match &self.numeric_hook {
+            Some(h) => h,
+            None => return None,
+        };
+        match hook(op, &a, &b) {
+            Ok(v) => {
+                self.push(v);
+                None
+            }
+            Err(e) => Some(e),
+        }
+    }
+
+    /// Unary negate, strict-aware: `i64::MIN` has no positive counterpart and a
+    /// non-number is not negatable, so both go to the [`NumericHook`].
+    #[inline(always)]
+    fn negate_strict(&mut self) -> Option<String> {
+        let val = self.pop();
+        let result = match (&val, &self.numeric_hook) {
+            (Value::Int(n), None) => Value::Int(n.wrapping_neg()),
+            (Value::Int(n), Some(hook)) => match n.checked_neg() {
+                Some(r) if self.in_fixnum_range(r) => Value::Int(r),
+                _ => match hook(NumOp::Neg, &val, &Value::Undef) {
+                    Ok(v) => v,
+                    Err(e) => return Some(e),
+                },
+            },
+            (Value::Float(f), _) => Value::Float(-f),
+            (v, None) => Value::Float(-v.to_float()),
+            (v, Some(hook)) => match hook(NumOp::Neg, v, &Value::Undef) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            },
+        };
+        self.push(result);
+        None
     }
 
     // ── Main dispatch loop ──
@@ -800,6 +1031,12 @@ impl VM {
         // every invocation because `try_run_block` may compile + invoke
         // the same call (on threshold cross), so we can't skip the
         // refresh based on warmup state.
+        // Publish this VM's numeric policy to the thread's JIT: it decides op
+        // eligibility, salts every cache key, and switches integer arithmetic to
+        // its overflow-checked lowering.
+        #[cfg(feature = "jit")]
+        crate::jit::set_strict_numeric(self.numeric_hook.is_some(), self.fixnum_range);
+
         #[cfg(feature = "jit")]
         if self.tracing_jit && self.frames.len() == 1 && self.ip == 0 {
             let eligible = match self.block_eligible_cached {
@@ -812,40 +1049,74 @@ impl VM {
             };
             if eligible {
                 self.refresh_slot_buffers();
-                if let Some(result_i64) = self.jit.try_run_block_kinded(
-                    &self.chunk,
-                    &mut self.slot_buf,
-                    &self.slot_kinds_buf,
-                ) {
-                    // A JIT-compiled AwkDivJit/AwkModJit may have hit a zero
-                    // divisor and set the thread-local trap code before
-                    // returning. Honor it as the awk fatal, discarding the
-                    // (garbage) block result and slot writeback.
-                    match crate::jit::take_awk_div_trap() {
-                        1 => return VMResult::Error("division by zero attempted".to_string()),
-                        2 => {
-                            return VMResult::Error("division by zero attempted in `%'".to_string())
+                // Strict numeric mode: a non-numeric slot reaches native code as
+                // the integer 0 (`refresh_slot_buffers` has no richer encoding),
+                // which is precisely the silent coercion the `NumericHook` exists
+                // to reject. Falling out of this block runs the chunk in the
+                // interpreter, where the hook sees the real value.
+                let strict_blocked = self.numeric_hook.is_some() && !self.slots_all_numeric;
+                if !strict_blocked {
+                    if let Some(result) = self.jit.try_run_block_typed_kinded(
+                        &self.chunk,
+                        &mut self.slot_buf,
+                        &self.slot_kinds_buf,
+                    ) {
+                        // Strict numeric mode: an integer op in the compiled block
+                        // overflowed i64. The native result is the wrapped (wrong)
+                        // value, so discard it *and* skip the slot writeback — the
+                        // block's ops are pure, so nothing has escaped — and let the
+                        // interpreter re-run the chunk, where the `NumericHook`
+                        // produces the exact result (elisp: a bignum).
+                        if crate::jit::take_num_overflow_trap() {
+                            self.ip = 0;
+                        } else {
+                            // A JIT-compiled AwkDivJit/AwkModJit may have hit a zero
+                            // divisor and set the thread-local trap code before
+                            // returning. Honor it as the awk fatal, discarding the
+                            // (garbage) block result and slot writeback.
+                            match crate::jit::take_awk_div_trap() {
+                                1 => {
+                                    return VMResult::Error(
+                                        "division by zero attempted".to_string(),
+                                    )
+                                }
+                                2 => {
+                                    return VMResult::Error(
+                                        "division by zero attempted in `%'".to_string(),
+                                    )
+                                }
+                                3 => {
+                                    return VMResult::Error(
+                                        "lshift: negative values are not allowed".to_string(),
+                                    )
+                                }
+                                4 => {
+                                    return VMResult::Error(
+                                        "rshift: negative values are not allowed".to_string(),
+                                    )
+                                }
+                                5 => {
+                                    return VMResult::Error(
+                                        "compl: negative value is not allowed".to_string(),
+                                    )
+                                }
+                                _ => {}
+                            }
+                            self.write_slots_back();
+                            self.halted = true;
+                            // The block tier returns its result in an i64 register, with a
+                            // float riding back as its raw bit pattern. Decode through
+                            // `BlockNum` — wrapping the register in `Value::Int`
+                            // unconditionally (as this did before) truncated every float
+                            // chunk result to an integer on the second and later runs of
+                            // a chunk, once the block cache was warm: `LoadFloat(2.5)`
+                            // returned `Int(2)`.
+                            return VMResult::Ok(match result {
+                                crate::jit::BlockNum::Int(n) => Value::Int(n),
+                                crate::jit::BlockNum::Float(f) => Value::Float(f),
+                            });
                         }
-                        3 => {
-                            return VMResult::Error(
-                                "lshift: negative values are not allowed".to_string(),
-                            )
-                        }
-                        4 => {
-                            return VMResult::Error(
-                                "rshift: negative values are not allowed".to_string(),
-                            )
-                        }
-                        5 => {
-                            return VMResult::Error(
-                                "compl: negative value is not allowed".to_string(),
-                            )
-                        }
-                        _ => {}
                     }
-                    self.write_slots_back();
-                    self.halted = true;
-                    return VMResult::Ok(Value::Int(result_i64));
                 }
             }
         }
@@ -1115,10 +1386,50 @@ impl VM {
             }
 
             // ── Arithmetic (type-specialized: Int×Int avoids to_float) ──
-            Op::Add => self.arith_int_fast(i64::wrapping_add, |a, b| a + b),
-            Op::Sub => self.arith_int_fast(i64::wrapping_sub, |a, b| a - b),
-            Op::Mul => self.arith_int_fast(i64::wrapping_mul, |a, b| a * b),
+            Op::Add => {
+                if let Some(e) =
+                    self.arith_int_fast(NumOp::Add, i64::wrapping_add, i64::checked_add, |a, b| {
+                        a + b
+                    })
+                {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
+            Op::Sub => {
+                if let Some(e) =
+                    self.arith_int_fast(NumOp::Sub, i64::wrapping_sub, i64::checked_sub, |a, b| {
+                        a - b
+                    })
+                {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
+            Op::Mul => {
+                if let Some(e) =
+                    self.arith_int_fast(NumOp::Mul, i64::wrapping_mul, i64::checked_mul, |a, b| {
+                        a * b
+                    })
+                {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
             Op::Div => {
+                // Strict mode delegates a non-numeric operand; the zero-divisor
+                // and always-float results are unchanged (a frontend whose `/`
+                // has other semantics — elisp's integer division — implements it
+                // as a builtin rather than lowering to this op).
+                if self.numeric_hook.is_some() {
+                    let len = self.stack.len();
+                    if len >= 2
+                        && !(is_native_num(&self.stack[len - 1])
+                            && is_native_num(&self.stack[len - 2]))
+                    {
+                        if let Some(e) = self.delegate_binary(NumOp::Div) {
+                            return ExecFlow::Ret(VMResult::Error(e));
+                        }
+                        return ExecFlow::Cont;
+                    }
+                }
                 let b = self.pop();
                 let a = self.pop();
                 let divisor = b.to_float();
@@ -1128,32 +1439,75 @@ impl VM {
                     Value::Float(a.to_float() / divisor)
                 });
             }
-            Op::Mod => self.arith_int_fast(|x, y| if y != 0 { x % y } else { 0 }, |a, b| a % b),
+            Op::Mod => {
+                if let Some(e) = self.arith_int_fast(
+                    NumOp::Mod,
+                    |x, y| if y != 0 { x % y } else { 0 },
+                    |x, y| if y != 0 { x.checked_rem(y) } else { Some(0) },
+                    |a, b| a % b,
+                ) {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
             Op::Pow => {
+                if self.numeric_hook.is_some() {
+                    let len = self.stack.len();
+                    if len >= 2
+                        && !(is_native_num(&self.stack[len - 1])
+                            && is_native_num(&self.stack[len - 2]))
+                    {
+                        if let Some(e) = self.delegate_binary(NumOp::Pow) {
+                            return ExecFlow::Ret(VMResult::Error(e));
+                        }
+                        return ExecFlow::Cont;
+                    }
+                }
                 let b = self.pop();
                 let a = self.pop();
                 self.push(Value::Float(a.to_float().powf(b.to_float())));
             }
             Op::Negate => {
-                let val = self.pop();
-                self.push(match val {
-                    Value::Int(n) => Value::Int(n.wrapping_neg()),
-                    _ => Value::Float(-val.to_float()),
-                });
+                if let Some(e) = self.negate_strict() {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
             }
             Op::Inc => {
                 let val = self.pop();
-                self.push(match val {
-                    Value::Int(n) => Value::Int(n.wrapping_add(1)),
-                    _ => Value::Int(val.to_int().wrapping_add(1)),
-                });
+                let result = match (&val, &self.numeric_hook) {
+                    (Value::Int(n), None) => Value::Int(n.wrapping_add(1)),
+                    (Value::Int(n), Some(hook)) => match n.checked_add(1) {
+                        Some(r) if self.in_fixnum_range(r) => Value::Int(r),
+                        _ => match hook(NumOp::Add, &val, &Value::Int(1)) {
+                            Ok(v) => v,
+                            Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
+                        },
+                    },
+                    (v, None) => Value::Int(v.to_int().wrapping_add(1)),
+                    (v, Some(hook)) => match hook(NumOp::Add, v, &Value::Int(1)) {
+                        Ok(v) => v,
+                        Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
+                    },
+                };
+                self.push(result);
             }
             Op::Dec => {
                 let val = self.pop();
-                self.push(match val {
-                    Value::Int(n) => Value::Int(n.wrapping_sub(1)),
-                    _ => Value::Int(val.to_int().wrapping_sub(1)),
-                });
+                let result = match (&val, &self.numeric_hook) {
+                    (Value::Int(n), None) => Value::Int(n.wrapping_sub(1)),
+                    (Value::Int(n), Some(hook)) => match n.checked_sub(1) {
+                        Some(r) if self.in_fixnum_range(r) => Value::Int(r),
+                        _ => match hook(NumOp::Sub, &val, &Value::Int(1)) {
+                            Ok(v) => v,
+                            Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
+                        },
+                    },
+                    (v, None) => Value::Int(v.to_int().wrapping_sub(1)),
+                    (v, Some(hook)) => match hook(NumOp::Sub, v, &Value::Int(1)) {
+                        Ok(v) => v,
+                        Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
+                    },
+                };
+                self.push(result);
             }
 
             // ── String ──
@@ -1178,12 +1532,36 @@ impl VM {
             }
 
             // ── Comparison (type-specialized: Int×Int avoids to_float) ──
-            Op::NumEq => self.cmp_int_fast(|x, y| x == y, |a, b| a == b),
-            Op::NumNe => self.cmp_int_fast(|x, y| x != y, |a, b| a != b),
-            Op::NumLt => self.cmp_int_fast(|x, y| x < y, |a, b| a < b),
-            Op::NumGt => self.cmp_int_fast(|x, y| x > y, |a, b| a > b),
-            Op::NumLe => self.cmp_int_fast(|x, y| x <= y, |a, b| a <= b),
-            Op::NumGe => self.cmp_int_fast(|x, y| x >= y, |a, b| a >= b),
+            Op::NumEq => {
+                if let Some(e) = self.cmp_int_fast(NumOp::Eq, |x, y| x == y, |a, b| a == b) {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
+            Op::NumNe => {
+                if let Some(e) = self.cmp_int_fast(NumOp::Ne, |x, y| x != y, |a, b| a != b) {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
+            Op::NumLt => {
+                if let Some(e) = self.cmp_int_fast(NumOp::Lt, |x, y| x < y, |a, b| a < b) {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
+            Op::NumGt => {
+                if let Some(e) = self.cmp_int_fast(NumOp::Gt, |x, y| x > y, |a, b| a > b) {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
+            Op::NumLe => {
+                if let Some(e) = self.cmp_int_fast(NumOp::Le, |x, y| x <= y, |a, b| a <= b) {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
+            Op::NumGe => {
+                if let Some(e) = self.cmp_int_fast(NumOp::Ge, |x, y| x >= y, |a, b| a >= b) {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
             Op::Spaceship => {
                 let len = self.stack.len();
                 if len >= 2 {

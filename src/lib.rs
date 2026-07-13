@@ -70,4 +70,4 @@ pub use jit::{
 };
 pub use op::Op;
 pub use value::Value;
-pub use vm::{Frame, VMPool, VMResult, VM};
+pub use vm::{Frame, NumOp, NumericHook, VMPool, VMResult, VM};

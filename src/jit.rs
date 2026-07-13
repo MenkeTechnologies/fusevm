@@ -438,6 +438,88 @@ pub(crate) fn take_awk_div_trap() -> u8 {
     AWK_DIV_TRAP.with(|c| c.replace(0))
 }
 
+thread_local! {
+    /// Whether the VM currently running on this thread installed a
+    /// [`crate::NumericHook`] (strict numeric mode).
+    ///
+    /// The JIT caches are thread-local, and native code compiled under one
+    /// numeric policy must never be reused under the other: the coercing kind
+    /// wraps on integer overflow, the strict kind traps. `VM::run` sets this
+    /// immediately before dispatching into any JIT tier, and every cache key is
+    /// salted with it, so the two kinds of native code cannot collide.
+    static STRICT_NUM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// The VM's fixnum range while strict (see `VM::set_fixnum_range`). JIT'd
+    /// integer arithmetic folds a bounds check against it into the overflow
+    /// accumulator, so a result that leaves the range bails to the interpreter
+    /// and reaches the `NumericHook` — the same path a true `i64` overflow takes.
+    static FIXNUM_RANGE: std::cell::Cell<Option<(i64, i64)>> =
+        const { std::cell::Cell::new(None) };
+
+    /// Overflow trap channel for strict-mode JIT-compiled integer arithmetic.
+    ///
+    /// A strict-mode block accumulates the overflow bit of every `Add`/`Sub`/
+    /// `Mul`/`Negate` it executes (one `bor` per op — no branch on the hot
+    /// path) and tests it once, at the return. If any op overflowed, it calls
+    /// [`fusevm_jit_num_overflow_trap`] and returns a sentinel; `VM::run` then
+    /// discards the result *and the slot writeback* and re-runs the chunk in the
+    /// interpreter, where the `NumericHook` produces the exact value (elisp: a
+    /// bignum). Discarding is sound because block-eligible ops are pure: they
+    /// touch only the JIT's private slot buffer, never the VM's frames.
+    static NUM_OVERFLOW_TRAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set the thread's strict-numeric flag. Called by `VM::run` before JIT
+/// dispatch; mirrors whether a [`crate::NumericHook`] is installed.
+pub(crate) fn set_strict_numeric(on: bool, range: Option<(i64, i64)>) {
+    STRICT_NUM.with(|c| c.set(on));
+    FIXNUM_RANGE.with(|c| c.set(range));
+}
+
+/// The thread's fixnum range, if the strict VM narrowed it.
+#[allow(dead_code)] // read only from the cranelift impl module
+pub(crate) fn fixnum_range() -> Option<(i64, i64)> {
+    FIXNUM_RANGE.with(|c| c.get())
+}
+
+/// Cache-key salt for the numeric policy: the strict flag AND the fixnum bounds.
+/// Native code that checks against ±2^61 must never be reused by a VM whose
+/// fixnums are the full `i64`.
+#[allow(dead_code)]
+pub(crate) fn numeric_policy_salt() -> u64 {
+    if !strict_numeric() {
+        return 0;
+    }
+    let (lo, hi) = fixnum_range().unwrap_or((i64::MIN, i64::MAX));
+    STRICT_NUM_SALT ^ (lo as u64).rotate_left(17) ^ (hi as u64).rotate_left(43)
+}
+
+/// Whether this thread is in strict numeric mode.
+#[allow(dead_code)] // read only from the cranelift impl module
+pub(crate) fn strict_numeric() -> bool {
+    STRICT_NUM.with(|c| c.get())
+}
+
+/// Salt mixed into every JIT cache key in strict numeric mode, so strict and
+/// coercing native code for the same chunk can never alias.
+#[allow(dead_code)]
+pub(crate) const STRICT_NUM_SALT: u64 = 0x5731_c700_5731_c700;
+
+/// Libcall invoked by strict-mode JIT-compiled code when an integer `Add`/`Sub`/
+/// `Mul`/`Negate` overflowed `i64`. The argument is ignored (the signature is
+/// shared with the other void libcalls); the flag alone tells `VM::run` to
+/// discard the block result and re-run in the interpreter.
+#[allow(dead_code)] // referenced by Cranelift via raw function pointer, not Rust call graph
+pub(crate) extern "C" fn fusevm_jit_num_overflow_trap(_kind: i64) {
+    NUM_OVERFLOW_TRAP.with(|c| c.set(true));
+}
+
+/// Read and clear the pending strict-mode integer-overflow trap.
+#[allow(dead_code)] // used by JIT trap-drain path conditionally compiled out
+pub(crate) fn take_num_overflow_trap() -> bool {
+    NUM_OVERFLOW_TRAP.with(|c| c.replace(false))
+}
+
 /// Libcall invoked by JIT-compiled [`crate::Op::AwkSqrtJit`] and
 /// [`crate::Op::AwkLogJit`] when the input is negative. Writes a gawk-shaped
 /// warning to stderr; the JIT then produces NaN as the result. `op_id` is `0`
@@ -1393,6 +1475,8 @@ mod cranelift_jit_impl {
         lcm_i64: Option<cranelift_module::FuncId>,
         time_i64: Option<cranelift_module::FuncId>,
         awk_div_trap: Option<cranelift_module::FuncId>,
+        /// Strict-numeric integer-overflow trap (see `fusevm_jit_num_overflow_trap`).
+        num_ovf_trap: Option<cranelift_module::FuncId>,
         awk_neg_warn: Option<cranelift_module::FuncId>,
         awk_get_field_num: Option<cranelift_module::FuncId>,
     }
@@ -1419,6 +1503,7 @@ mod cranelift_jit_impl {
         lcm_i64: Option<cranelift_codegen::ir::FuncRef>,
         time_i64: Option<cranelift_codegen::ir::FuncRef>,
         awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
+        num_ovf_trap: Option<cranelift_codegen::ir::FuncRef>,
         awk_neg_warn: Option<cranelift_codegen::ir::FuncRef>,
         awk_get_field_num: Option<cranelift_codegen::ir::FuncRef>,
     }
@@ -1535,6 +1620,13 @@ mod cranelift_jit_impl {
                     Op::AwkDivJit | Op::AwkModJit if m.awk_div_trap.is_none() => {
                         m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
                     }
+                    // Strict numeric mode: the checked lowering of these ops
+                    // calls the overflow trap on the bail path.
+                    Op::Add | Op::Sub | Op::Mul | Op::Negate
+                        if m.num_ovf_trap.is_none() && super::strict_numeric() =>
+                    {
+                        m.num_ovf_trap = declare_void_i64(module, "fusevm_jit_num_overflow_trap");
+                    }
                     Op::AwkLshiftJit | Op::AwkRshiftJit | Op::AwkComplJit
                         if m.awk_div_trap.is_none() =>
                     {
@@ -1586,6 +1678,9 @@ mod cranelift_jit_impl {
                 awk_div_trap: self
                     .awk_div_trap
                     .map(|id| module.declare_func_in_func(id, func)),
+                num_ovf_trap: self
+                    .num_ovf_trap
+                    .map(|id| module.declare_func_in_func(id, func)),
                 awk_neg_warn: self
                     .awk_neg_warn
                     .map(|id| module.declare_func_in_func(id, func)),
@@ -1623,6 +1718,10 @@ mod cranelift_jit_impl {
         builder.symbol(
             "fusevm_jit_awk_div_trap",
             super::fusevm_jit_awk_div_trap as *const u8,
+        );
+        builder.symbol(
+            "fusevm_jit_num_overflow_trap",
+            super::fusevm_jit_num_overflow_trap as *const u8,
         );
         builder.symbol(
             "fusevm_jit_awk_neg_warn",
@@ -1878,6 +1977,62 @@ mod cranelift_jit_impl {
 
     // ── Cranelift IR emission per op ──
 
+    /// OR an op's overflow bit into the strict-mode overflow accumulator.
+    ///
+    /// One `uextend` + `bor` per integer arithmetic op, and no branch: the
+    /// accumulated bit is tested once, at the function's return. Branching per
+    /// op would put a mispredict in the middle of every hot loop.
+    fn accum_overflow(
+        bcx: &mut FunctionBuilder,
+        acc: cranelift_frontend::Variable,
+        of: Value,
+        res: Value,
+    ) {
+        let mut bit = bcx.ins().uextend(types::I64, of);
+        // A host with tagged fixnums (Emacs: 62 bits) also needs results that fit
+        // an i64 but leave its fixnum range to reach the hook. Two compares and
+        // an OR, folded into the same accumulator — still no branch here.
+        if let Some((lo, hi)) = super::fixnum_range() {
+            let lo_v = bcx.ins().iconst(types::I64, lo);
+            let hi_v = bcx.ins().iconst(types::I64, hi);
+            let below = bcx.ins().icmp(IntCC::SignedLessThan, res, lo_v);
+            let above = bcx.ins().icmp(IntCC::SignedGreaterThan, res, hi_v);
+            let out = bcx.ins().bor(below, above);
+            let out64 = bcx.ins().uextend(types::I64, out);
+            bit = bcx.ins().bor(bit, out64);
+        }
+        let cur = bcx.use_var(acc);
+        let next = bcx.ins().bor(cur, bit);
+        bcx.def_var(acc, next);
+    }
+
+    /// Emit the check the strict-mode overflow accumulator feeds: if any integer
+    /// op in this function overflowed, call the trap libcall and return a
+    /// sentinel instead of the (wrapped, wrong) result. `VM::run` sees the trap
+    /// flag, discards both the result and the slot writeback, and re-runs the
+    /// chunk in the interpreter, where the `NumericHook` computes it exactly.
+    fn emit_overflow_bail(
+        bcx: &mut FunctionBuilder,
+        acc: cranelift_frontend::Variable,
+        trap_ref: cranelift_codegen::ir::FuncRef,
+    ) {
+        let cur = bcx.use_var(acc);
+        let bail = bcx.create_block();
+        let cont = bcx.create_block();
+        bcx.ins().brif(cur, bail, &[], cont, &[]);
+
+        bcx.switch_to_block(bail);
+        bcx.seal_block(bail);
+        let kind = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().call(trap_ref, &[kind]);
+        let sentinel = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().return_(&[sentinel]);
+
+        bcx.switch_to_block(cont);
+        bcx.seal_block(cont);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_data_op(
         bcx: &mut FunctionBuilder,
         op: &Op,
@@ -1889,6 +2044,9 @@ mod cranelift_jit_impl {
         lognot_ref: Option<cranelift_codegen::ir::FuncRef>,
         math: MathRefs,
         constants: &[FuseValue],
+        // `Some` in strict numeric mode: the overflow accumulator every integer
+        // `Add`/`Sub`/`Mul`/`Negate` ORs its overflow bit into.
+        ovf: Option<cranelift_frontend::Variable>,
     ) -> Option<()> {
         match op {
             Op::LoadInt(n) => {
@@ -1928,21 +2086,42 @@ mod cranelift_jit_impl {
             Op::Add => {
                 let (a, b, ty) = pop_pair_promote(bcx, stack)?;
                 match ty {
-                    JitTy::Int => stack.push((bcx.ins().iadd(a, b), JitTy::Int)),
+                    JitTy::Int => match ovf {
+                        Some(acc) => {
+                            let (sum, of) = bcx.ins().sadd_overflow(a, b);
+                            accum_overflow(bcx, acc, of, sum);
+                            stack.push((sum, JitTy::Int));
+                        }
+                        None => stack.push((bcx.ins().iadd(a, b), JitTy::Int)),
+                    },
                     JitTy::Float => stack.push((bcx.ins().fadd(a, b), JitTy::Float)),
                 }
             }
             Op::Sub => {
                 let (a, b, ty) = pop_pair_promote(bcx, stack)?;
                 match ty {
-                    JitTy::Int => stack.push((bcx.ins().isub(a, b), JitTy::Int)),
+                    JitTy::Int => match ovf {
+                        Some(acc) => {
+                            let (diff, of) = bcx.ins().ssub_overflow(a, b);
+                            accum_overflow(bcx, acc, of, diff);
+                            stack.push((diff, JitTy::Int));
+                        }
+                        None => stack.push((bcx.ins().isub(a, b), JitTy::Int)),
+                    },
                     JitTy::Float => stack.push((bcx.ins().fsub(a, b), JitTy::Float)),
                 }
             }
             Op::Mul => {
                 let (a, b, ty) = pop_pair_promote(bcx, stack)?;
                 match ty {
-                    JitTy::Int => stack.push((bcx.ins().imul(a, b), JitTy::Int)),
+                    JitTy::Int => match ovf {
+                        Some(acc) => {
+                            let (prod, of) = bcx.ins().smul_overflow(a, b);
+                            accum_overflow(bcx, acc, of, prod);
+                            stack.push((prod, JitTy::Int));
+                        }
+                        None => stack.push((bcx.ins().imul(a, b), JitTy::Int)),
+                    },
                     JitTy::Float => stack.push((bcx.ins().fmul(a, b), JitTy::Float)),
                 }
             }
@@ -2124,7 +2303,17 @@ mod cranelift_jit_impl {
             Op::Negate => {
                 let (a, ty) = stack.pop()?;
                 match ty {
-                    JitTy::Int => stack.push((bcx.ins().ineg(a), JitTy::Int)),
+                    // `-i64::MIN` overflows, so strict mode negates as `0 - a`
+                    // through the checked subtract and accumulates the bit.
+                    JitTy::Int => match ovf {
+                        Some(acc) => {
+                            let zero = bcx.ins().iconst(types::I64, 0);
+                            let (neg, of) = bcx.ins().ssub_overflow(zero, a);
+                            accum_overflow(bcx, acc, of, neg);
+                            stack.push((neg, JitTy::Int));
+                        }
+                        None => stack.push((bcx.ins().ineg(a), JitTy::Int)),
+                    },
                     JitTy::Float => stack.push((bcx.ins().fneg(a), JitTy::Float)),
                 }
             }
@@ -2556,6 +2745,7 @@ mod cranelift_jit_impl {
                     lognot_ref,
                     math,
                     &chunk.constants,
+                    None,
                 )?;
             }
             let (v, ty) = stack.pop()?;
@@ -2603,6 +2793,12 @@ mod cranelift_jit_impl {
     /// Try to JIT-compile and run a chunk's ops as a linear sequence.
     /// Returns `Some(Value)` on success, `None` if the chunk isn't eligible.
     pub(crate) fn try_run_linear(chunk: &Chunk, slots: &[i64]) -> Option<FuseValue> {
+        // The linear tier emits unchecked wrapping arithmetic and coerces
+        // nothing back to the host, so it has no strict lowering: a strict VM
+        // must interpret instead.
+        if super::strict_numeric() {
+            return None;
+        }
         let key = chunk.op_hash;
         let slot_ptr = if slots.is_empty() {
             std::ptr::null()
@@ -2710,6 +2906,10 @@ mod cranelift_jit_impl {
         pub(crate) const H_GCD_I64: u32 = 19;
         pub(crate) const H_LCM_I64: u32 = 20;
         pub(crate) const H_TIME_I64: u32 = 21;
+        /// Strict-numeric integer-overflow trap libcall. Registering it as a
+        /// known host helper keeps strict-mode chunks eligible for the native
+        /// disk cache (the relocation is re-resolved live at load time).
+        pub(crate) const H_NUM_OVF_TRAP: u32 = 22;
 
         // Native-blob tier discriminator. Persisted in the file and verified on
         // load so a block blob can never be transmuted with a linear signature.
@@ -2767,6 +2967,7 @@ mod cranelift_jit_impl {
                 H_LCM_I64 => super::fusevm_jit_lcm_i64 as *const u8 as usize,
                 H_TIME_I64 => super::fusevm_jit_time_i64 as *const u8 as usize,
                 H_AWK_DIV_TRAP => super::super::fusevm_jit_awk_div_trap as *const u8 as usize,
+                H_NUM_OVF_TRAP => super::super::fusevm_jit_num_overflow_trap as *const u8 as usize,
                 _ => return None,
             })
         }
@@ -3179,6 +3380,7 @@ mod cranelift_jit_impl {
                     // reasoning applies to the warn libcall used by AwkSqrtJit /
                     // AwkLogJit on the negative path.
                     awk_div_trap: None,
+                    num_ovf_trap: None,
                     awk_neg_warn: None,
                     awk_get_field_num: None,
                 };
@@ -3196,6 +3398,7 @@ mod cranelift_jit_impl {
                         lognot_ref,
                         math,
                         &chunk.constants,
+                        None,
                     )?;
                 }
                 let (v, ty) = stack.pop()?;
@@ -3658,7 +3861,9 @@ mod cranelift_jit_impl {
             // The slot-kinds hash is the verification aux word: native code
             // compiled for Int slots must not be reused for Float slots (the
             // bit-cast/arithmetic differs), so a kinds mismatch rejects the file.
-            let kinds_hash = slot_kinds_hash(slot_kinds);
+            // The numeric policy is salted in for the same reason: strict-mode
+            // code traps on integer overflow where coercing-mode code wraps.
+            let kinds_hash = slot_kinds_hash(slot_kinds) ^ crate::jit::numeric_policy_salt();
             if let Some(blob) = read_blob(dir, "blk", chunk.op_hash, kinds_hash, kinds_hash) {
                 if let Some(compiled) = load_native_block(&blob) {
                     return Some(compiled);
@@ -3895,6 +4100,33 @@ mod cranelift_jit_impl {
         if let Op::Extended(id, _) = op {
             return super::global_extension_for(*id).is_some();
         }
+        // Strict numeric mode: an integer op whose native lowering can produce a
+        // value the interpreter would not have produced is not JIT-able here.
+        // `Add`/`Sub`/`Mul`/`Negate` ARE compiled — with overflow checks (see
+        // `emit_data_op`) — because they are the ops a strict frontend actually
+        // emits on its hot path. The rest are declined rather than checked: they
+        // overflow in ways that need their own guards (`i64::MIN / -1`,
+        // `wrapping_pow`, the fused int superinstructions), and a strict
+        // frontend either implements them as builtins (elisp `/`, `%`, `expt`)
+        // or never emits them at all. Declining just means "run in the
+        // interpreter", where the `NumericHook` gives the exact answer.
+        if super::strict_numeric()
+            && matches!(
+                op,
+                Op::Div
+                    | Op::Mod
+                    | Op::Pow
+                    | Op::Inc
+                    | Op::Dec
+                    | Op::PreIncSlot(_)
+                    | Op::PreIncSlotVoid(_)
+                    | Op::SlotIncLtIntJumpBack(_, _, _)
+                    | Op::AccumSumLoop(_, _, _)
+                    | Op::AddAssignSlotVoid(_, _)
+            )
+        {
+            return false;
+        }
         matches!(
             op,
             Op::Nop
@@ -3998,7 +4230,7 @@ mod cranelift_jit_impl {
         /// then reused across `is_block_eligible` calls (notably from
         /// `VM::run`'s phase-10 auto-dispatch path, which would otherwise
         /// linear-scan the ops on every invocation).
-        static BLOCK_ELIGIBLE_TLS: RefCell<HashMap<u64, bool>> =
+        static BLOCK_ELIGIBLE_TLS: RefCell<HashMap<(u64, bool), bool>> =
             RefCell::new(HashMap::new());
     }
 
@@ -4018,14 +4250,18 @@ mod cranelift_jit_impl {
 
     #[inline]
     pub(crate) fn is_block_eligible(chunk: &Chunk) -> bool {
+        // Keyed on the numeric policy as well as the chunk: strict mode declines
+        // ops (`Div`, `Pow`, the fused int superinstructions) that the coercing
+        // policy compiles, so the two answers differ for the same chunk.
+        let key = (chunk.op_hash, super::strict_numeric());
         // Fast path: cached decision.
-        if let Some(hit) = BLOCK_ELIGIBLE_TLS.with(|c| c.borrow().get(&chunk.op_hash).copied()) {
+        if let Some(hit) = BLOCK_ELIGIBLE_TLS.with(|c| c.borrow().get(&key).copied()) {
             return hit;
         }
         // Slow path: scan ops, cache result.
         let ops = &chunk.ops;
         let result = !ops.is_empty() && ops.iter().all(is_block_eligible_op);
-        BLOCK_ELIGIBLE_TLS.with(|c| c.borrow_mut().insert(chunk.op_hash, result));
+        BLOCK_ELIGIBLE_TLS.with(|c| c.borrow_mut().insert(key, result));
         result
     }
 
@@ -4343,6 +4579,20 @@ mod cranelift_jit_impl {
             bcx.append_block_params_for_function_params(entry);
             bcx.switch_to_block(entry);
             let slot_base = bcx.block_params(entry)[0];
+
+            // ── Strict numeric mode: the overflow accumulator. ──
+            // Every integer Add/Sub/Mul/Negate ORs its overflow bit in here; the
+            // return path tests it once and bails to the interpreter if set, so
+            // a wrapped (wrong) integer can never escape the JIT into a language
+            // whose integers are unbounded.
+            let ovf_var = if super::strict_numeric() {
+                let v = bcx.declare_var(types::I64);
+                let zero = bcx.ins().iconst(types::I64, 0);
+                bcx.def_var(v, zero);
+                Some(v)
+            } else {
+                None
+            };
 
             // ── Slot promotion: declare a Cranelift Variable per used slot, ──
             // ── load each from the slot pointer at entry. After this, all   ──
@@ -4915,6 +5165,7 @@ mod cranelift_jit_impl {
                                 lognot_ref,
                                 math,
                                 &chunk.constants,
+                                ovf_var,
                             )?;
                         }
                     }
@@ -4947,6 +5198,13 @@ mod cranelift_jit_impl {
                         match ret_is_float {
                             Some(prev) if prev != is_f => return None,
                             _ => ret_is_float = Some(is_f),
+                        }
+                        // Strict numeric mode: if any integer op overflowed,
+                        // trap and return the sentinel WITHOUT writing slots
+                        // back — the interpreter re-runs the chunk from the top
+                        // and the `NumericHook` computes the exact result.
+                        if let Some(acc) = ovf_var {
+                            emit_overflow_bail(&mut bcx, acc, math.num_ovf_trap?);
                         }
                         // Write all slot Variables back to the slot pointer
                         // (caller observes the final state of the slot array)
@@ -5009,6 +5267,13 @@ mod cranelift_jit_impl {
                     #[cfg(feature = "jit-disk-cache")]
                     if let Some(fid) = math_ids.awk_div_trap {
                         v.push((fid, disk_cache::H_AWK_DIV_TRAP));
+                    }
+                    // Likewise the strict-numeric overflow trap: carrying it here
+                    // keeps a strict frontend's arithmetic chunks eligible for the
+                    // native disk cache rather than the in-memory JIT alone.
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.num_ovf_trap {
+                        v.push((fid, disk_cache::H_NUM_OVF_TRAP));
                     }
                     // `LogFloat`'s natural-log libcall is a built-in helper with a
                     // stable id, carried through `ext_helpers` (not one of the
@@ -5207,7 +5472,15 @@ mod cranelift_jit_impl {
         slot_kinds: &[super::SlotKind],
         threshold: u32,
     ) -> Option<(i64, bool)> {
-        let key = (chunk.op_hash, slot_kinds_hash(slot_kinds));
+        // Salt the key with the numeric policy: strict-mode native code traps on
+        // integer overflow, coercing-mode native code wraps. Sharing one cache
+        // entry between them would hand a strict VM code that silently wraps.
+        let policy_salt = if super::strict_numeric() {
+            crate::jit::STRICT_NUM_SALT
+        } else {
+            0
+        };
+        let key = (chunk.op_hash, slot_kinds_hash(slot_kinds) ^ policy_salt);
 
         BLOCK_CACHE_TLS.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
@@ -6572,6 +6845,7 @@ mod cranelift_jit_impl {
                             lognot_ref,
                             math,
                             constants,
+                            None,
                         )?;
                     }
                 }
@@ -6704,6 +6978,36 @@ mod cranelift_jit_impl {
         })
     }
 
+    /// Whether a recorded trace contains integer arithmetic that could overflow.
+    ///
+    /// The block tier compiles these ops with overflow checks; the trace tier
+    /// does not yet (an overflow inside a trace has to side-exit through the
+    /// deopt path, restoring the abstract stack, rather than simply re-running
+    /// the chunk). Until it does, a strict-numeric VM declines to compile such a
+    /// trace and runs the loop in the interpreter, where the `NumericHook` gives
+    /// the exact result. Loops with no integer arithmetic still trace-compile.
+    fn trace_has_int_arith(ops: &[Op]) -> bool {
+        ops.iter().any(|op| {
+            matches!(
+                op,
+                Op::Add
+                    | Op::Sub
+                    | Op::Mul
+                    | Op::Negate
+                    | Op::Inc
+                    | Op::Dec
+                    | Op::Div
+                    | Op::Mod
+                    | Op::Pow
+                    | Op::PreIncSlot(_)
+                    | Op::PreIncSlotVoid(_)
+                    | Op::SlotIncLtIntJumpBack(_, _, _)
+                    | Op::AccumSumLoop(_, _, _)
+                    | Op::AddAssignSlotVoid(_, _)
+            )
+        })
+    }
+
     fn compile_trace_inner(
         ops: &[Op],
         recorded_ips: &[usize],
@@ -6712,6 +7016,9 @@ mod cranelift_jit_impl {
         slot_types: &[(u16, JitTy)],
         constants: &[FuseValue],
     ) -> Option<CompiledTrace> {
+        if super::strict_numeric() && trace_has_int_arith(ops) {
+            return None;
+        }
         let BuiltFn {
             mut module,
             mut ctx,
