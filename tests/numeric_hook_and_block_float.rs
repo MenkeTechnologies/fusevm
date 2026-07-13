@@ -40,6 +40,26 @@ fn float_chunk(f: f64) -> Chunk {
     b.build()
 }
 
+/// Push a single value the cheapest way the loader allows.
+fn push_value(bd: &mut ChunkBuilder, v: Value) {
+    match v {
+        Value::Int(n) => bd.emit(Op::LoadInt(n), 0),
+        Value::Float(f) => bd.emit(Op::LoadFloat(f), 0),
+        other => {
+            let idx = bd.add_constant(other);
+            bd.emit(Op::LoadConst(idx), 0)
+        }
+    };
+}
+
+/// `OP a` as a one-constant chunk (unary).
+fn unop_chunk(a: Value, op: Op) -> Chunk {
+    let mut bd = ChunkBuilder::new();
+    push_value(&mut bd, a);
+    bd.emit(op, 0);
+    bd.build()
+}
+
 /// `a OP b` as a two-constant chunk.
 fn binop_chunk(a: Value, b: Value, op: Op) -> Chunk {
     let mut bd = ChunkBuilder::new();
@@ -240,4 +260,187 @@ fn strict_mode_delegates_results_outside_a_narrowed_fixnum_range() {
         25,
         "in-range must not delegate"
     );
+}
+
+/// A counting hook that stands in for a bignum. Returns the number of times it
+/// was called alongside the reusable hook.
+fn counting_bignum_hook() -> (Arc<AtomicUsize>, fusevm::NumericHook) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let hook: fusevm::NumericHook = Arc::new(move |_op, _a, _b| {
+        seen.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::str("BIGNUM".to_string()))
+    });
+    (calls, hook)
+}
+
+/// `Sub` has its own opcode and its own checked lowering (`i64::checked_sub`),
+/// so overflow delegation must be proved for it independently of `Add` — and it
+/// must survive JIT compilation, which is the case the overflow accumulator in
+/// the block tier exists for. `i64::MIN - 1` is the only interesting operand.
+#[test]
+fn strict_mode_delegates_subtraction_overflow_across_jit() {
+    let (calls, hook) = counting_bignum_hook();
+    for i in 1..=25 {
+        let v = run(
+            binop_chunk(Value::Int(i64::MIN), Value::Int(1), Op::Sub),
+            Some(hook.clone()),
+        )
+        .expect("sub overflow is delegated, not an error");
+        assert_eq!(v, Value::str("BIGNUM".to_string()), "run {i}: sub overflow wrapped");
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 25, "every sub overflow must delegate");
+}
+
+/// Unary negate is the fourth block-eligible op. `-i64::MIN` overflows (`i64`
+/// has no positive `MIN`), so strict mode must hand it to the host on every
+/// run, JIT-compiled ones included. An in-range negation stays an exact fixnum
+/// and never touches the hook.
+#[test]
+fn strict_mode_delegates_negate_overflow_but_not_in_range() {
+    let (calls, hook) = counting_bignum_hook();
+
+    for i in 1..=25 {
+        let v = run(unop_chunk(Value::Int(i64::MIN), Op::Negate), Some(hook.clone()))
+            .expect("negate overflow is delegated");
+        assert_eq!(v, Value::str("BIGNUM".to_string()), "run {i}: -i64::MIN wrapped");
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 25, "every -i64::MIN must delegate");
+
+    // A representable negation must not delegate — the checked lowering only
+    // catches what i64 cannot hold, it never changes an in-range result.
+    for i in 1..=15 {
+        let v = run(unop_chunk(Value::Int(42), Op::Negate), Some(hook.clone())).unwrap();
+        assert_eq!(v, Value::Int(-42), "run {i}: in-range negate changed");
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 25, "in-range negate must not delegate");
+}
+
+/// A non-number operand is not negatable in a strict language, so it reaches the
+/// host (elisp: `(wrong-type-argument number-or-marker-p "a")`).
+#[test]
+fn strict_mode_delegates_negate_of_a_non_number() {
+    let err = run(
+        unop_chunk(Value::str("a".to_string()), Op::Negate),
+        Some(Arc::new(|op, a, b| {
+            assert_eq!(op, NumOp::Neg);
+            assert_eq!((a, b), (&Value::str("a".to_string()), &Value::Undef));
+            Err("wrong-type-argument".to_string())
+        })),
+    )
+    .expect_err("negating a string must signal in strict mode");
+    assert_eq!(err, "wrong-type-argument");
+}
+
+/// The lower fixnum bound is enforced by the same accumulator as the upper one.
+/// `most-negative-fixnum - 1` fits an `i64` but leaves Emacs's 62-bit range, so
+/// it must delegate; one step inside the range stays an exact native fixnum.
+#[test]
+fn strict_mode_delegates_below_the_narrowed_fixnum_range() {
+    const MOST_POSITIVE_FIXNUM: i64 = 2_305_843_009_213_693_951; // 2^61 - 1
+    const MOST_NEGATIVE_FIXNUM: i64 = -2_305_843_009_213_693_952; // -2^61
+
+    let (calls, hook) = counting_bignum_hook();
+    let run_ranged = |chunk: Chunk| -> Value {
+        let mut vm = VM::new(chunk);
+        vm.enable_tracing_jit();
+        vm.set_numeric_hook(hook.clone());
+        vm.set_fixnum_range(MOST_NEGATIVE_FIXNUM, MOST_POSITIVE_FIXNUM);
+        match vm.run() {
+            VMResult::Ok(v) => v,
+            VMResult::Halted => vm.stack.last().cloned().unwrap_or(Value::Undef),
+            VMResult::Error(e) => panic!("vm error: {e}"),
+        }
+    };
+
+    for i in 1..=25 {
+        let v = run_ranged(binop_chunk(
+            Value::Int(MOST_NEGATIVE_FIXNUM),
+            Value::Int(1),
+            Op::Sub,
+        ));
+        assert_eq!(v, Value::str("BIGNUM".to_string()), "run {i}: -2^61-1 escaped as fixnum");
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 25);
+
+    let v = run_ranged(binop_chunk(
+        Value::Int(MOST_NEGATIVE_FIXNUM + 1),
+        Value::Int(1),
+        Op::Sub,
+    ));
+    assert_eq!(v, Value::Int(MOST_NEGATIVE_FIXNUM));
+    assert_eq!(calls.load(Ordering::Relaxed), 25, "in-range must not delegate");
+}
+
+/// Comparison can never overflow, so `cmp_int_fast` delegates only a non-numeric
+/// operand — and two fixnums compare natively without ever touching the hook.
+#[test]
+fn strict_mode_comparison_delegates_only_non_numbers() {
+    // Non-numeric operand → the host decides the ordering (elisp signals).
+    let err = run(
+        binop_chunk(Value::Int(1), Value::str("a".to_string()), Op::NumLt),
+        Some(Arc::new(|op, _a, _b| {
+            assert_eq!(op, NumOp::Lt);
+            Err("wrong-type-argument".to_string())
+        })),
+    )
+    .expect_err("comparing against a string must signal in strict mode");
+    assert_eq!(err, "wrong-type-argument");
+
+    // Two fixnums: native comparison, hook untouched even after JIT warmup.
+    let (calls, hook) = counting_bignum_hook();
+    for i in 1..=25 {
+        let v = run(
+            binop_chunk(Value::Int(3), Value::Int(7), Op::NumLt),
+            Some(hook.clone()),
+        )
+        .unwrap();
+        assert_eq!(v, Value::Bool(true), "run {i}: 3 < 7 wrong");
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 0, "numeric comparison must not delegate");
+}
+
+/// `Div` and `Pow` are float-native with no overflow case, so strict mode
+/// delegates only a non-numeric operand; a numeric divide stays an exact float
+/// and never reaches the host.
+#[test]
+fn strict_mode_div_and_pow_delegate_only_non_numbers() {
+    for op in [Op::Div, Op::Pow] {
+        let name = format!("{op:?}");
+        let (calls, hook) = counting_bignum_hook();
+        let v = run(
+            binop_chunk(Value::Int(2), Value::str("a".to_string()), op),
+            Some(hook.clone()),
+        )
+        .expect("delegated op returns the host value");
+        assert_eq!(v, Value::str("BIGNUM".to_string()), "{name} of a string must delegate");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    // Numeric divide is exact in f64 — no delegation.
+    let (calls, hook) = counting_bignum_hook();
+    let v = run(binop_chunk(Value::Int(7), Value::Int(2), Op::Div), Some(hook)).unwrap();
+    assert_eq!(v, Value::Float(3.5));
+    assert_eq!(calls.load(Ordering::Relaxed), 0, "numeric divide must not delegate");
+}
+
+/// The hook is for integer overflow and non-numbers only: mixed int/float and
+/// float/float arithmetic is exact in `f64` and must stay on the fast path, even
+/// with a hook installed and the JIT warm. A hook that panics proves it is never
+/// consulted for float operands.
+#[test]
+fn strict_mode_never_delegates_exact_float_arithmetic() {
+    let hook: fusevm::NumericHook =
+        Arc::new(|op, a, b| panic!("float arithmetic delegated: {op:?} {a:?} {b:?}"));
+
+    for i in 1..=25 {
+        // i64::MAX as a float can't overflow f64, and one operand is a float, so
+        // this is the mixed path — never the checked-int path.
+        let v = run(
+            binop_chunk(Value::Int(i64::MAX), Value::Float(2.0), Op::Add),
+            Some(hook.clone()),
+        )
+        .expect("mixed float add stays native");
+        assert_eq!(v, Value::Float(i64::MAX as f64 + 2.0), "run {i}");
+    }
 }
