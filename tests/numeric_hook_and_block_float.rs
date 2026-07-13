@@ -12,6 +12,8 @@
 //!    op both reach the host, *including* after the JIT has compiled the chunk,
 //!    which is the case native code would otherwise silently get wrong.
 
+#![cfg(feature = "jit")]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

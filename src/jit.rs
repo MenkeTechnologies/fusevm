@@ -471,6 +471,7 @@ thread_local! {
 
 /// Set the thread's strict-numeric flag. Called by `VM::run` before JIT
 /// dispatch; mirrors whether a [`crate::NumericHook`] is installed.
+#[allow(dead_code)] // called only from the jit-gated dispatch in `VM::run`
 pub(crate) fn set_strict_numeric(on: bool, range: Option<(i64, i64)>) {
     STRICT_NUM.with(|c| c.set(on));
     FIXNUM_RANGE.with(|c| c.set(range));
