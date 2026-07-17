@@ -363,3 +363,115 @@ fn jit_mod_int() {
         2,
     );
 }
+
+// ── Float-kind preservation (zero-valued and integral-valued float constants) ──
+//
+// The interpreter keeps `Value::Float` for float operands regardless of the
+// value; the JIT must agree. Regression tests for the elisprs bug where an
+// integral-valued `LoadFloat` constant (including ±0.0) was lowered as
+// `JitTy::Int`, so `LoadFloat(-0.0); Negate` came back as `Int(0)` from the
+// JIT tier while the first (interpreted) evaluation returned `Float(0.0)`.
+// Bit-exact assertions so ±0.0 sign is pinned too.
+
+fn jit_expect_float_bits(ops: &[(Op, u32)], expected: f64) {
+    match jit_run(ops) {
+        Some(Value::Float(f)) => assert_eq!(
+            f.to_bits(),
+            expected.to_bits(),
+            "expected Float({expected:?}), got Float({f:?})"
+        ),
+        other => panic!("expected Some(Float({expected:?})), got {other:?}"),
+    }
+}
+
+#[test]
+fn jit_negate_neg_zero_float_kind_preserved() {
+    // (- -0.0) → +0.0, Float — never Int(0).
+    jit_expect_float_bits(&[(Op::LoadFloat(-0.0), 1), (Op::Negate, 1)], 0.0);
+}
+
+#[test]
+fn jit_negate_pos_zero_float_kind_preserved() {
+    // (- 0.0) → -0.0, Float — never Int(0).
+    jit_expect_float_bits(&[(Op::LoadFloat(0.0), 1), (Op::Negate, 1)], -0.0);
+}
+
+#[test]
+fn jit_sub_neg_zero_float_kind_preserved() {
+    // (- -0.0 0) → -0.0, Float (Int operand promotes, kind stays Float).
+    jit_expect_float_bits(
+        &[(Op::LoadFloat(-0.0), 1), (Op::LoadInt(0), 1), (Op::Sub, 1)],
+        -0.0,
+    );
+}
+
+#[test]
+fn jit_negate_integral_float_kind_preserved() {
+    // (- 2.0) → -2.0, Float — an integral-valued float is still a float.
+    jit_expect_float_bits(&[(Op::LoadFloat(2.0), 1), (Op::Negate, 1)], -2.0);
+}
+
+#[test]
+fn jit_add_float_zero_result_kind_preserved() {
+    // 1.5 + -1.5 → +0.0, Float.
+    jit_expect_float_bits(
+        &[
+            (Op::LoadFloat(1.5), 1),
+            (Op::LoadFloat(-1.5), 1),
+            (Op::Add, 1),
+        ],
+        0.0,
+    );
+}
+
+#[test]
+fn jit_mul_float_zero_result_kind_preserved() {
+    // 0.0 * 5.0 → +0.0, Float.
+    jit_expect_float_bits(
+        &[
+            (Op::LoadFloat(0.0), 1),
+            (Op::LoadFloat(5.0), 1),
+            (Op::Mul, 1),
+        ],
+        0.0,
+    );
+}
+
+#[test]
+fn jit_div_float_zero_result_kind_preserved() {
+    // 0.0 / 2.0 → +0.0, Float (not the exact-int-division fast path).
+    jit_expect_float_bits(
+        &[
+            (Op::LoadFloat(0.0), 1),
+            (Op::LoadFloat(2.0), 1),
+            (Op::Div, 1),
+        ],
+        0.0,
+    );
+}
+
+#[test]
+fn jit_mod_float_zero_result_kind_preserved() {
+    // 4.0 % 2.0 → +0.0, Float (interpreter uses the float path for Floats).
+    jit_expect_float_bits(
+        &[
+            (Op::LoadFloat(4.0), 1),
+            (Op::LoadFloat(2.0), 1),
+            (Op::Mod, 1),
+        ],
+        0.0,
+    );
+}
+
+#[test]
+fn jit_pow_float_zero_result_kind_preserved() {
+    // 0.0 ** 3.0 → +0.0, Float (interpreter Pow is always float).
+    jit_expect_float_bits(
+        &[
+            (Op::LoadFloat(0.0), 1),
+            (Op::LoadFloat(3.0), 1),
+            (Op::Pow, 1),
+        ],
+        0.0,
+    );
+}

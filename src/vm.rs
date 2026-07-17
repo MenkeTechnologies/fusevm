@@ -4178,6 +4178,24 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_negate_preserves_float_zero_kind_and_sign() {
+        // Interpreter reference for the JIT float-kind tests: a zero-valued
+        // float operand stays Float (with the correct sign), never Int(0).
+        match run_one(vec![Op::LoadFloat(-0.0), Op::Negate]) {
+            VMResult::Ok(Value::Float(f)) => assert_eq!(f.to_bits(), 0.0f64.to_bits()),
+            other => panic!("expected Float(0.0), got {:?}", other),
+        }
+        match run_one(vec![Op::LoadFloat(0.0), Op::Negate]) {
+            VMResult::Ok(Value::Float(f)) => assert_eq!(f.to_bits(), (-0.0f64).to_bits()),
+            other => panic!("expected Float(-0.0), got {:?}", other),
+        }
+        match run_one(vec![Op::LoadFloat(-0.0), Op::LoadInt(0), Op::Sub]) {
+            VMResult::Ok(Value::Float(f)) => assert_eq!(f.to_bits(), (-0.0f64).to_bits()),
+            other => panic!("expected Float(-0.0), got {:?}", other),
+        }
+    }
+
+    #[test]
     fn arithmetic_pow_returns_float() {
         match run_one(vec![Op::LoadInt(3), Op::LoadInt(4), Op::Pow]) {
             VMResult::Ok(Value::Float(f)) => assert!((f - 81.0).abs() < 1e-9),

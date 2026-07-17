@@ -1537,3 +1537,32 @@ fn disk_cache_log2_log10_block_persists() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn disk_cache_neg_zero_float_kind_roundtrip() {
+    let _g = serial();
+    let dir = fresh_dir("negzero");
+    // (- -0.0): an integral-valued float constant must stay Float through
+    // native compile, disk persist, and mmap reload. Regression: ±0.0
+    // LoadFloat constants collapsed to Int in the JIT tier, so the cached
+    // execution returned Int(0) while the interpreter returned Float(0.0).
+    let chunk = build(&[(Op::LoadFloat(-0.0), 1), (Op::Negate, 1)]);
+
+    match run_with_cache(&chunk, &dir, &[]) {
+        Some(Value::Float(f)) => assert_eq!(f.to_bits(), 0.0f64.to_bits(), "got {f:?}"),
+        other => panic!("expected Float(0.0), got {other:?}"),
+    }
+
+    // Fresh thread (fresh per-thread cache): must load the blob from disk and
+    // still return a positive-zero FLOAT.
+    let dir2 = dir.clone();
+    let chunk2 = chunk.clone();
+    let second = std::thread::spawn(move || run_with_cache(&chunk2, &dir2, &[]))
+        .join()
+        .unwrap();
+    match second {
+        Some(Value::Float(f)) => assert_eq!(f.to_bits(), 0.0f64.to_bits(), "reload got {f:?}"),
+        other => panic!("expected reloaded Float(0.0), got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

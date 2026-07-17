@@ -913,3 +913,54 @@ fn block_jit_awk_get_field_num_sum_loop() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn block_jit_negate_neg_zero_float_kind_preserved() {
+    use fusevm::BlockNum;
+    // (- -0.0) → +0.0 as a FLOAT through the block tier. Regression: an
+    // integral-valued LoadFloat constant (±0.0 included) was lowered as
+    // JitTy::Int, collapsing the result to Int(0).
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadFloat(-0.0), 1);
+    b.emit(Op::Negate, 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    let mut slots: Vec<i64> = vec![];
+    match jit
+        .try_run_block_eager_typed_kinded(&chunk, &mut slots, &[])
+        .expect("LoadFloat+Negate chunk must block-JIT compile")
+    {
+        BlockNum::Float(f) => assert_eq!(
+            f.to_bits(),
+            0.0f64.to_bits(),
+            "-(-0.0) must be +0.0, got {f:?}"
+        ),
+        BlockNum::Int(n) => panic!("float kind collapsed to Int({n})"),
+    }
+}
+
+#[test]
+fn block_jit_sub_neg_zero_float_kind_preserved() {
+    use fusevm::BlockNum;
+    // (- -0.0 0) → -0.0 as a FLOAT through the block tier.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadFloat(-0.0), 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::Sub, 1);
+    let chunk = b.build();
+
+    let jit = JitCompiler::new();
+    let mut slots: Vec<i64> = vec![];
+    match jit
+        .try_run_block_eager_typed_kinded(&chunk, &mut slots, &[])
+        .expect("LoadFloat+LoadInt+Sub chunk must block-JIT compile")
+    {
+        BlockNum::Float(f) => assert_eq!(
+            f.to_bits(),
+            (-0.0f64).to_bits(),
+            "-0.0 - 0 must be -0.0, got {f:?}"
+        ),
+        BlockNum::Int(n) => panic!("float kind collapsed to Int({n})"),
+    }
+}

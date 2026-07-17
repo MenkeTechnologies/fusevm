@@ -788,16 +788,18 @@ mod cranelift_jit_impl {
     fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[FuseValue]) -> Option<()> {
         match op {
             Op::LoadInt(n) => stack.push(Cell::Const(*n)),
+            // A float constant is ALWAYS a float cell, even when its value is
+            // integral (2.0) or zero (±0.0). The interpreter pushes
+            // `Value::Float` unconditionally, and the result kind must be
+            // decided statically from the operand kinds — never inferred from
+            // the runtime value (an `f as i64` round-trip collapsed
+            // `LoadFloat(-0.0); Negate` to `Int(0)` in the JIT tier while the
+            // interpreter correctly returned `Float(0.0)`).
             Op::LoadFloat(f) => {
                 if !f.is_finite() {
                     return None;
                 }
-                let n = *f as i64;
-                if (n as f64) == *f {
-                    stack.push(Cell::Const(n));
-                } else {
-                    stack.push(Cell::ConstF(*f));
-                }
+                stack.push(Cell::ConstF(*f));
             }
             Op::LoadConst(idx) => {
                 let val = constants.get(*idx as usize)?;
@@ -2053,19 +2055,19 @@ mod cranelift_jit_impl {
             Op::LoadInt(n) => {
                 stack.push((bcx.ins().iconst(types::I64, *n), JitTy::Int));
             }
+            // Always lower a float constant as `JitTy::Float` — mirrors
+            // `simulate_one_op` (the two must agree on kinds or the return
+            // coercion silently truncates). Kind is static, never derived
+            // from the value: an integral-valued or ±0.0 constant is still a
+            // float, exactly like the interpreter's `Value::Float` push.
             Op::LoadFloat(f) => {
                 if !f.is_finite() {
                     return None;
                 }
-                let n = *f as i64;
-                if (n as f64) == *f {
-                    stack.push((bcx.ins().iconst(types::I64, n), JitTy::Int));
-                } else {
-                    stack.push((
-                        bcx.ins().f64const(Ieee64::with_bits(f.to_bits())),
-                        JitTy::Float,
-                    ));
-                }
+                stack.push((
+                    bcx.ins().f64const(Ieee64::with_bits(f.to_bits())),
+                    JitTy::Float,
+                ));
             }
             Op::LoadConst(idx) => {
                 let val = constants.get(*idx as usize)?;
@@ -2934,7 +2936,11 @@ mod cranelift_jit_impl {
         // reasoning).
         // 13 -> 14: inserted 13 new float ops as a block (same reasoning).
         // 14 -> 15: inserted Op::{AbsInt,GcdInt,LcmInt,TimeInt} as a block.
-        const SCHEMA_VERSION: u32 = 15;
+        // 15 -> 16: codegen semantics fix — `Op::LoadFloat` of an
+        // integral-valued constant (±0.0 included) previously lowered as
+        // `JitTy::Int`, so cached blobs return Int where the interpreter
+        // returns Float; bumped so those stale blobs are rejected on load.
+        const SCHEMA_VERSION: u32 = 16;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
