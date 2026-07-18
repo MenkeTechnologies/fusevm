@@ -2637,14 +2637,28 @@ impl VM {
                         other => vec![other.to_str()],
                     })
                     .collect();
-                let status = if let Some(h) = self.host.as_mut() {
-                    match h.call_function(&name, args.clone()) {
+                let status = if self.host.is_some() {
+                    // alias/function/host-table builtin resolution.
+                    let cf = self.host.as_mut().unwrap().call_function(&name, args.clone());
+                    match cf {
                         Some(s) => s,
                         None => {
-                            let mut full = Vec::with_capacity(args.len() + 1);
-                            full.push(name.clone());
-                            full.extend(args);
-                            h.exec(full)
+                            // Not a user function or a host-table builtin. Try a
+                            // VM-registered builtin by NAME — the run-time analog
+                            // of the `CallBuiltin` opcode — BEFORE external exec,
+                            // matching the shell's function -> builtin -> external
+                            // resolution order. Without this, a builtin only ever
+                            // reached through its compile-time `CallBuiltin`
+                            // (literal name) is unreachable when the command name
+                            // is resolved at run time (`$var`, `eval`, indirection).
+                            if let Some(v) = self.run_builtin_by_name(&name, &args) {
+                                v.to_int() as i32
+                            } else {
+                                let mut full = Vec::with_capacity(args.len() + 1);
+                                full.push(name.clone());
+                                full.extend(args);
+                                self.host.as_mut().unwrap().exec(full)
+                            }
                         }
                     }
                 } else {
