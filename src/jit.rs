@@ -4392,8 +4392,14 @@ mod cranelift_jit_impl {
         match ty {
             JitTy::Int => bcx.ins().icmp_imm(IntCC::NotEqual, v, 0),
             JitTy::Float => {
+                // `NotEqual` (UN|LT|GT), not `OrderedNotEqual` (LT|GT): awk
+                // truthiness treats NaN as truthy (NaN != 0.0 → true), matching
+                // `mkbool`/float-truthy elsewhere. `OrderedNotEqual` also hits an
+                // `unimplemented!()` in Cranelift's aarch64 branch lowering
+                // (isa/aarch64/lower.rs `lower_fp_condcode`), panicking the JIT on
+                // arm64 for any float-conditioned branch (e.g. `while (1) {...}`).
                 let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
-                bcx.ins().fcmp(FloatCC::OrderedNotEqual, v, z)
+                bcx.ins().fcmp(FloatCC::NotEqual, v, z)
             }
         }
     }
