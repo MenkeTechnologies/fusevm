@@ -506,6 +506,34 @@ impl VM {
         self.builtin_table[idx] = Some(handler);
     }
 
+    /// Run a shell builtin by **name** at run time — the runtime analog of the
+    /// compile-time [`Op::CallBuiltin`] opcode. The compiler resolves a literal
+    /// command name to a builtin id and emits `CallBuiltin`, so builtins only
+    /// dispatch for names known at compile time. A host that resolves a name
+    /// only at run time — `builtin NAME`, `$var` command indirection, `eval`
+    /// of a computed name — needs this to reach the same builtins.
+    ///
+    /// Resolves `name` via [`crate::shell_builtins::builtin_id`], pushes `args`
+    /// as string values in argument order (identical to what the compiler emits
+    /// ahead of `CallBuiltin`, which the handler's arg-pop reverses back), then
+    /// invokes the registered handler and returns its status value. Returns
+    /// `None` when `name` is not a known builtin or has no registered handler,
+    /// so the caller falls through to function / external lookup.
+    pub fn run_builtin_by_name(&mut self, name: &str, args: &[String]) -> Option<Value> {
+        let id = crate::shell_builtins::builtin_id(name)?;
+        let handler = match self.builtin_table.get(id as usize) {
+            Some(Some(h)) => *h,
+            _ => return None,
+        };
+        // `CallBuiltin`'s argc is a u8, so builtins take at most 255 args;
+        // push exactly that many so the handler's arg-pop stays balanced.
+        let argc = args.len().min(u8::MAX as usize);
+        for a in &args[..argc] {
+            self.push(Value::Str(std::sync::Arc::new(a.clone())));
+        }
+        Some(handler(self, argc as u8))
+    }
+
     /// Externally request the VM to halt after the current op finishes.
     /// Used by host-side shell semantics like `set -e` post-command checks
     /// and `exit` from inside builtins to stop dispatch at a safe point.
@@ -4463,6 +4491,28 @@ mod tests {
             Value::Int(222)
         });
         assert!(matches!(vm.run(), VMResult::Ok(Value::Int(222))));
+    }
+
+    #[test]
+    fn run_builtin_by_name_dispatches_and_passes_args() {
+        // A handler registered at a real builtin id must be reachable by NAME
+        // at runtime, receiving its args in argument order.
+        let id = crate::shell_builtins::builtin_id("true").expect("`true` is a builtin");
+        let mut vm = VM::new(ChunkBuilder::new().build());
+        vm.register_builtin(id, |vm, argc| {
+            // args pushed in order → popped-and-reversed back to order.
+            let mut got = Vec::new();
+            for _ in 0..argc {
+                got.push(vm.pop().to_str());
+            }
+            got.reverse();
+            assert_eq!(got, vec!["x".to_string(), "y".to_string()]);
+            Value::Int(7)
+        });
+        let out = vm.run_builtin_by_name("true", &["x".to_string(), "y".to_string()]);
+        assert!(matches!(out, Some(Value::Int(7))));
+        // Unknown / unregistered names return None (caller falls through).
+        assert!(vm.run_builtin_by_name("definitely_not_a_builtin_xyz", &[]).is_none());
     }
 
     #[test]
