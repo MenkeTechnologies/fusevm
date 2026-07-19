@@ -54,15 +54,25 @@ pub mod aot;
 pub mod awk_builtins;
 pub mod awk_host;
 pub mod chunk;
+/// Inline Rust FFI runtime (`rust { ... }` blocks). Behind the `ffi` feature —
+/// pulls in `libc`/`sha2`/`base64` and shells out to `rustc` at runtime.
+#[cfg(feature = "ffi")]
+pub mod ffi;
 pub mod host;
 pub mod jit;
 pub mod op;
+/// Source-level `rust { ... }` desugarer shared by every frontend. Behind the
+/// `ffi` feature (needs `base64` to encode block bodies).
+#[cfg(feature = "ffi")]
+pub mod rust_sugar;
 pub mod shell_builtins;
 pub mod value;
 pub mod vm;
 
 pub use awk_host::{AwkHost, AwkLvalue, DefaultAwkHost};
 pub use chunk::{Chunk, ChunkBuilder};
+#[cfg(feature = "ffi")]
+pub use rust_sugar::RustSugar;
 pub use host::{DefaultHost, ShellHost};
 pub use jit::{
     set_awk_field_num_hook, BlockNum, DeoptFrame, DeoptInfo, JitCompiler, JitExtension, NativeCode,

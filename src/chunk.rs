@@ -49,6 +49,53 @@ impl Chunk {
             .find(|(n, _)| *n == name_idx)
             .map(|(_, ip)| *ip)
     }
+
+    /// Human-readable disassembly listing of this chunk (and, recursively, its
+    /// `sub_chunks`). Language frontends surface this behind a `--disasm` flag.
+    ///
+    /// Format (stable — consumed by frontend `--disasm` output and tests):
+    /// - `; source: FILE` when `source` is non-empty
+    /// - `; name[i] = NAME` for each name-pool entry
+    /// - `; sub_entries:` then `;   NAME @ IP` for each subroutine entry
+    ///   (`?` when the name index is out of bounds — never panics)
+    /// - `IIII  LLLLL     Op` per op: 4-digit op index, right-aligned source
+    ///   line, then the `Op` `Debug` form
+    /// - `; --- sub_chunk[n] ---` headers with each nested chunk indented two
+    ///   spaces deeper (compounding per nesting level)
+    ///
+    /// This lives here, on the shared VM's own `Chunk`, so every fusevm
+    /// frontend gets identical disassembly without copying the formatter.
+    pub fn disassemble(&self) -> String {
+        let mut out = String::new();
+        self.append_disasm(&mut out, "");
+        out
+    }
+
+    fn append_disasm(&self, out: &mut String, indent: &str) {
+        use std::fmt::Write;
+        if !self.source.is_empty() {
+            let _ = writeln!(out, "{indent}; source: {}", self.source);
+        }
+        for (i, n) in self.names.iter().enumerate() {
+            let _ = writeln!(out, "{indent}; name[{i}] = {n}");
+        }
+        if !self.sub_entries.is_empty() {
+            let _ = writeln!(out, "{indent}; sub_entries:");
+            for (ni, ip) in &self.sub_entries {
+                let name = self.names.get(*ni as usize).map(String::as_str).unwrap_or("?");
+                let _ = writeln!(out, "{indent};   {name} @ {ip}");
+            }
+        }
+        for (i, op) in self.ops.iter().enumerate() {
+            let line = self.lines.get(i).copied().unwrap_or(0);
+            let _ = writeln!(out, "{indent}{i:04} {line:>5}     {op:?}");
+        }
+        for (si, sub) in self.sub_chunks.iter().enumerate() {
+            let _ = writeln!(out, "{indent}; --- sub_chunk[{si}] ---");
+            let sub_indent = format!("{indent}  ");
+            sub.append_disasm(out, &sub_indent);
+        }
+    }
 }
 
 /// Builder for constructing Chunks incrementally.
@@ -453,5 +500,70 @@ mod tests {
         assert_eq!(back.source, chunk.source);
         // op_hash has #[serde(skip)] → does NOT survive round-trip.
         assert_eq!(back.op_hash, 0, "op_hash skipped by serde");
+    }
+
+    // ─── disassemble() — shared frontend `--disasm` listing ───────────
+
+    #[test]
+    fn disassemble_empty_chunk_is_empty() {
+        // Default chunk has empty source/names/ops/sub_entries/sub_chunks —
+        // nothing to list, so no lines at all.
+        assert_eq!(Chunk::default().disassemble(), "");
+    }
+
+    #[test]
+    fn disassemble_emits_source_only_when_present() {
+        let mut c = Chunk::default();
+        assert!(!c.disassemble().contains("; source:"));
+        c.source = "a.fuse".to_string();
+        assert_eq!(c.disassemble(), "; source: a.fuse\n");
+    }
+
+    #[test]
+    fn disassemble_names_and_ops_numbered() {
+        let mut b = ChunkBuilder::new();
+        b.add_name("foo");
+        b.emit(Op::Nop, 1);
+        b.emit(Op::Nop, 2);
+        let listing = b.build().disassemble();
+        assert!(listing.contains("; name[0] = foo"));
+        // 4-digit op index, right-aligned line, Op Debug.
+        assert!(listing.contains("0000     1     Nop"), "{listing}");
+        assert!(listing.contains("0001     2     Nop"), "{listing}");
+    }
+
+    #[test]
+    fn disassemble_sub_entry_unknown_index_shows_question_mark() {
+        // Out-of-bounds name index must not panic — renders as "?".
+        let mut c = Chunk::default();
+        c.sub_entries = vec![(99u16, 17usize)];
+        assert!(c.disassemble().contains(";   ? @ 17"));
+    }
+
+    #[test]
+    fn disassemble_recurses_sub_chunks_with_compounding_indent() {
+        let mut deepest = Chunk::default();
+        deepest.source = "deep.fuse".to_string();
+        let mut middle = Chunk::default();
+        middle.sub_chunks = vec![deepest];
+        let mut outer = Chunk::default();
+        outer.sub_chunks = vec![middle];
+        let listing = outer.disassemble();
+        assert!(listing.contains("; --- sub_chunk[0] ---"));
+        // Two levels deep → 4-space indent on the inner source line.
+        assert!(
+            listing.contains("    ; source: deep.fuse"),
+            "two-level nesting should indent 4 spaces:\n{listing}"
+        );
+    }
+
+    #[test]
+    fn disassemble_op_line_defaults_to_zero_when_lines_short() {
+        let mut c = Chunk::default();
+        c.ops = vec![Op::Nop, Op::Nop];
+        c.lines = vec![5]; // one line entry for two ops
+        let listing = c.disassemble();
+        assert!(listing.contains("0000     5     Nop"));
+        assert!(listing.contains("0001     0     Nop"), "missing line → 0");
     }
 }

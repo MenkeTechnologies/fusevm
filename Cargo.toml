@@ -1,6 +1,6 @@
 [package]
 name = "fusevm"
-version = "0.14.10"
+version = "0.14.11"
 edition = "2021"
 description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear/block/tracing)"
 license = "MIT"
@@ -31,6 +31,8 @@ cranelift-module = { version = "0.130", optional = true }
 cranelift-object = { version = "0.130", optional = true }
 bincode = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
+sha2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [features]
 default = []
@@ -48,6 +50,12 @@ jit-disk-cache = ["jit", "dep:libc"]
 # Shared by all fusevm frontends (stryke/zshrs/awkrs/vimlrs) so AOT lives here
 # once. Pulls in `libc` for the same executable-memory/runtime support.
 aot = ["jit", "dep:cranelift-object", "dep:bincode", "dep:libc"]
+# Inline Rust FFI: `rust { ... }` blocks compiled to a cdylib via `rustc` on
+# first run, cached under ~/.cache/fusevm/ffi, dlopened, and marshalled against
+# `fusevm::Value`. Shared by all frontends so the runtime + source desugarer
+# live here once. Pulls in `libc` (dlopen/dlsym), `sha2` (cache key), `base64`
+# (block-body transport).
+ffi = ["dep:libc", "dep:sha2", "dep:base64"]
 
 [dev-dependencies]
 serde_json = "1"
