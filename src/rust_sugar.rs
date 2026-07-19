@@ -28,8 +28,10 @@ use base64::Engine as _;
 pub struct RustSugar {
     /// The block-introducing keyword. Almost always `"rust"`.
     pub keyword: &'static str,
-    /// Line-comment introducer to skip over (`"//"`, `"#"`), or `""` for none.
-    pub line_comment: &'static str,
+    /// Line-comment introducers to skip over (e.g. `&["//", "#"]` for PHP), or
+    /// `&[]` for none. Skipping comments matters so a `;`/`}` inside one does
+    /// not create a false statement boundary.
+    pub line_comments: &'static [&'static str],
     /// Nesting block-comment delimiters to skip over, or `None`.
     pub block_comment: Option<(&'static str, &'static str)>,
     /// Whether a newline resets the statement boundary. C/Perl-family: `false`
@@ -87,8 +89,12 @@ impl RustSugar {
                 i += 1;
                 continue;
             }
-            // Line comment.
-            if !self.line_comment.is_empty() && code[i..].starts_with(self.line_comment) {
+            // Line comment (any configured introducer).
+            if self
+                .line_comments
+                .iter()
+                .any(|c| !c.is_empty() && code[i..].starts_with(c))
+            {
                 let start = i;
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
@@ -347,7 +353,7 @@ mod tests {
     }
     const C_FAMILY: RustSugar = RustSugar {
         keyword: "rust",
-        line_comment: "//",
+        line_comments: &["//"],
         block_comment: Some(("/*", "*/")),
         newline_boundary: false,
         emit: c_emit,
@@ -359,7 +365,7 @@ mod tests {
     }
     const HASH_FAMILY: RustSugar = RustSugar {
         keyword: "rust",
-        line_comment: "#",
+        line_comments: &["#"],
         block_comment: None,
         newline_boundary: true,
         emit: hash_emit,
@@ -442,6 +448,29 @@ mod tests {
         // `rust` after `=` is not at a statement boundary.
         let src = "let x = rust { 1 }\n";
         assert_eq!(C_FAMILY.desugar(src), src);
+    }
+
+    #[test]
+    fn semicolon_inside_comment_is_not_a_false_boundary() {
+        // A `;` inside a skipped line comment must NOT flip can_start_stmt and
+        // let the following `rust {` (which is itself commentary) desugar.
+        let src = "// end; rust { not a block }\nlog(1);\n";
+        assert_eq!(C_FAMILY.desugar(src), src);
+    }
+
+    #[test]
+    fn php_style_two_line_comment_styles() {
+        // PHP has both `//` and `#`; a `;` in either must not create a false
+        // boundary for a trailing `rust {`.
+        const PHP: RustSugar = RustSugar {
+            keyword: "rust",
+            line_comments: &["//", "#"],
+            block_comment: Some(("/*", "*/")),
+            newline_boundary: true,
+            emit: c_emit,
+        };
+        let src = "# note; rust { skip }\n// too; rust { skip }\n$x = 1;\n";
+        assert_eq!(PHP.desugar(src), src);
     }
 
     #[test]
