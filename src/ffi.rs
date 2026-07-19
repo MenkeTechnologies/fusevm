@@ -135,6 +135,16 @@ fn registry() -> &'static Arc<Mutex<Registry>> {
     })
 }
 
+/// Whether `name` resolves to a registered FFI function. A cheap membership
+/// check so a frontend can route a call to [`try_call`] only when it will hit,
+/// without cloning args on the hot path.
+pub fn is_registered(name: &str) -> bool {
+    registry()
+        .lock()
+        .map(|g| g.entries.contains_key(name))
+        .unwrap_or(false)
+}
+
 /// Lookup hook: `Some(Ok(result))` when `name` is a registered FFI function,
 /// `None` otherwise. Frontends call this from their builtin-dispatch fallback.
 pub fn try_call(name: &str, args: &[Value]) -> Option<Result<Value, String>> {
@@ -683,5 +693,10 @@ mod tests {
     #[test]
     fn try_call_unknown_name_is_none() {
         assert!(try_call("definitely_not_registered_ffi_fn", &[]).is_none());
+    }
+
+    #[test]
+    fn is_registered_false_for_unknown() {
+        assert!(!is_registered("definitely_not_registered_ffi_fn"));
     }
 }
