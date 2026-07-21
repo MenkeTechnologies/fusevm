@@ -51,7 +51,7 @@ cargo add fusevm                  # interpreter only
 
 ## [0x00] OVERVIEW
 
-fusevm is the shared execution engine behind five language frontends — [zshrs](https://github.com/MenkeTechnologies/zshrs), [strykelang](https://github.com/MenkeTechnologies/strykelang), [awkrs](https://github.com/MenkeTechnologies/awkrs), [vimlrs](https://github.com/MenkeTechnologies/vimlrs), and [elisprs](https://github.com/MenkeTechnologies/elisprs). All five compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
+fusevm is the shared execution engine behind fourteen language frontends — [zshrs](https://github.com/MenkeTechnologies/zshrs), [strykelang](https://github.com/MenkeTechnologies/strykelang), [awkrs](https://github.com/MenkeTechnologies/awkrs), [vimlrs](https://github.com/MenkeTechnologies/vimlrs), [elisprs](https://github.com/MenkeTechnologies/elisprs), [rubylang](https://github.com/MenkeTechnologies/rubylang), [arb](https://github.com/MenkeTechnologies/arb), [pythonrs](https://github.com/MenkeTechnologies/pythonrs), [phplang](https://github.com/MenkeTechnologies/phplang), and [node-js](https://github.com/MenkeTechnologies/node-js) (ten at full toolchain parity), plus the newer JVM-language slices [javars](https://github.com/MenkeTechnologies/javars), [kotlinrs](https://github.com/MenkeTechnologies/kotlinrs), [scalars](https://github.com/MenkeTechnologies/scalars), and [groovyrs](https://github.com/MenkeTechnologies/groovyrs). They all compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
 
 ```
 zshrs  source ──► shell compiler  ──┐
