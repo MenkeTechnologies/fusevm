@@ -2,13 +2,14 @@
 //!
 //! A frontend surfaces a `rust { ... }` block (see [`crate::rust_sugar`]) which
 //! is desugared, at the source level, into a builtin call carrying the block
-//! body base64-encoded. That builtin calls [`compile_and_register`]; every
-//! bareword call the frontend cannot otherwise resolve falls through to
-//! [`try_call`]. The body is compiled to a `cdylib` on first run, cached,
+//! body base64-encoded. That builtin calls [`crate::ffi::compile_and_register`];
+//! every bareword call the frontend cannot otherwise resolve falls through to
+//! [`crate::ffi::try_call`]. The body is compiled to a `cdylib` on first run,
+//! cached,
 //! `dlopen`ed, and its `pub extern "C" fn` exports are registered as callable
 //! functions marshalled against [`crate::Value`].
 //!
-//! Flow (driven by [`compile_and_register`]):
+//! Flow (driven by [`crate::ffi::compile_and_register`]):
 //! 1. Base64-decode the block body.
 //! 2. SHA-256(salt ++ body) → short hex cache key.
 //! 3. If `~/.cache/fusevm/ffi/lib<hash>.<ext>` exists, `dlopen` and register.
@@ -16,7 +17,7 @@
 //!    invoke `rustc --edition=2021 -O`, then `dlopen`.
 //! 5. Scan the body for `pub extern "C" fn NAME(args) -> ret`, match each
 //!    signature against the v1 table, `dlsym`, and register one entry each in
-//!    the per-process [`FFI_REGISTRY`].
+//!    the per-process `FFI_REGISTRY`.
 //!
 //! ## Supported signatures (v1)
 //!
