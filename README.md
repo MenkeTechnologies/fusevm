@@ -54,20 +54,29 @@ cargo add fusevm                  # interpreter only
 fusevm is the shared execution engine behind fourteen language frontends — [zshrs](https://github.com/MenkeTechnologies/zshrs), [strykelang](https://github.com/MenkeTechnologies/strykelang), [awkrs](https://github.com/MenkeTechnologies/awkrs), [vimlrs](https://github.com/MenkeTechnologies/vimlrs), [elisprs](https://github.com/MenkeTechnologies/elisprs), [rubylang](https://github.com/MenkeTechnologies/rubylang), [arb](https://github.com/MenkeTechnologies/arb), [pythonrs](https://github.com/MenkeTechnologies/pythonrs), [phplang](https://github.com/MenkeTechnologies/phplang), and [node-js](https://github.com/MenkeTechnologies/node-js) (ten at full toolchain parity), plus the newer JVM-language slices [javars](https://github.com/MenkeTechnologies/javars), [kotlinrs](https://github.com/MenkeTechnologies/kotlinrs), [scalars](https://github.com/MenkeTechnologies/scalars), and [groovyrs](https://github.com/MenkeTechnologies/groovyrs). They all compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
 
 ```
-zshrs  source ──► shell compiler  ──┐
-stryke source ──► stryke compiler ──┤
-awk    source ──► awk compiler    ──┼──► fusevm::Op ──► VM::run() ─────┐
-viml   source ──► viml compiler   ──┤                                  │
-elisp  source ──► elisp compiler  ──┘                                  │
-                                                                        ▼
-                                              JitCompiler tiers (Cranelift 0.130)
-                                              ├── Linear JIT (straight-line, instant)
-                                              ├── Block JIT (CFG, threshold 10)
-                                              └── Tracing JIT (hot loop, threshold 50,
-                                                              deopts on guard miss)
-                                                          │
-                                                          ▼
-                                                native x86-64 / aarch64
+zshrs  ──► shell  compiler ──┐
+stryke ──► stryke compiler ──┤
+awk    ──► awk    compiler ──┤
+viml   ──► viml   compiler ──┤
+elisp  ──► elisp  compiler ──┤
+ruby   ──► ruby   compiler ──┤
+arb    ──► arb    compiler ──┼──► fusevm::Op ──► VM::run() ──┐
+python ──► python compiler ──┤                              │
+php    ──► php    compiler ──┤                              │
+node   ──► node   compiler ──┤                              │
+java   ──► java   compiler ──┤                              │
+kotlin ──► kotlin compiler ──┤                              │
+scala  ──► scala  compiler ──┤                              │
+groovy ──► groovy compiler ──┘                              │
+                                                            ▼
+                                   JitCompiler tiers (Cranelift 0.130)
+                                   ├── Linear JIT (straight-line, instant)
+                                   ├── Block JIT (CFG, threshold 10)
+                                   └── Tracing JIT (hot loop, threshold 50,
+                                                   deopts on guard miss)
+                                               │
+                                               ▼
+                                     native x86-64 / aarch64
 ```
 
 - **Fused superinstructions** — the compiler detects hot patterns and emits single ops instead of multi-op sequences
