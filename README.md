@@ -44,6 +44,7 @@ cargo add fusevm                  # interpreter only
 - [\[0x08\] Ahead-of-Time Compilation](#0x08-ahead-of-time-compilation)
 - [\[0x09\] Value Representation](#0x09-value-representation)
 - [\[0x0A\] Benchmarks](#0x0a-benchmarks)
+- [\[0x0B\] WebAssembly / Web Worker](#0x0b-webassembly--web-worker)
 - [\[0xFF\] License](#0xff-license)
 
 ---
@@ -596,6 +597,103 @@ cargo bench --bench vm_bench -- --save-baseline before   # save baseline
 cargo bench --bench vm_bench -- --baseline before        # compare
 open target/criterion/report/index.html                  # HTML graphs
 ```
+
+---
+
+## [0x0B] WEBASSEMBLY / WEB WORKER
+
+fusevm compiles to `wasm32-unknown-unknown` so a frontend (stryke/zshrs/awkrs)
+can parse source to a `Chunk` and run `VM::run()` inside a browser web worker.
+The worker build is the **default, feature-less** build:
+
+```sh
+cargo build --target wasm32-unknown-unknown          # interpreter only
+```
+
+The `jit`, `aot`, `jit-disk-cache`, and `ffi` features must stay **off** on
+wasm: they pull in Cranelift, `libc` (dlopen / executable mmap), and a runtime
+`rustc` shell-out, none of which target wasm. The interpreter is the whole
+worker runtime.
+
+### Clock
+
+`std::time::SystemTime::now()` panics on `wasm32-unknown-unknown` (no clock), so
+the VM's clock ops (`Op::TimeInt`, awk `systime`/`srand`) read through
+[`fusevm::sysclock`], which is `chrono`-backed. On wasm, `chrono` reads
+`Date.now()` through the JS host (its `wasmbind` feature, active automatically
+for wasm targets), so the clock works in a worker with no extra wiring.
+
+### I/O bridging
+
+wasm has no real stdout/stdin. Install an **output sink** and (optionally) an
+**input source** on the `VM` so `Op::Print`/`Op::PrintLn`/`Op::ReadLine` route
+to the JS host instead. With neither installed, output/input are byte-for-byte
+the previous direct-stdio behaviour, so native frontends are unaffected.
+
+```rust
+use std::sync::{Arc, Mutex};
+use fusevm::VM;
+
+let captured = Arc::new(Mutex::new(String::new()));
+let buf = Arc::clone(&captured);
+
+let mut vm = VM::new(chunk);
+// Send-safe: the sink writes to an Arc<Mutex<_>>, not a JS handle, so VM
+// stays Send (usable from VMPool on native).
+vm.set_output_sink(Box::new(move |s: &str| buf.lock().unwrap().push_str(s)));
+// Pre-loaded stdin; returns None at end of input (ReadLine then pushes Undef).
+let mut lines = vec!["line 2".into(), "line 1".into()];
+vm.set_input_source(Box::new(move || lines.pop()));
+
+vm.run();
+// In a worker: postMessage(captured). See examples/wasm_worker_host.rs.
+```
+
+`examples/wasm_worker_host.rs` is a runnable, pure-Rust demonstration (no
+`wasm-bindgen` dependency) that builds and runs on native and wasm alike:
+
+```sh
+cargo run   --example wasm_worker_host                              # prints "hello 42"
+cargo build --example wasm_worker_host --target wasm32-unknown-unknown
+```
+
+### Frontend glue
+
+fusevm is a library; it carries no `wasm-bindgen` dependency. The frontend crate
+owns the `#[wasm_bindgen]` entry and the worker JS. A representative frontend
+entry and `worker.js`:
+
+```rust
+// in the frontend crate (compiled to a cdylib for wasm)
+#[wasm_bindgen]
+pub fn run_source(src: &str) -> String {
+    let chunk = my_frontend::compile(src);        // source -> fusevm::Chunk
+    let captured = std::rc::Rc::new(...);          // or Arc<Mutex<String>>
+    let mut vm = fusevm::VM::new(chunk);
+    vm.set_output_sink(/* append to captured */);
+    vm.run();
+    captured_string                                // returned to JS
+}
+```
+
+```js
+// worker.js
+import init, { run_source } from "./my_frontend.js";
+await init();
+self.onmessage = (e) => self.postMessage(run_source(e.data));
+```
+
+### Caveats
+
+- **External commands.** `Op::Exec`/`ExecBg`/`CallFunction` have no process
+  model in a worker. A host-less wasm build returns exit status `127`; a
+  frontend overrides `ShellHost::exec` to bridge to the JS host if it needs to.
+- **Interactive stdin.** The input-source hook covers pre-loaded input.
+  *Blocking* interactive reads inside a worker require `SharedArrayBuffer` +
+  `Atomics.wait` (which need cross-origin-isolation headers) and are the
+  frontend's responsibility.
+- **Filesystem/glob.** `ShellHost::glob` and awk file `getline` have no fs in a
+  worker; override the relevant host methods to bridge as needed.
 
 ---
 

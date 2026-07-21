@@ -124,6 +124,12 @@ pub struct VM {
     pub chunk: Chunk,
     /// Last exit status ($?)
     pub last_status: i32,
+    /// Optional stdout sink for `Op::Print`/`Op::PrintLn`; see [`OutputSink`].
+    /// `None` writes to `std::io::stdout()`. Installed by web-worker frontends.
+    output_sink: Option<OutputSink>,
+    /// Optional stdin source for `Op::ReadLine`; see [`InputSource`]. `None`
+    /// reads `std::io::stdin()`. Installed by web-worker frontends.
+    input_source: Option<InputSource>,
     /// Host callback for arithmetic fusevm cannot complete natively (non-numeric
     /// operand, or integer overflow). `None` — the default — keeps the
     /// coerce-and-wrap semantics zshrs/awkrs/stryke rely on. See [`NumericHook`].
@@ -283,6 +289,27 @@ pub enum NumOp {
 pub type NumericHook =
     std::sync::Arc<dyn Fn(NumOp, &Value, &Value) -> Result<Value, String> + Send + Sync>;
 
+/// Sink for VM stdout (`Op::Print` / `Op::PrintLn`).
+///
+/// `None` — the default — writes to `std::io::stdout()`, byte-for-byte as
+/// before. A frontend running fusevm in a browser web worker installs a sink,
+/// because wasm has no real stdout: typically a closure appending to an
+/// `Arc<Mutex<String>>` the frontend drains after `run()` and forwards to the
+/// JS host via `postMessage`. The `Send` bound keeps [`VM`] `Send` for
+/// [`VMPool`]; a worker sink stays `Send` by writing to an `Arc<Mutex<_>>`
+/// rather than capturing a JS handle directly.
+pub type OutputSink = Box<dyn FnMut(&str) + Send>;
+
+/// Source for VM stdin (`Op::ReadLine`).
+///
+/// `None` — the default — reads a line from `std::io::stdin()`. When installed,
+/// the closure returns one line per call (newline already trimmed) or `None` at
+/// end of input, which `Op::ReadLine` pushes as `Value::Undef`. Blocking
+/// interactive stdin inside a worker needs `SharedArrayBuffer` + `Atomics.wait`
+/// and is the frontend's concern; this hook covers the common pre-loaded-input
+/// case.
+pub type InputSource = Box<dyn FnMut() -> Option<String> + Send>;
+
 /// Whether a value is one fusevm's numeric ops can compute on natively.
 #[inline(always)]
 fn is_native_num(v: &Value) -> bool {
@@ -310,6 +337,8 @@ impl VM {
             ip: 0,
             chunk,
             last_status: 0,
+            output_sink: None,
+            input_source: None,
             numeric_hook: None,
             fixnum_range: None,
             #[cfg(feature = "jit")]
@@ -362,6 +391,36 @@ impl VM {
         {
             // Eligibility is cached per chunk hash and is policy-dependent.
             self.block_eligible_cached = None;
+        }
+    }
+
+    /// Install an [`OutputSink`] so `Op::Print`/`Op::PrintLn` route through
+    /// `sink` instead of `std::io::stdout()`. Frontends running fusevm in a
+    /// browser web worker use this to capture output and bridge it to the JS
+    /// host (wasm has no real stdout). With no sink installed, output is
+    /// byte-for-byte identical to the previous direct-stdout behaviour.
+    pub fn set_output_sink(&mut self, sink: OutputSink) {
+        self.output_sink = Some(sink);
+    }
+
+    /// Install an [`InputSource`] so `Op::ReadLine` pulls from `source` instead
+    /// of `std::io::stdin()`. The closure returns one line per call (newline
+    /// trimmed) or `None` at end of input (pushed as `Value::Undef`).
+    pub fn set_input_source(&mut self, source: InputSource) {
+        self.input_source = Some(source);
+    }
+
+    /// Write `s` to the installed [`OutputSink`], or to `std::io::stdout()` when
+    /// none is set. Callers buffer the print args into one `s` first so the sink
+    /// borrow stays disjoint from the value stack.
+    fn emit_output(&mut self, s: &str) {
+        if let Some(sink) = self.output_sink.as_mut() {
+            sink(s);
+        } else {
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            let _ = lock.write_all(s.as_bytes());
         }
     }
 
@@ -1833,30 +1892,35 @@ impl VM {
             Op::Print(n) => {
                 let n = *n;
                 let start = self.stack.len().saturating_sub(n as usize);
-                use std::io::Write;
-                let stdout = std::io::stdout();
-                let mut lock = stdout.lock();
+                let mut out = String::new();
                 for v in &self.stack[start..] {
-                    let _ = write!(lock, "{}", v.as_str_cow());
+                    out.push_str(&v.as_str_cow());
                 }
                 self.stack.truncate(start);
+                self.emit_output(&out);
             }
             Op::PrintLn(n) => {
                 let n = *n;
                 let start = self.stack.len().saturating_sub(n as usize);
-                use std::io::Write;
-                let stdout = std::io::stdout();
-                let mut lock = stdout.lock();
+                let mut out = String::new();
                 for v in &self.stack[start..] {
-                    let _ = write!(lock, "{}", v.as_str_cow());
+                    out.push_str(&v.as_str_cow());
                 }
-                let _ = writeln!(lock);
+                out.push('\n');
                 self.stack.truncate(start);
+                self.emit_output(&out);
             }
             Op::ReadLine => {
-                let mut line = String::new();
-                let _ = std::io::stdin().read_line(&mut line);
-                self.push(Value::str(line.trim_end_matches('\n')));
+                if let Some(src) = self.input_source.as_mut() {
+                    match src() {
+                        Some(l) => self.push(Value::str(l)),
+                        None => self.push(Value::Undef),
+                    }
+                } else {
+                    let mut line = String::new();
+                    let _ = std::io::stdin().read_line(&mut line);
+                    self.push(Value::str(line.trim_end_matches('\n')));
+                }
             }
 
             // ── Fused superinstructions ──
@@ -2333,14 +2397,24 @@ impl VM {
                             let status = if let Some(h) = self.host.as_mut() {
                                 h.exec(args.clone())
                             } else {
-                                use std::process::{Command, Stdio};
-                                Command::new(cmd)
-                                    .args(&args[1..])
-                                    .stdout(Stdio::inherit())
-                                    .stderr(Stdio::inherit())
-                                    .status()
-                                    .map(|s| s.code().unwrap_or(1))
-                                    .unwrap_or(127)
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    use std::process::{Command, Stdio};
+                                    Command::new(cmd)
+                                        .args(&args[1..])
+                                        .stdout(Stdio::inherit())
+                                        .stderr(Stdio::inherit())
+                                        .status()
+                                        .map(|s| s.code().unwrap_or(1))
+                                        .unwrap_or(127)
+                                }
+                                // No process model in a browser worker; a
+                                // host-less wasm embedding reports 127.
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    let _ = cmd;
+                                    127
+                                }
                             };
                             self.push(Value::Status(status));
                         }
@@ -2375,12 +2449,20 @@ impl VM {
                     if let Some(h) = self.host.as_mut() {
                         let _ = h.exec_bg(args.clone());
                     } else {
-                        use std::process::{Command, Stdio};
-                        let _ = Command::new(cmd)
-                            .args(&args[1..])
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null())
-                            .spawn();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            use std::process::{Command, Stdio};
+                            let _ = Command::new(cmd)
+                                .args(&args[1..])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .spawn();
+                        }
+                        // No process model in a browser worker; drop the spawn.
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let _ = cmd;
+                        }
                     }
                 }
                 self.push(Value::Status(0));
@@ -2679,12 +2761,22 @@ impl VM {
                     let mut full = Vec::with_capacity(args.len() + 1);
                     full.push(name);
                     full.extend(args);
-                    use std::process::Command;
-                    Command::new(&full[0])
-                        .args(&full[1..])
-                        .status()
-                        .map(|s| s.code().unwrap_or(1))
-                        .unwrap_or(127)
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        use std::process::Command;
+                        Command::new(&full[0])
+                            .args(&full[1..])
+                            .status()
+                            .map(|s| s.code().unwrap_or(1))
+                            .unwrap_or(127)
+                    }
+                    // No process model in a browser worker; a host-less wasm
+                    // embedding reports 127 (command not found).
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = &full;
+                        127
+                    }
                 };
                 self.last_status = status;
                 self.push(Value::Status(status));
@@ -3019,11 +3111,7 @@ impl VM {
                 }
             }
             Op::TimeInt => {
-                let secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                self.push(Value::Int(secs));
+                self.push(Value::Int(crate::sysclock::unix_secs()));
             }
             Op::AwkArrayGet(n) => self.dispatch_awk(ab::AWK_ARRAY_GET, *n as usize),
             Op::AwkArraySet(n) => self.dispatch_awk(ab::AWK_ARRAY_SET, *n as usize),
@@ -5729,6 +5817,66 @@ mod tests {
         match vm.run() {
             VMResult::Error(msg) => assert!(msg.contains("compl"), "msg = {msg:?}"),
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    // ─── I/O hooks (web-worker bridging) ──────────────────────────────
+    // Target-independent: these exercise the OutputSink / InputSource paths
+    // that a wasm32 web-worker frontend installs, but run on any host.
+
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn output_sink_captures_print_and_println() {
+        // `print "a"; println "b"` → sink sees "a" then "b\n".
+        let mut b = ChunkBuilder::new();
+        let a = b.add_constant(Value::str("a"));
+        let bee = b.add_constant(Value::str("b"));
+        b.emit(Op::LoadConst(a), 1);
+        b.emit(Op::Print(1), 1);
+        b.emit(Op::LoadConst(bee), 1);
+        b.emit(Op::PrintLn(1), 1);
+        let captured = Arc::new(Mutex::new(String::new()));
+        let buf = Arc::clone(&captured);
+        let mut vm = VM::new(b.build());
+        vm.set_output_sink(Box::new(move |s: &str| buf.lock().unwrap().push_str(s)));
+        vm.run();
+        assert_eq!(*captured.lock().unwrap(), "ab\n");
+    }
+
+    #[test]
+    fn output_sink_receives_multi_arg_print_concatenated() {
+        // `print "x", 1, "y"` with three args → one contiguous "x1y".
+        let mut b = ChunkBuilder::new();
+        let x = b.add_constant(Value::str("x"));
+        let y = b.add_constant(Value::str("y"));
+        b.emit(Op::LoadConst(x), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadConst(y), 1);
+        b.emit(Op::Print(3), 1);
+        let captured = Arc::new(Mutex::new(String::new()));
+        let buf = Arc::clone(&captured);
+        let mut vm = VM::new(b.build());
+        vm.set_output_sink(Box::new(move |s: &str| buf.lock().unwrap().push_str(s)));
+        vm.run();
+        assert_eq!(*captured.lock().unwrap(), "x1y");
+    }
+
+    #[test]
+    fn input_source_feeds_readline_then_undef_at_eof() {
+        // Two ReadLines pull the source's two lines; a third past EOF is Undef.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::ReadLine, 1); // -> "first"  (popped last)
+        b.emit(Op::Pop, 1);
+        b.emit(Op::ReadLine, 1); // -> "second"
+        b.emit(Op::Pop, 1);
+        b.emit(Op::ReadLine, 1); // -> Undef (EOF)
+        let mut pending = vec!["second".to_string(), "first".to_string()];
+        let mut vm = VM::new(b.build());
+        vm.set_input_source(Box::new(move || pending.pop()));
+        match vm.run() {
+            VMResult::Ok(Value::Undef) => {}
+            other => panic!("expected Undef at EOF, got {other:?}"),
         }
     }
 }

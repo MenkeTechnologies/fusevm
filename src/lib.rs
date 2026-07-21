@@ -66,6 +66,9 @@ pub mod op;
 #[cfg(feature = "ffi")]
 pub mod rust_sugar;
 pub mod shell_builtins;
+/// Portable wall-clock reads (`chrono`-backed) so the VM's clock ops work on
+/// `wasm32` — where `std::time::SystemTime::now()` panics — as well as native.
+pub mod sysclock;
 pub mod value;
 pub mod vm;
 

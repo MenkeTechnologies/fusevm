@@ -156,6 +156,11 @@ pub trait ShellHost: Send {
     }
 
     /// Spawn an external command and wait. Default uses `std::process::Command`.
+    ///
+    /// On `wasm32` (a browser web worker) there is no process model, so the
+    /// default returns `127` (command-not-found) rather than attempting a spawn
+    /// — a worker frontend overrides this to bridge to the host environment.
+    #[cfg(not(target_arch = "wasm32"))]
     fn exec(&mut self, args: Vec<String>) -> i32 {
         use std::process::{Command, Stdio};
         let cmd = match args.first() {
@@ -171,10 +176,25 @@ pub trait ShellHost: Send {
             .unwrap_or(127)
     }
 
+    /// Spawn an external command and wait. On `wasm32` there is no process
+    /// model; returns `127` unless a worker frontend overrides it.
+    #[cfg(target_arch = "wasm32")]
+    fn exec(&mut self, args: Vec<String>) -> i32 {
+        if args.is_empty() {
+            0
+        } else {
+            127
+        }
+    }
+
     /// Spawn an external command in the background and detach. Returns the
     /// child pid (or 0 on failure / when the host doesn't track pids). Default
     /// uses `std::process::Command::spawn()`. Frontends override to register
     /// the pid in their job table so `jobs`, `fg`, `wait`, `disown` see it.
+    ///
+    /// On `wasm32` there is no process model; returns `0` (no pid tracked)
+    /// unless a worker frontend overrides it.
+    #[cfg(not(target_arch = "wasm32"))]
     fn exec_bg(&mut self, args: Vec<String>) -> i32 {
         use std::process::{Command, Stdio};
         let cmd = match args.first() {
@@ -188,6 +208,13 @@ pub trait ShellHost: Send {
             .spawn()
             .map(|c| c.id() as i32)
             .unwrap_or(0)
+    }
+
+    /// Spawn an external command in the background. On `wasm32` there is no
+    /// process model; returns `0` unless a worker frontend overrides it.
+    #[cfg(target_arch = "wasm32")]
+    fn exec_bg(&mut self, _args: Vec<String>) -> i32 {
+        0
     }
 
     /// Glob match: does `s` match the shell glob pattern `pat`?

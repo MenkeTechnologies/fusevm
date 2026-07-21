@@ -607,13 +607,11 @@ fn awk_numeric_prefix_acceptable(p: &str, has_trailing_alnum: bool) -> bool {
 // ── Time builtins (gawk; only the dep-free clock read is native) ────────────
 
 /// gawk `systime` — seconds since the Unix epoch as a float. Ported faithfully
-/// from awkrs (`builtins::awk_systime`). Pure `std::time`, zero deps.
+/// from awkrs (`builtins::awk_systime`). Reads the clock through
+/// [`crate::sysclock`] so it works on `wasm32` (where `SystemTime::now()`
+/// panics) as well as native.
 pub fn awk_systime() -> f64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    crate::sysclock::unix_secs_f64()
 }
 
 // ── PRNG builtins (POSIX/gawk; glibc LCG over a VM-owned seed, host-free) ────
@@ -632,12 +630,7 @@ pub fn awk_rand(seed: &mut u64) -> f64 {
 /// gawk non-bignum truncation `v as u32 as u64`.
 pub fn awk_srand(seed: &mut u64, n: Option<u64>) -> f64 {
     let prev = *seed;
-    *seed = n.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() ^ (d.subsec_nanos() as u64))
-            .unwrap_or(1)
-    });
+    *seed = n.unwrap_or_else(crate::sysclock::unix_nanos_entropy);
     (prev & 0xffff_ffff) as f64
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "fusevm"
-version = "0.14.11"
+version = "0.14.12"
 edition = "2021"
 description = "Language-agnostic bytecode VM with fused superinstructions and a 3-tier Cranelift JIT (linear/block/tracing)"
 license = "MIT"
@@ -60,6 +60,11 @@ ffi = ["dep:libc", "dep:sha2", "dep:base64"]
 [dev-dependencies]
 serde_json = "1"
 bincode = "1"
+
+# criterion pulls in rayon, which fails to compile for wasm targets. Benches are
+# native-only, so gate it off wasm — this keeps `cargo build/test` for
+# wasm32-unknown-unknown (web-worker target) working with dev-dependencies.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
