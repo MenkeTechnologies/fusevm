@@ -1379,7 +1379,8 @@ impl VM {
                             | Op::ChanSend
                             | Op::ChanRecv
                             | Op::ChanClose
-                            | Op::Select(_, _) => rec.aborted = true,
+                            | Op::Select(_, _)
+                            | Op::CallDynamic(_) => rec.aborted = true,
                             _ => {}
                         }
                     }
@@ -3219,6 +3220,22 @@ impl VM {
                 self.sched = Some(crate::sched::SchedReq::Close { ch });
                 self.halted = true;
             }
+            Op::CallDynamic(argc) => {
+                // The subroutine name-index is on top; the `argc` args are below.
+                let name_idx = self.pop().to_int() as u16;
+                if let Some(entry_ip) = self.chunk.find_sub(name_idx) {
+                    self.frames.push(Frame {
+                        return_ip: self.ip,
+                        stack_base: self.stack.len() - *argc as usize,
+                        slots: Vec::new(),
+                    });
+                    self.ip = entry_ip;
+                } else {
+                    return ExecFlow::Ret(VMResult::Error(
+                        "call of a nil or unknown function value".to_string(),
+                    ));
+                }
+            }
             Op::Select(num_cases, has_default) => {
                 let n = *num_cases as usize;
                 let mut raw = Vec::with_capacity(n * 3);
@@ -4314,6 +4331,25 @@ mod tests {
             VMResult::Ok(Value::Int(4950)) => {}
             other => panic!("expected Int(4950), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_call_dynamic() {
+        let mut b = ChunkBuilder::new();
+        let dbl = b.add_name("double");
+        // main: push 21, push name_idx of "double", CallDynamic(1)
+        b.emit(Op::LoadInt(21), 1);
+        b.emit(Op::LoadInt(dbl as i64), 1);
+        b.emit(Op::CallDynamic(1), 1);
+        let end = b.emit(Op::Jump(0), 1);
+        let ip = b.current_pos();
+        b.add_sub_entry(dbl, ip);
+        b.emit(Op::LoadInt(2), 2);
+        b.emit(Op::Mul, 2);
+        b.emit(Op::ReturnValue, 2);
+        b.patch_jump(end, b.current_pos());
+        let mut vm = VM::new(b.build());
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Int(42))));
     }
 
     #[test]

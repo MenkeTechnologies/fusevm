@@ -636,6 +636,13 @@ pub enum Op {
     /// values (`ch, is_recv, send_val` per case) and, with `has_default`, raises
     /// a scheduling request. Pushes `[recv_value, case_index]`.
     Select(u8, u8),
+
+    /// Indirect call: like `Op::Call(name_idx, argc)` but the subroutine
+    /// name-index is popped from the top of the stack (below it sit the `argc`
+    /// arguments). Lets a frontend call a function value whose target is only
+    /// known at run time (closures passed as arguments, function-typed fields).
+    /// Additive; frontends that never emit it are unaffected.
+    CallDynamic(u8),
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -801,6 +808,7 @@ impl Hash for Op {
                 n.hash(state);
                 deflt.hash(state);
             }
+            Op::CallDynamic(argc) => argc.hash(state),
             Op::CallBuiltin(id, argc) => {
                 id.hash(state);
                 argc.hash(state);
