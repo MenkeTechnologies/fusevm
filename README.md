@@ -45,6 +45,7 @@ cargo add fusevm                  # interpreter only
 - [\[0x09\] Value Representation](#0x09-value-representation)
 - [\[0x0A\] Benchmarks](#0x0a-benchmarks)
 - [\[0x0B\] WebAssembly / Web Worker](#0x0b-webassembly--web-worker)
+- [\[0x0C\] Cooperative Concurrency](#0x0c-cooperative-concurrency)
 - [\[0xFF\] License](#0xff-license)
 
 ---
@@ -705,6 +706,49 @@ self.onmessage = (e) => self.postMessage(run_source(e.data));
   frontend's responsibility.
 - **Filesystem/glob.** `ShellHost::glob` and awk file `getline` have no fs in a
   worker; override the relevant host methods to bridge as needed.
+
+---
+
+## [0x0C] COOPERATIVE CONCURRENCY
+
+`sched::Scheduler` layers green-thread **goroutines and channels** over the
+single-VM dispatch loop, so a frontend (e.g. Go) can express `go`, `make(chan)`,
+`<-`, and `close` without a bespoke runtime.
+
+Each goroutine is its own `VM` sharing the program `Chunk` and the frontend's
+thread-local heap. Five interpreter-only ops raise a scheduling request in the
+VM and halt the chunk — the same "op stashes a value, halts, driver reads it
+after `run()`" pattern as `Op::AwkSignal`:
+
+| Op | Meaning |
+|---|---|
+| `Go(name_idx, argc)` | spawn a goroutine running sub `name_idx` with `argc` args |
+| `ChanMake` | allocate a channel (capacity popped); pushes its id |
+| `ChanSend` | send the popped value on the popped channel (may block) |
+| `ChanRecv` | receive from the popped channel, pushing the value (may block) |
+| `ChanClose` | close the popped channel |
+
+The scheduler owns the channel table and a run queue, reads each request via
+`VM::take_sched`, and resumes a VM by delivering results directly onto its stack
+(the op has already advanced `ip`, so a resumed VM continues *past* the op — no
+rewind, no re-execution). Channels follow CSP semantics: a buffered channel holds
+up to `cap` values; an unbuffered channel hands a value straight from a blocked
+sender to a blocked receiver. When every goroutine is blocked, the scheduler
+reports a deadlock (`all goroutines are asleep`).
+
+```rust
+use fusevm::{Scheduler, VM};
+
+// `chunk` emits Go/ChanMake/ChanSend/ChanRecv; `make_vm` builds a fresh,
+// fully-configured VM per goroutine (same chunk + builtins + hooks).
+let fc = chunk.clone();
+Scheduler::new(move || VM::new(fc.clone())).run(VM::new(chunk))?;
+```
+
+The model is single-threaded and cooperative — goroutines yield only at channel
+operations and completion — which is faithful for channel-driven programs
+without the data races an OS-thread model would introduce over a thread-local
+heap. Frontends that never emit these ops are wholly unaffected.
 
 ---
 

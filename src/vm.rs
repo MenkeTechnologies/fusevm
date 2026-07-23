@@ -172,6 +172,13 @@ pub struct VM {
     /// `None` unless an awk frontend emitted `Op::AwkSignal`; zshrs/stryke never
     /// do, so for them this stays `None` and `Halted` behaves exactly as before.
     awk_signal: Option<u8>,
+    /// Cooperative-concurrency scheduling request raised by a goroutine/channel
+    /// op (`Op::Go`/`ChanMake`/`ChanSend`/`ChanRecv`/`ChanClose`): the op stores
+    /// the request here and halts the chunk, and a [`crate::sched::Scheduler`]
+    /// driver reads it via [`VM::take_sched`] after `run()` returns, then resumes
+    /// this VM (or another goroutine). `None` unless a frontend emits those ops,
+    /// so zshrs/stryke/etc. behave exactly as before.
+    sched: Option<crate::sched::SchedReq>,
     /// Halted flag
     halted: bool,
     /// Tracing JIT enabled. When true, backward branches consult the trace
@@ -350,6 +357,7 @@ impl VM {
             awk_host: None,
             awk_rand_seed: 1,
             awk_signal: None,
+            sched: None,
             halted: false,
             #[cfg(feature = "jit")]
             tracing_jit: false,
@@ -543,6 +551,21 @@ impl VM {
     /// the case for zshrs/stryke, which never emit `Op::AwkSignal`).
     pub fn awk_signal(&self) -> Option<u8> {
         self.awk_signal
+    }
+
+    /// Take the pending cooperative-concurrency scheduling request, if any. The
+    /// [`crate::sched::Scheduler`] driver calls this after `run()` returns: `Some`
+    /// means a goroutine/channel op halted the VM to request scheduling; `None`
+    /// means the VM finished (or halted for another reason). Clears the slot.
+    pub fn take_sched(&mut self) -> Option<crate::sched::SchedReq> {
+        self.sched.take()
+    }
+
+    /// Clear the halt flag so a parked goroutine VM resumes on the next `run()`
+    /// (which continues from the current `ip`, past the op that parked it). Used
+    /// by [`crate::sched::Scheduler`]; a plain schedulerless `run()` never needs it.
+    pub fn clear_halt(&mut self) {
+        self.halted = false;
     }
 
     /// Register a handler for `Op::Extended(id, arg)` opcodes.
@@ -1107,6 +1130,9 @@ impl VM {
         // reused VM. (zshrs/stryke never emit `Op::AwkSignal`, so this stays
         // `None` for them.)
         self.awk_signal = None;
+        // A prior park request is consumed by the scheduler before it resumes
+        // this VM; clear any stragglers so a plain (schedulerless) run is unaffected.
+        self.sched = None;
         // Phase 10: try block JIT first for fully-eligible chunks. The
         // block-JIT cache has its own threshold (10 invocations); the
         // call returns None until it warms up, at which point the whole
@@ -1347,6 +1373,12 @@ impl VM {
                             | Op::AwkArrayClear(_)
                             | Op::AwkArrayLen(_) => rec.aborted = true,
                             Op::AwkSignal(_) => rec.aborted = true,
+                            // Concurrency ops halt for the scheduler; never trace.
+                            Op::Go(_, _)
+                            | Op::ChanMake
+                            | Op::ChanSend
+                            | Op::ChanRecv
+                            | Op::ChanClose => rec.aborted = true,
                             _ => {}
                         }
                     }
@@ -2721,7 +2753,11 @@ impl VM {
                     .collect();
                 let status = if self.host.is_some() {
                     // alias/function/host-table builtin resolution.
-                    let cf = self.host.as_mut().unwrap().call_function(&name, args.clone());
+                    let cf = self
+                        .host
+                        .as_mut()
+                        .unwrap()
+                        .call_function(&name, args.clone());
                     match cf {
                         Some(s) => s,
                         None => {
@@ -3141,6 +3177,45 @@ impl VM {
                 // Raise the AWK control-flow signal and halt this chunk; the
                 // frontend driver reads `self.awk_signal()` after `run()`.
                 self.awk_signal = Some(*code);
+                self.halted = true;
+            }
+
+            // ── cooperative concurrency: raise a scheduling request + halt ──
+            // The op has already advanced `self.ip`, so on resume `run()`
+            // continues past it — the scheduler delivers any result (a channel
+            // id, a received value) by pushing onto this VM's stack first.
+            Op::Go(name_idx, argc) => {
+                let n = *argc as usize;
+                let mut args = Vec::with_capacity(n);
+                for _ in 0..n {
+                    args.push(self.pop());
+                }
+                args.reverse();
+                self.sched = Some(crate::sched::SchedReq::Go {
+                    name_idx: *name_idx,
+                    args,
+                });
+                self.halted = true;
+            }
+            Op::ChanMake => {
+                let cap = self.pop().to_int().max(0) as usize;
+                self.sched = Some(crate::sched::SchedReq::Make { cap });
+                self.halted = true;
+            }
+            Op::ChanSend => {
+                let val = self.pop();
+                let ch = self.pop().to_int();
+                self.sched = Some(crate::sched::SchedReq::Send { ch, val });
+                self.halted = true;
+            }
+            Op::ChanRecv => {
+                let ch = self.pop().to_int();
+                self.sched = Some(crate::sched::SchedReq::Recv { ch });
+                self.halted = true;
+            }
+            Op::ChanClose => {
+                let ch = self.pop().to_int();
+                self.sched = Some(crate::sched::SchedReq::Close { ch });
                 self.halted = true;
             }
         }
@@ -4614,7 +4689,9 @@ mod tests {
         let out = vm.run_builtin_by_name("true", &["x".to_string(), "y".to_string()]);
         assert!(matches!(out, Some(Value::Int(7))));
         // Unknown / unregistered names return None (caller falls through).
-        assert!(vm.run_builtin_by_name("definitely_not_a_builtin_xyz", &[]).is_none());
+        assert!(vm
+            .run_builtin_by_name("definitely_not_a_builtin_xyz", &[])
+            .is_none());
     }
 
     #[test]

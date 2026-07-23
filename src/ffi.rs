@@ -165,8 +165,7 @@ pub fn compile_and_register(body_b64: &str) -> Result<(), String> {
     let body = base64::engine::general_purpose::STANDARD
         .decode(body_b64)
         .map_err(|e| format!("rust FFI: invalid base64 body: {e}"))?;
-    let body =
-        String::from_utf8(body).map_err(|e| format!("rust FFI: non-utf8 body: {e}"))?;
+    let body = String::from_utf8(body).map_err(|e| format!("rust FFI: non-utf8 body: {e}"))?;
 
     // Hash the body (not the wrapped crate source): same body → same dylib
     // unless the wrapper template (and thus the salt) changes.
@@ -189,9 +188,11 @@ pub fn compile_and_register(body_b64: &str) -> Result<(), String> {
 
     let decls = parse_extern_fns(&body);
     if decls.is_empty() {
-        return Err("rust FFI: no `pub extern \"C\" fn ...` declarations found in block — \
+        return Err(
+            "rust FFI: no `pub extern \"C\" fn ...` declarations found in block — \
                     v1 requires at least one exported function"
-            .to_string());
+                .to_string(),
+        );
     }
 
     let free_sym = dlsym_optional(handle, "fusevm_free_cstring");
@@ -247,7 +248,10 @@ fn ffi_cache_dir() -> Result<PathBuf, String> {
     } else if let Ok(cache) = std::env::var("XDG_CACHE_HOME") {
         PathBuf::from(cache).join("fusevm").join("ffi")
     } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".cache").join("fusevm").join("ffi")
+        PathBuf::from(home)
+            .join(".cache")
+            .join("fusevm")
+            .join("ffi")
     } else {
         return Err("rust FFI: cannot locate cache dir (no $HOME / $XDG_CACHE_HOME)".to_string());
     };

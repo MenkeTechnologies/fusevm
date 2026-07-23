@@ -65,6 +65,10 @@ pub mod op;
 /// `ffi` feature (needs `base64` to encode block bodies).
 #[cfg(feature = "ffi")]
 pub mod rust_sugar;
+/// Cooperative goroutine scheduler + channels. A green-thread layer over the
+/// single-VM dispatch loop: frontends emit `Op::Go`/`ChanMake`/`ChanSend`/
+/// `ChanRecv`/`ChanClose` and drive them with [`sched::Scheduler`].
+pub mod sched;
 pub mod shell_builtins;
 /// Portable wall-clock reads (`chrono`-backed) so the VM's clock ops work on
 /// `wasm32` — where `std::time::SystemTime::now()` panics — as well as native.
@@ -74,13 +78,14 @@ pub mod vm;
 
 pub use awk_host::{AwkHost, AwkLvalue, DefaultAwkHost};
 pub use chunk::{Chunk, ChunkBuilder};
-#[cfg(feature = "ffi")]
-pub use rust_sugar::RustSugar;
 pub use host::{DefaultHost, ShellHost};
 pub use jit::{
     set_awk_field_num_hook, BlockNum, DeoptFrame, DeoptInfo, JitCompiler, JitExtension, NativeCode,
     SlotKind, TraceJitConfig, TraceLookup, TraceMetadata,
 };
 pub use op::Op;
+#[cfg(feature = "ffi")]
+pub use rust_sugar::RustSugar;
+pub use sched::{SchedError, SchedReq, Scheduler};
 pub use value::Value;
 pub use vm::{Frame, NumOp, NumericHook, VMPool, VMResult, VM};

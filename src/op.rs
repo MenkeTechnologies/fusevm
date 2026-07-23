@@ -614,6 +614,24 @@ pub enum Op {
     /// `fusevm::Value` representation, so it is a VM-state side effect rather
     /// than a stack value. zshrs/stryke never emit it. Interpreter-only.
     AwkSignal(u8),
+
+    // ── Cooperative concurrency (goroutines + channels) ──────────────────────
+    //
+    // These raise a scheduling request in the VM (`self.sched`) and halt the
+    // chunk; a [`crate::sched::Scheduler`] driver reads it after `run()` and
+    // resumes the VM (or another goroutine). Like `AwkSignal`, they are a
+    // VM-state side effect the interpreter handles and the tracing JIT aborts on;
+    // frontends that never emit them are wholly unaffected.
+    /// Spawn a goroutine running sub `name_idx` with `argc` popped args.
+    Go(u16, u8),
+    /// Make a channel with the capacity popped from the stack; pushes its id.
+    ChanMake,
+    /// Send the popped value on the popped channel (may block).
+    ChanSend,
+    /// Receive from the popped channel, pushing the received value (may block).
+    ChanRecv,
+    /// Close the popped channel.
+    ChanClose,
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -768,6 +786,10 @@ impl Hash for Op {
             | Op::JumpIfTrueKeep(t)
             | Op::JumpIfFalseKeep(t) => t.hash(state),
             Op::Call(name, argc) => {
+                name.hash(state);
+                argc.hash(state);
+            }
+            Op::Go(name, argc) => {
                 name.hash(state);
                 argc.hash(state);
             }
@@ -974,7 +996,11 @@ impl Hash for Op {
             | Op::AwkChr
             | Op::AwkMkbool
             | Op::AwkIntdiv
-            | Op::AwkIntdiv0 => {}
+            | Op::AwkIntdiv0
+            | Op::ChanMake
+            | Op::ChanSend
+            | Op::ChanRecv
+            | Op::ChanClose => {}
         }
     }
 }

@@ -634,8 +634,8 @@ fn heap_op_effect(op: &Op) -> Option<(usize, Option<Kind>)> {
         Op::ExpandParam(m) => {
             use crate::op::param_mod::*;
             let argc = match *m {
-                DEFAULT | ASSIGN | ERROR | ALTERNATE | STRIP_SHORT | STRIP_LONG
-                | RSTRIP_SHORT | RSTRIP_LONG => 1,
+                DEFAULT | ASSIGN | ERROR | ALTERNATE | STRIP_SHORT | STRIP_LONG | RSTRIP_SHORT
+                | RSTRIP_LONG => 1,
                 SUBST_FIRST | SUBST_ALL | SLICE => 2,
                 _ => 0,
             };
@@ -651,9 +651,7 @@ fn heap_op_effect(op: &Op) -> Option<(usize, Option<Kind>)> {
         // end-to-end in awkrs.
         Op::AwkToLower | Op::AwkToUpper => (1, Some(Kind::Obj)),
         Op::AwkIndex => (2, Some(Kind::Obj)),
-        Op::AwkLength(n) | Op::AwkSubstr(n) | Op::AwkSprintf(n) => {
-            (*n as usize, Some(Kind::Obj))
-        }
+        Op::AwkLength(n) | Op::AwkSubstr(n) | Op::AwkSprintf(n) => (*n as usize, Some(Kind::Obj)),
         Op::AwkPrint(n) | Op::AwkPrintf(n) => (*n as usize, None),
         // NOTE: `split`/`sub`/`gsub`/`match` are intentionally NOT lowered here.
         // The engine could (pure stack effect, counts boxed), but awkrs's own AOT
@@ -1287,7 +1285,11 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 let a = st.pop()?;
                 deopt_unless!(a.is_numeric());
                 // Int → Int; Float/Status → Float (`-to_float`).
-                st.push(if a == Kind::Int { Kind::Int } else { Kind::Float });
+                st.push(if a == Kind::Int {
+                    Kind::Int
+                } else {
+                    Kind::Float
+                });
                 succs.push((ip + 1, st, inits));
             }
             // `$?` — always pushes a `Status` value; reloads into a register.
@@ -2570,9 +2572,10 @@ fn build_entry_native<M: Module>(
 
                     b.switch_to_block(err_blk);
                     let vm = b.use_var(vm_var);
-                    let code = b
-                        .ins()
-                        .iconst(types::I32, if matches!(op, Op::AwkLshiftJit) { 2 } else { 3 });
+                    let code = b.ins().iconst(
+                        types::I32,
+                        if matches!(op, Op::AwkLshiftJit) { 2 } else { 3 },
+                    );
                     b.ins().call(serr_ref, &[vm, code]);
                     let st0 = b.ins().iconst(types::I64, 0);
                     b.ins().return_(&[st0]);
@@ -2837,9 +2840,14 @@ fn build_entry_native<M: Module>(
                 op @ (Op::PreIncSlot(slot) | Op::PreDecSlot(slot)) => {
                     let sv = slot_vars[*slot as usize];
                     let old = b.use_var(sv);
-                    let nv = b
-                        .ins()
-                        .iadd_imm(old, if matches!(op, Op::PreIncSlot(_)) { 1 } else { -1 });
+                    let nv = b.ins().iadd_imm(
+                        old,
+                        if matches!(op, Op::PreIncSlot(_)) {
+                            1
+                        } else {
+                            -1
+                        },
+                    );
                     b.def_var(sv, nv);
                     let idx = kinds.len();
                     b.def_var(ivars[idx], nv); // pre: push the new value
@@ -2848,9 +2856,14 @@ fn build_entry_native<M: Module>(
                 op @ (Op::PostIncSlot(slot) | Op::PostDecSlot(slot)) => {
                     let sv = slot_vars[*slot as usize];
                     let old = b.use_var(sv);
-                    let nv = b
-                        .ins()
-                        .iadd_imm(old, if matches!(op, Op::PostIncSlot(_)) { 1 } else { -1 });
+                    let nv = b.ins().iadd_imm(
+                        old,
+                        if matches!(op, Op::PostIncSlot(_)) {
+                            1
+                        } else {
+                            -1
+                        },
+                    );
                     b.def_var(sv, nv);
                     let idx = kinds.len();
                     b.def_var(ivars[idx], old); // post: push the old value
@@ -2903,8 +2916,7 @@ fn build_entry_native<M: Module>(
                     let v = b.use_var(slot_vars[*slot as usize]);
                     // jump to target when slot >= limit, i.e. NOT (slot < limit).
                     let lt = b.ins().icmp_imm(IntCC::SignedLessThan, v, *limit as i64);
-                    b.ins()
-                        .brif(lt, block_for(ip + 1), &[], block_for(*t), &[]);
+                    b.ins().brif(lt, block_for(ip + 1), &[], block_for(*t), &[]);
                     terminated = true;
                 }
                 Op::SlotIncLtIntJumpBack(slot, limit, t) => {
@@ -2914,8 +2926,7 @@ fn build_entry_native<M: Module>(
                     b.def_var(sv, nv);
                     // jump back to target while the incremented slot < limit.
                     let lt = b.ins().icmp_imm(IntCC::SignedLessThan, nv, *limit as i64);
-                    b.ins()
-                        .brif(lt, block_for(*t), &[], block_for(ip + 1), &[]);
+                    b.ins().brif(lt, block_for(*t), &[], block_for(ip + 1), &[]);
                     terminated = true;
                 }
                 Op::Pop => {
@@ -3413,7 +3424,10 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
     );
     builder.symbol("fusevm_aot_resume", fusevm_aot_resume as *const u8);
     builder.symbol("fusevm_aot_pop_int", fusevm_aot_pop_int as *const u8);
-    builder.symbol("fusevm_aot_push_status", fusevm_aot_push_status as *const u8);
+    builder.symbol(
+        "fusevm_aot_push_status",
+        fusevm_aot_push_status as *const u8,
+    );
     builder.symbol("fusevm_aot_box", fusevm_aot_box as *const u8);
     builder.symbol("fusevm_aot_unbox", fusevm_aot_unbox as *const u8);
     builder.symbol("fusevm_aot_clone", fusevm_aot_clone as *const u8);
@@ -3590,7 +3604,10 @@ mod tests {
         b.emit(Op::Mul, 1);
         let chunk = b.build();
         // This chunk must take the native fast path (no shim), and be correct.
-        assert!(native_lowerable(&chunk), "arithmetic chunk should lower natively");
+        assert!(
+            native_lowerable(&chunk),
+            "arithmetic chunk should lower natively"
+        );
         assert_native_matches_interp(chunk);
     }
 
@@ -3642,7 +3659,10 @@ mod tests {
         let mut bad = ChunkBuilder::new();
         bad.emit(Op::LoadInt(1), 1);
         bad.emit(Op::Add, 1);
-        assert!(!native_lowerable(&bad.build()), "underflow must be rejected");
+        assert!(
+            !native_lowerable(&bad.build()),
+            "underflow must be rejected"
+        );
     }
 
     #[test]
@@ -3695,7 +3715,10 @@ mod tests {
         b.patch_jump(j, end_ip);
         b.emit(Op::GetSlot(0), 1);
         let chunk = b.build();
-        assert!(native_lowerable(&chunk), "both-path assignment should lower");
+        assert!(
+            native_lowerable(&chunk),
+            "both-path assignment should lower"
+        );
         match run_chunk_native(&chunk, |_| {}).expect("native run") {
             VMResult::Ok(v) => assert_eq!(v, Value::Int(2)),
             other => panic!("expected Ok(2), got {other:?}"),
@@ -3749,7 +3772,10 @@ mod tests {
         b.patch_jump(exit, end);
         b.emit(Op::GetSlot(0), 1);
         let chunk = b.build();
-        assert!(native_lowerable(&chunk), "float accumulator loop should lower");
+        assert!(
+            native_lowerable(&chunk),
+            "float accumulator loop should lower"
+        );
         match run_chunk_native(&chunk, |_| {}).expect("run") {
             VMResult::Ok(v) => assert_eq!(v, Value::Float(2.5)),
             other => panic!("got {other:?}"),
@@ -3826,7 +3852,10 @@ mod tests {
         b.patch_jump(j, end_ip);
         let chunk = b.build();
         // Control flow + comparison now lower natively.
-        assert!(native_lowerable(&chunk), "branch chunk should lower natively");
+        assert!(
+            native_lowerable(&chunk),
+            "branch chunk should lower natively"
+        );
         assert_native_matches_interp(chunk);
     }
 
@@ -3953,7 +3982,10 @@ mod tests {
                 b.patch_jump(j, end_ip);
             }
             let chunk = b.build();
-            assert!(native_lowerable(&chunk), "generated chunk must lower natively");
+            assert!(
+                native_lowerable(&chunk),
+                "generated chunk must lower natively"
+            );
             assert_native_matches_interp(chunk);
         }
     }
@@ -4062,7 +4094,10 @@ mod tests {
         b.emit(Op::LoadInt(4), 1); // native
         b.emit(Op::Concat, 1); // non-lowerable → deopt; "5" + "4" = "54"
         let chunk = b.build();
-        assert!(native_lowerable(&chunk), "mixed chunk should lower (with deopt)");
+        assert!(
+            native_lowerable(&chunk),
+            "mixed chunk should lower (with deopt)"
+        );
         match run_chunk_native(&chunk, |_| {}).expect("run") {
             VMResult::Ok(v) => assert_eq!(v, Value::str("54")),
             other => panic!("got {other:?}"),
@@ -4139,7 +4174,10 @@ mod tests {
             assert!(native_lowerable(&chunk), "expr (±Concat) should lower");
             assert_native_matches_interp(chunk);
         }
-        assert!(deopted > 100, "expected many deopting chunks, got {deopted}");
+        assert!(
+            deopted > 100,
+            "expected many deopting chunks, got {deopted}"
+        );
     }
 
     #[test]
@@ -4232,7 +4270,10 @@ mod tests {
         b.emit(Op::LoadConst(c), 1);
         b.emit(Op::Concat, 1); // "ab"
         let chunk = b.build();
-        assert!(native_lowerable(&chunk), "boxed concat should lower natively");
+        assert!(
+            native_lowerable(&chunk),
+            "boxed concat should lower natively"
+        );
         assert_native_matches_interp(chunk);
 
         // Mixed scalar/boxed operands: "n=" . (2 + 3) → "n=5". The arithmetic
@@ -4249,7 +4290,11 @@ mod tests {
         // Three-way concat (boxed result fed back into Concat): "a"."b"."c".
         let mut b = ChunkBuilder::new();
         let k = |s| Value::str(s);
-        let (x, y, z) = (b.add_constant(k("a")), b.add_constant(k("b")), b.add_constant(k("c")));
+        let (x, y, z) = (
+            b.add_constant(k("a")),
+            b.add_constant(k("b")),
+            b.add_constant(k("c")),
+        );
         b.emit(Op::LoadConst(x), 1);
         b.emit(Op::LoadConst(y), 1);
         b.emit(Op::Concat, 1);
@@ -4452,7 +4497,10 @@ mod tests {
         b.emit(Op::ArrayPush(0), 1); // name 0 as an array → overlap
         b.emit(Op::GetVar(0), 1);
         let chunk = b.build();
-        assert!(!native_lowerable(&chunk), "global/array name overlap must bail");
+        assert!(
+            !native_lowerable(&chunk),
+            "global/array name overlap must bail"
+        );
         assert_native_matches_interp(chunk);
     }
 
@@ -4605,7 +4653,10 @@ mod tests {
         b.emit(Op::LoadInt(5), 1);
         b.emit(Op::Add, 1); // Bool + Int → deopt → Float
         let chunk = b.build();
-        assert!(native_lowerable(&chunk), "type-mismatch chunk partial-lowers");
+        assert!(
+            native_lowerable(&chunk),
+            "type-mismatch chunk partial-lowers"
+        );
         assert_native_matches_interp(chunk);
 
         // SetSlot of a Bool deopts; the slot is then read back by the interp.
@@ -4630,7 +4681,10 @@ mod tests {
         b.emit(Op::LoadConst(c), 1); // heap constant → deopt
         b.emit(Op::Concat, 1); // "42" + "!" = "42!"
         let chunk = b.build();
-        assert!(native_lowerable(&chunk), "native prefix + heap const should lower");
+        assert!(
+            native_lowerable(&chunk),
+            "native prefix + heap const should lower"
+        );
         match run_chunk_native(&chunk, |_| {}).expect("run") {
             VMResult::Ok(v) => assert_eq!(v, Value::str("42!")),
             other => panic!("got {other:?}"),
@@ -4730,9 +4784,9 @@ mod tests {
         // Normal, plus the two guarded divisors (% 0 and % -1 both → 0).
         for (x, y, want) in [
             (7, 3, 1),
-            (-7, 3, -1),  // truncated remainder (sign of dividend)
+            (-7, 3, -1), // truncated remainder (sign of dividend)
             (7, -3, 1),
-            (10, 0, 0),   // interpreter's y==0 → 0
+            (10, 0, 0),        // interpreter's y==0 → 0
             (i64::MIN, -1, 0), // x % -1 == 0, and dodges the srem trap
             (123_456, 1000, 456),
         ] {
@@ -5097,7 +5151,10 @@ mod tests {
         b.patch_jump(exit, end);
         b.emit(Op::GetSlot(0), 1);
         let chunk = b.build();
-        assert!(native_lowerable(&chunk), "loop with embedded sink should lower");
+        assert!(
+            native_lowerable(&chunk),
+            "loop with embedded sink should lower"
+        );
         assert_native_int(chunk, 3); // 0+1+2
     }
 
@@ -5240,7 +5297,14 @@ mod tests {
             b.emit(Op::LoadFloat(a), 1);
             if next() & 1 == 0 {
                 b.emit(Op::LoadFloat(n), 1);
-                b.emit(if next() & 2 == 0 { Op::AwkLshiftJit } else { Op::AwkRshiftJit }, 1);
+                b.emit(
+                    if next() & 2 == 0 {
+                        Op::AwkLshiftJit
+                    } else {
+                        Op::AwkRshiftJit
+                    },
+                    1,
+                );
             } else {
                 b.emit(Op::AwkComplJit, 1);
             }
@@ -5292,7 +5356,11 @@ mod tests {
         for _ in 0..300 {
             let a = next() as i64;
             let bb = next() as i64;
-            let op = if next() & 1 == 0 { Op::GcdInt } else { Op::LcmInt };
+            let op = if next() & 1 == 0 {
+                Op::GcdInt
+            } else {
+                Op::LcmInt
+            };
             let mut b = ChunkBuilder::new();
             b.emit(Op::LoadInt(a), 1);
             b.emit(Op::LoadInt(bb), 1);
@@ -5407,7 +5475,10 @@ mod tests {
         let mut b = ChunkBuilder::new();
         b.emit(Op::GetVar(0), 1);
         let chunk = b.build();
-        assert!(!native_lowerable(&chunk), "unset global read must fall back");
+        assert!(
+            !native_lowerable(&chunk),
+            "unset global read must fall back"
+        );
         assert_native_matches_interp(chunk);
     }
 
@@ -5739,7 +5810,10 @@ mod tests {
                 assert_native_matches_interp(chunk);
             }
         }
-        assert!(lowered > 50, "expected many float chunks to lower, got {lowered}");
+        assert!(
+            lowered > 50,
+            "expected many float chunks to lower, got {lowered}"
+        );
     }
 
     #[test]
@@ -5789,4 +5863,3 @@ mod tests {
         let _ = std::fs::remove_file(&obj);
     }
 }
-

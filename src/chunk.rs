@@ -82,7 +82,11 @@ impl Chunk {
         if !self.sub_entries.is_empty() {
             let _ = writeln!(out, "{indent}; sub_entries:");
             for (ni, ip) in &self.sub_entries {
-                let name = self.names.get(*ni as usize).map(String::as_str).unwrap_or("?");
+                let name = self
+                    .names
+                    .get(*ni as usize)
+                    .map(String::as_str)
+                    .unwrap_or("?");
                 let _ = writeln!(out, "{indent};   {name} @ {ip}");
             }
         }
