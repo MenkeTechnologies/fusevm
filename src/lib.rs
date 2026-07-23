@@ -86,6 +86,6 @@ pub use jit::{
 pub use op::Op;
 #[cfg(feature = "ffi")]
 pub use rust_sugar::RustSugar;
-pub use sched::{SchedError, SchedReq, Scheduler};
+pub use sched::{SchedError, SchedReq, Scheduler, SelectCase};
 pub use value::Value;
 pub use vm::{Frame, NumOp, NumericHook, VMPool, VMResult, VM};

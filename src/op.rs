@@ -632,6 +632,10 @@ pub enum Op {
     ChanRecv,
     /// Close the popped channel.
     ChanClose,
+    /// `select` over `num_cases` channel ops. Pops `num_cases * 3` descriptor
+    /// values (`ch, is_recv, send_val` per case) and, with `has_default`, raises
+    /// a scheduling request. Pushes `[recv_value, case_index]`.
+    Select(u8, u8),
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -792,6 +796,10 @@ impl Hash for Op {
             Op::Go(name, argc) => {
                 name.hash(state);
                 argc.hash(state);
+            }
+            Op::Select(n, deflt) => {
+                n.hash(state);
+                deflt.hash(state);
             }
             Op::CallBuiltin(id, argc) => {
                 id.hash(state);

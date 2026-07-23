@@ -43,6 +43,23 @@ pub enum SchedReq {
     Recv { ch: i64 },
     /// `close(ch)` — close channel `ch`.
     Close { ch: i64 },
+    /// A `select` over channel operations: pick a ready case (else the default,
+    /// else block until one is ready). Pushes `[recv_value, case_index]`.
+    Select {
+        cases: Vec<SelectCase>,
+        has_default: bool,
+    },
+}
+
+/// One communication clause of a `select`.
+#[derive(Debug, Clone)]
+pub struct SelectCase {
+    /// True for a receive (`<-ch`), false for a send (`ch <- val`).
+    pub recv: bool,
+    /// The channel id.
+    pub ch: i64,
+    /// The value to send (unused for a receive).
+    pub val: Value,
 }
 
 /// Why the scheduler stopped without the main goroutine finishing.
@@ -99,6 +116,9 @@ pub struct Scheduler<F: FnMut() -> VM> {
     blocked: HashSet<usize>,
     done: HashSet<usize>,
     chans: Vec<Channel>,
+    /// Goroutines blocked in a `select`, with their cases; re-checked whenever a
+    /// channel changes state (see [`Scheduler::recheck_selects`]).
+    select_waiters: Vec<(usize, Vec<SelectCase>)>,
     /// The zero value a receive yields on a closed, empty channel. Frontends set
     /// this to the element type's zero (`Value::Int(0)` by default).
     recv_zero: Value,
@@ -114,6 +134,7 @@ impl<F: FnMut() -> VM> Scheduler<F> {
             blocked: HashSet::new(),
             done: HashSet::new(),
             chans: Vec::new(),
+            select_waiters: Vec::new(),
             recv_zero: Value::Int(0),
         }
     }
@@ -206,8 +227,37 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                 // The spawner continues immediately after `go`.
                 self.ready.push_back(gid);
             }
-            SchedReq::Send { ch, val } => self.send(gid, ch, val)?,
-            SchedReq::Recv { ch } => self.recv(gid, ch)?,
+            SchedReq::Send { ch, val } => {
+                if self.try_send(ch, &val)? {
+                    self.ready.push_back(gid);
+                    self.recheck_selects()?;
+                } else {
+                    self.chan_mut(ch)?.send_q.push_back((gid, val));
+                    self.blocked.insert(gid);
+                }
+            }
+            SchedReq::Recv { ch } => {
+                if let Some(v) = self.try_recv(ch)? {
+                    self.vms[gid].stack.push(v);
+                    self.ready.push_back(gid);
+                    self.recheck_selects()?;
+                } else {
+                    self.chan_mut(ch)?.recv_q.push_back(gid);
+                    self.blocked.insert(gid);
+                }
+            }
+            SchedReq::Select { cases, has_default } => {
+                if let Some((idx, rv)) = self.try_select(&cases)? {
+                    self.deliver_select(gid, idx, rv);
+                    self.recheck_selects()?;
+                } else if has_default {
+                    // The `default` case: sentinel index = number of real cases.
+                    self.deliver_select(gid, cases.len(), Value::Undef);
+                } else {
+                    self.select_waiters.push((gid, cases));
+                    self.blocked.insert(gid);
+                }
+            }
             SchedReq::Close { ch } => {
                 let c = self.chan_mut(ch)?;
                 c.closed = true;
@@ -218,15 +268,69 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                     self.wake(r);
                 }
                 self.ready.push_back(gid);
+                self.recheck_selects()?;
             }
         }
         Ok(())
     }
 
-    /// `ch <- val` from goroutine `gid`.
-    fn send(&mut self, gid: usize, ch: i64, val: Value) -> Result<(), SchedError> {
-        // Validate + capture what to do without holding the borrow across a wake.
-        let (deliver_to, buffered, park) = {
+    /// Push a select outcome (`[recv_value, case_index]`) onto goroutine `gid`
+    /// and make it runnable. The compiled `select` reads the index to jump to
+    /// the winning case and the value to bind a `case v := <-ch`.
+    fn deliver_select(&mut self, gid: usize, idx: usize, rv: Value) {
+        self.vms[gid].stack.push(rv);
+        self.vms[gid].stack.push(Value::Int(idx as i64));
+        self.wake(gid);
+    }
+
+    /// Attempt a receive on `ch` without blocking: `Some(value)` if it completed
+    /// (performing the receive and waking any blocked sender), `None` if it would
+    /// block.
+    fn try_recv(&mut self, ch: i64) -> Result<Option<Value>, SchedError> {
+        enum O {
+            V(Value),
+            Wake(usize, Value),
+            Zero,
+            No,
+        }
+        let o = {
+            let c = self.chan_mut(ch)?;
+            if let Some(v) = c.buf.pop_front() {
+                if let Some((s, sv)) = c.send_q.pop_front() {
+                    c.buf.push_back(sv);
+                    O::Wake(s, v)
+                } else {
+                    O::V(v)
+                }
+            } else if let Some((s, sv)) = c.send_q.pop_front() {
+                O::Wake(s, sv)
+            } else if c.closed {
+                O::Zero
+            } else {
+                O::No
+            }
+        };
+        Ok(match o {
+            O::V(v) => Some(v),
+            O::Wake(s, v) => {
+                self.wake(s);
+                Some(v)
+            }
+            O::Zero => Some(self.recv_zero.clone()),
+            O::No => None,
+        })
+    }
+
+    /// Attempt a send on `ch` without blocking: `true` if it completed (delivered
+    /// to a blocked receiver or buffered), `false` if it would block. Panics on a
+    /// closed channel.
+    fn try_send(&mut self, ch: i64, val: &Value) -> Result<bool, SchedError> {
+        enum O {
+            Deliver(usize),
+            Buffered,
+            No,
+        }
+        let o = {
             let c = self.chan_mut(ch)?;
             if c.closed {
                 return Err(SchedError::Panic(
@@ -234,74 +338,60 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                 ));
             }
             if let Some(r) = c.recv_q.pop_front() {
-                // A receiver is waiting — hand the value straight to it.
-                (Some(r), false, false)
+                O::Deliver(r)
             } else if c.buf.len() < c.cap {
                 c.buf.push_back(val.clone());
-                (None, true, false)
+                O::Buffered
             } else {
-                // No room and no receiver — block the sender with its value.
-                c.send_q.push_back((gid, val.clone()));
-                (None, false, true)
+                O::No
             }
         };
-        if let Some(r) = deliver_to {
-            self.vms[r].stack.push(val);
-            self.wake(r);
-            self.ready.push_back(gid);
-        } else if buffered {
-            self.ready.push_back(gid);
-        } else if park {
-            self.blocked.insert(gid);
-        }
-        Ok(())
+        Ok(match o {
+            O::Deliver(r) => {
+                self.vms[r].stack.push(val.clone());
+                self.wake(r);
+                true
+            }
+            O::Buffered => true,
+            O::No => false,
+        })
     }
 
-    /// `<-ch` from goroutine `gid`.
-    fn recv(&mut self, gid: usize, ch: i64) -> Result<(), SchedError> {
-        enum Outcome {
-            Value(Value),
-            WakeSender(usize, Value),
-            Zero,
-            Park,
-        }
-        let outcome = {
-            let c = self.chan_mut(ch)?;
-            if let Some(v) = c.buf.pop_front() {
-                // Room freed up — pull a blocked sender's value into the buffer.
-                if let Some((s, sv)) = c.send_q.pop_front() {
-                    c.buf.push_back(sv);
-                    Outcome::WakeSender(s, v)
-                } else {
-                    Outcome::Value(v)
+    /// Try each `select` case in order; perform the first ready one and return
+    /// `(case index, received value)` (the value is nil for a send/default).
+    fn try_select(&mut self, cases: &[SelectCase]) -> Result<Option<(usize, Value)>, SchedError> {
+        for (i, c) in cases.iter().enumerate() {
+            if c.recv {
+                if let Some(v) = self.try_recv(c.ch)? {
+                    return Ok(Some((i, v)));
                 }
-            } else if let Some((s, sv)) = c.send_q.pop_front() {
-                // Unbuffered handoff: take straight from a blocked sender.
-                Outcome::WakeSender(s, sv)
-            } else if c.closed {
-                Outcome::Zero
-            } else {
-                c.recv_q.push_back(gid);
-                Outcome::Park
+            } else if self.try_send(c.ch, &c.val)? {
+                return Ok(Some((i, Value::Undef)));
             }
-        };
-        match outcome {
-            Outcome::Value(v) => {
-                self.vms[gid].stack.push(v);
-                self.ready.push_back(gid);
+        }
+        Ok(None)
+    }
+
+    /// Re-attempt every blocked `select` after a channel-state change; any whose
+    /// case is now ready proceeds. Loops until no waiting select can progress (a
+    /// wakeup may enable another).
+    fn recheck_selects(&mut self) -> Result<(), SchedError> {
+        loop {
+            let mut progressed = false;
+            let waiters = std::mem::take(&mut self.select_waiters);
+            let mut still = Vec::new();
+            for (gid, cases) in waiters {
+                match self.try_select(&cases)? {
+                    Some((idx, rv)) => {
+                        self.deliver_select(gid, idx, rv);
+                        progressed = true;
+                    }
+                    None => still.push((gid, cases)),
+                }
             }
-            Outcome::WakeSender(s, v) => {
-                self.vms[gid].stack.push(v);
-                self.wake(s);
-                self.ready.push_back(gid);
-            }
-            Outcome::Zero => {
-                let z = self.recv_zero.clone();
-                self.vms[gid].stack.push(z);
-                self.ready.push_back(gid);
-            }
-            Outcome::Park => {
-                self.blocked.insert(gid);
+            self.select_waiters = still;
+            if !progressed {
+                break;
             }
         }
         Ok(())
@@ -421,6 +511,58 @@ mod tests {
         b.emit(Op::Add, 1);
         b.emit(Op::SetVar(sum), 1);
         assert_eq!(run(b.build(), "sum"), Ok(Some(Value::Int(30))));
+    }
+
+    #[test]
+    fn select_picks_the_ready_case() {
+        // ch1 (unbuffered, no sender) and ch2 (buffered, holds 7).
+        //   select { case <-ch1: ; case v := <-ch2: sum = v }
+        // must pick case 1 (ch2 ready) and receive 7.
+        let mut b = ChunkBuilder::new();
+        let ch1 = b.add_name("ch1");
+        let ch2 = b.add_name("ch2");
+        let sum = b.add_name("sum");
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::ChanMake, 1);
+        b.emit(Op::SetVar(ch1), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::ChanMake, 1);
+        b.emit(Op::SetVar(ch2), 1);
+        b.emit(Op::GetVar(ch2), 1);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::ChanSend, 1);
+        // case 0: recv ch1 — [ch1, is_recv=1, val=0]
+        b.emit(Op::GetVar(ch1), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(0), 1);
+        // case 1: recv ch2 — [ch2, is_recv=1, val=0]
+        b.emit(Op::GetVar(ch2), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::Select(2, 0), 1);
+        // stack: [recv_value, case_index]; both cases here store the value, so
+        // drop the index and keep the value.
+        b.emit(Op::Pop, 1);
+        b.emit(Op::SetVar(sum), 1);
+        assert_eq!(run(b.build(), "sum"), Ok(Some(Value::Int(7))));
+    }
+
+    #[test]
+    fn select_default_when_no_case_ready() {
+        // An empty channel with a `default` case takes the default (index = 1).
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let idx = b.add_name("idx");
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::ChanMake, 1);
+        b.emit(Op::SetVar(ch), 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::Select(1, 1), 1); // 1 case, has_default
+        b.emit(Op::SetVar(idx), 1); // index (default sentinel = 1)
+        b.emit(Op::Pop, 1); // drop the recv value
+        assert_eq!(run(b.build(), "idx"), Ok(Some(Value::Int(1))));
     }
 
     #[test]

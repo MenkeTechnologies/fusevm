@@ -1378,7 +1378,8 @@ impl VM {
                             | Op::ChanMake
                             | Op::ChanSend
                             | Op::ChanRecv
-                            | Op::ChanClose => rec.aborted = true,
+                            | Op::ChanClose
+                            | Op::Select(_, _) => rec.aborted = true,
                             _ => {}
                         }
                     }
@@ -3216,6 +3217,27 @@ impl VM {
             Op::ChanClose => {
                 let ch = self.pop().to_int();
                 self.sched = Some(crate::sched::SchedReq::Close { ch });
+                self.halted = true;
+            }
+            Op::Select(num_cases, has_default) => {
+                let n = *num_cases as usize;
+                let mut raw = Vec::with_capacity(n * 3);
+                for _ in 0..n * 3 {
+                    raw.push(self.pop());
+                }
+                raw.reverse();
+                let cases = raw
+                    .chunks_exact(3)
+                    .map(|c| crate::sched::SelectCase {
+                        ch: c[0].to_int(),
+                        recv: c[1].to_int() != 0,
+                        val: c[2].clone(),
+                    })
+                    .collect();
+                self.sched = Some(crate::sched::SchedReq::Select {
+                    cases,
+                    has_default: *has_default != 0,
+                });
                 self.halted = true;
             }
         }
