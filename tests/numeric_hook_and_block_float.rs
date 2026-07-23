@@ -287,9 +287,17 @@ fn strict_mode_delegates_subtraction_overflow_across_jit() {
             Some(hook.clone()),
         )
         .expect("sub overflow is delegated, not an error");
-        assert_eq!(v, Value::str("BIGNUM".to_string()), "run {i}: sub overflow wrapped");
+        assert_eq!(
+            v,
+            Value::str("BIGNUM".to_string()),
+            "run {i}: sub overflow wrapped"
+        );
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 25, "every sub overflow must delegate");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        25,
+        "every sub overflow must delegate"
+    );
 }
 
 /// Unary negate is the fourth block-eligible op. `-i64::MIN` overflows (`i64`
@@ -301,11 +309,22 @@ fn strict_mode_delegates_negate_overflow_but_not_in_range() {
     let (calls, hook) = counting_bignum_hook();
 
     for i in 1..=25 {
-        let v = run(unop_chunk(Value::Int(i64::MIN), Op::Negate), Some(hook.clone()))
-            .expect("negate overflow is delegated");
-        assert_eq!(v, Value::str("BIGNUM".to_string()), "run {i}: -i64::MIN wrapped");
+        let v = run(
+            unop_chunk(Value::Int(i64::MIN), Op::Negate),
+            Some(hook.clone()),
+        )
+        .expect("negate overflow is delegated");
+        assert_eq!(
+            v,
+            Value::str("BIGNUM".to_string()),
+            "run {i}: -i64::MIN wrapped"
+        );
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 25, "every -i64::MIN must delegate");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        25,
+        "every -i64::MIN must delegate"
+    );
 
     // A representable negation must not delegate — the checked lowering only
     // catches what i64 cannot hold, it never changes an in-range result.
@@ -313,7 +332,11 @@ fn strict_mode_delegates_negate_overflow_but_not_in_range() {
         let v = run(unop_chunk(Value::Int(42), Op::Negate), Some(hook.clone())).unwrap();
         assert_eq!(v, Value::Int(-42), "run {i}: in-range negate changed");
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 25, "in-range negate must not delegate");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        25,
+        "in-range negate must not delegate"
+    );
 }
 
 /// A non-number operand is not negatable in a strict language, so it reaches the
@@ -359,7 +382,11 @@ fn strict_mode_delegates_below_the_narrowed_fixnum_range() {
             Value::Int(1),
             Op::Sub,
         ));
-        assert_eq!(v, Value::str("BIGNUM".to_string()), "run {i}: -2^61-1 escaped as fixnum");
+        assert_eq!(
+            v,
+            Value::str("BIGNUM".to_string()),
+            "run {i}: -2^61-1 escaped as fixnum"
+        );
     }
     assert_eq!(calls.load(Ordering::Relaxed), 25);
 
@@ -369,7 +396,11 @@ fn strict_mode_delegates_below_the_narrowed_fixnum_range() {
         Op::Sub,
     ));
     assert_eq!(v, Value::Int(MOST_NEGATIVE_FIXNUM));
-    assert_eq!(calls.load(Ordering::Relaxed), 25, "in-range must not delegate");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        25,
+        "in-range must not delegate"
+    );
 }
 
 /// Comparison can never overflow, so `cmp_int_fast` delegates only a non-numeric
@@ -397,7 +428,11 @@ fn strict_mode_comparison_delegates_only_non_numbers() {
         .unwrap();
         assert_eq!(v, Value::Bool(true), "run {i}: 3 < 7 wrong");
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 0, "numeric comparison must not delegate");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "numeric comparison must not delegate"
+    );
 }
 
 /// `Div` and `Pow` are float-native with no overflow case, so strict mode
@@ -413,15 +448,27 @@ fn strict_mode_div_and_pow_delegate_only_non_numbers() {
             Some(hook.clone()),
         )
         .expect("delegated op returns the host value");
-        assert_eq!(v, Value::str("BIGNUM".to_string()), "{name} of a string must delegate");
+        assert_eq!(
+            v,
+            Value::str("BIGNUM".to_string()),
+            "{name} of a string must delegate"
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     // Numeric divide is exact in f64 — no delegation.
     let (calls, hook) = counting_bignum_hook();
-    let v = run(binop_chunk(Value::Int(7), Value::Int(2), Op::Div), Some(hook)).unwrap();
+    let v = run(
+        binop_chunk(Value::Int(7), Value::Int(2), Op::Div),
+        Some(hook),
+    )
+    .unwrap();
     assert_eq!(v, Value::Float(3.5));
-    assert_eq!(calls.load(Ordering::Relaxed), 0, "numeric divide must not delegate");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "numeric divide must not delegate"
+    );
 }
 
 /// The hook is for integer overflow and non-numbers only: mixed int/float and
