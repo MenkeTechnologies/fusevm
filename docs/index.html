@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT (linear, block, tracing). The shared execution engine behind fifteen language frontends: zshrs, strykelang, awkrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, and groovyrs.">
+  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT (linear, block, tracing). The shared execution engine behind sixteen language frontends: zshrs, strykelang, awkrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, and go-rs.">
   <title>fusevm — Documentation</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -150,7 +150,7 @@
 
     <main class="tutorial-main">
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>FUSEVM REFERENCE</h2>
-      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 10), tracing (hot loop body with side-exits, frame materialization, side-trace stitching). Auto-dispatched from <code>VM::run()</code> when tracing is enabled. The shared execution engine behind fifteen language frontends — zshrs, strykelang, awkrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, and groovyrs. For full numbers / subsystem breakdown / file inventory see the <a href="report.html" style="color:var(--accent);">Engineering Report</a>.</p>
+      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 10), tracing (hot loop body with side-exits, frame materialization, side-trace stitching). Auto-dispatched from <code>VM::run()</code> when tracing is enabled. The shared execution engine behind sixteen language frontends — zshrs, strykelang, awkrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, and go-rs. For full numbers / subsystem breakdown / file inventory see the <a href="report.html" style="color:var(--accent);">Engineering Report</a>.</p>
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
@@ -168,11 +168,11 @@
           <div><div class="stat">7,636</div><div class="stat-label">#[test] fns</div></div>
           <!-- test fns derived from: grep -rc '#\[test\]\|#\[tokio::test\]' --include='*.rs' . | awk -F: '{s+=$2}END{print s}' -->
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
-          <div><div class="stat">15</div><div class="stat-label">language frontends</div></div>
+          <div><div class="stat">16</div><div class="stat-label">language frontends</div></div>
         </div>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
-        fusevm is the shared execution engine behind fifteen language frontends &mdash;
+        fusevm is the shared execution engine behind sixteen language frontends &mdash;
         <a href="https://github.com/MenkeTechnologies/zshrs" style="color: var(--cyan);">zshrs</a>,
         <a href="https://github.com/MenkeTechnologies/strykelang" style="color: var(--cyan);">strykelang</a>,
         <a href="https://github.com/MenkeTechnologies/awkrs" style="color: var(--cyan);">awkrs</a>,
@@ -186,8 +186,9 @@
         <a href="https://github.com/MenkeTechnologies/rlang" style="color: var(--cyan);">rlang</a>/R,
         <a href="https://github.com/MenkeTechnologies/javars" style="color: var(--cyan);">javars</a>,
         <a href="https://github.com/MenkeTechnologies/kotlinrs" style="color: var(--cyan);">kotlinrs</a>,
-        <a href="https://github.com/MenkeTechnologies/scalars" style="color: var(--cyan);">scalars</a>, and
-        <a href="https://github.com/MenkeTechnologies/groovyrs" style="color: var(--cyan);">groovyrs</a>.
+        <a href="https://github.com/MenkeTechnologies/scalars" style="color: var(--cyan);">scalars</a>,
+        <a href="https://github.com/MenkeTechnologies/groovyrs" style="color: var(--cyan);">groovyrs</a>, and
+        <a href="https://github.com/MenkeTechnologies/go-rs" style="color: var(--cyan);">go-rs</a>.
         Any language frontend compiles to the same <code>Op</code> enum and gets fused hot-loop dispatch,
         extension opcode tables, stack-based execution with slot-indexed fast paths, and JIT eligibility
         analysis &mdash; for free. <span class="highlight">The VM doesn&rsquo;t care which language produced the bytecodes.</span></p>
@@ -915,7 +916,7 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
         pools (&gt;16 entries, where reset's resize amortizes), many slots (frame Vec capacity is preserved
         across reuse), or multi-chunk evaluation loops with non-trivial chunk shapes. For uniform tight loops
         on tiny chunks the pool is actually <em>slower</em> (<code>reset</code> does more bookkeeping than
-        <code>VM::new</code> skips), so the API is shipped to let callers choose. All fifteen sibling frontends
+        <code>VM::new</code> skips), so the API is shipped to let callers choose. All sixteen sibling frontends
         (strykelang, awkrs, zshrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, javars, kotlinrs, scalars, groovyrs) drive <code>fusevm::VM</code> through bridge layers backed by a frontend-owned
         <code>VMPool</code>.</p>
       </section>

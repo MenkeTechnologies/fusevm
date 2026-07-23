@@ -51,7 +51,7 @@ cargo add fusevm                  # interpreter only
 
 ## [0x00] OVERVIEW
 
-fusevm is the shared execution engine behind fifteen language frontends — [zshrs](https://github.com/MenkeTechnologies/zshrs), [strykelang](https://github.com/MenkeTechnologies/strykelang), [awkrs](https://github.com/MenkeTechnologies/awkrs), [vimlrs](https://github.com/MenkeTechnologies/vimlrs), [elisprs](https://github.com/MenkeTechnologies/elisprs), [rubylang](https://github.com/MenkeTechnologies/rubylang), [arb](https://github.com/MenkeTechnologies/arb), [pythonrs](https://github.com/MenkeTechnologies/pythonrs), [phplang](https://github.com/MenkeTechnologies/phplang), [node-js](https://github.com/MenkeTechnologies/node-js), [rlang](https://github.com/MenkeTechnologies/rlang)/R, [javars](https://github.com/MenkeTechnologies/javars), [kotlinrs](https://github.com/MenkeTechnologies/kotlinrs), [scalars](https://github.com/MenkeTechnologies/scalars), and [groovyrs](https://github.com/MenkeTechnologies/groovyrs). They all compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
+fusevm is the shared execution engine behind sixteen language frontends — [zshrs](https://github.com/MenkeTechnologies/zshrs), [strykelang](https://github.com/MenkeTechnologies/strykelang), [awkrs](https://github.com/MenkeTechnologies/awkrs), [vimlrs](https://github.com/MenkeTechnologies/vimlrs), [elisprs](https://github.com/MenkeTechnologies/elisprs), [rubylang](https://github.com/MenkeTechnologies/rubylang), [arb](https://github.com/MenkeTechnologies/arb), [pythonrs](https://github.com/MenkeTechnologies/pythonrs), [phplang](https://github.com/MenkeTechnologies/phplang), [node-js](https://github.com/MenkeTechnologies/node-js), [rlang](https://github.com/MenkeTechnologies/rlang)/R, [javars](https://github.com/MenkeTechnologies/javars), [kotlinrs](https://github.com/MenkeTechnologies/kotlinrs), [scalars](https://github.com/MenkeTechnologies/scalars), [groovyrs](https://github.com/MenkeTechnologies/groovyrs), and [go-rs](https://github.com/MenkeTechnologies/go-rs). They all compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
 
 ```
 zshrs  ──► shell  compiler ──┐
@@ -60,6 +60,8 @@ awk    ──► awk    compiler ──┤
 viml   ──► viml   compiler ──┤
 elisp  ──► elisp  compiler ──┤
 ruby   ──► ruby   compiler ──┤
+rlang  ──► r      compiler ──┤
+go-rs  ──► go     compiler ──┤
 arb    ──► arb    compiler ──┼──► fusevm::Op ──► VM::run() ──┐
 python ──► python compiler ──┤                              │
 php    ──► php    compiler ──┤                              │
@@ -596,7 +598,7 @@ For tiny chunks the pool is *slower* — `reset` does more bookkeeping (drop the
 
 Honest read: VMPool is useful for **multi-chunk evaluation loops with non-trivial chunk shapes**. For uniform tight loops, pure `VM::new` is fine. The API is shipped so callers can pick. ~10 LOC if your call site looks like `for chunk in ... { VM::new(chunk).run() }`.
 
-**Frontend adoption.** All fifteen sibling frontends (strykelang, awkrs, zshrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs) drive `fusevm::VM` through bridge layers, NOT direct emit. The common pattern is: (1) frontend-side eligibility analysis (which subroutines / bodies / per-record rules can be lowered to fusevm ops at all), (2) op-vector → `fusevm::Chunk` translation cached behind frontend-owned `OnceCell` / `HashMap` so the 2-pass translation runs once per source program region, not per call, (3) `VMPool` on the frontend `Runtime` so `VM::reset(chunk)` recycles slot/stack/globals Vec capacities across invocations, (4) narrow writeback driven by a precomputed `Vec<u16>` of `Op::SetSlot` targets so only mutated slots get copied back to the frontend's runtime. The on-disk JIT cache (keyed by op-hash) handles compiled-code persistence; the per-frontend in-process caches above handle the upstream chunk-build and runtime-setup costs the disk cache can't touch. strykelang adds `STK_VAL_LOAD_CONST` to make LoadConst-bearing chunks disk-cache safe (index-based, not per-process pointer).
+**Frontend adoption.** All sixteen sibling frontends (strykelang, awkrs, zshrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, go-rs) drive `fusevm::VM` through bridge layers, NOT direct emit. The common pattern is: (1) frontend-side eligibility analysis (which subroutines / bodies / per-record rules can be lowered to fusevm ops at all), (2) op-vector → `fusevm::Chunk` translation cached behind frontend-owned `OnceCell` / `HashMap` so the 2-pass translation runs once per source program region, not per call, (3) `VMPool` on the frontend `Runtime` so `VM::reset(chunk)` recycles slot/stack/globals Vec capacities across invocations, (4) narrow writeback driven by a precomputed `Vec<u16>` of `Op::SetSlot` targets so only mutated slots get copied back to the frontend's runtime. The on-disk JIT cache (keyed by op-hash) handles compiled-code persistence; the per-frontend in-process caches above handle the upstream chunk-build and runtime-setup costs the disk cache can't touch. strykelang adds `STK_VAL_LOAD_CONST` to make LoadConst-bearing chunks disk-cache safe (index-based, not per-process pointer).
 
 ### Tracking improvements
 
