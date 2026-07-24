@@ -128,7 +128,7 @@
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.14.19 · 224 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 23,781 lines Rust · 7,636 #[test] fns</p>
+          <p class="docs-build-line">fusevm v0.14.20 · 233 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 26 float/int math ops · 6 goroutine / channel ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 27,813 lines Rust · 7,718 #[test] fns</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -158,14 +158,14 @@
         <p class="motto" style="font-size: 12px; color: var(--cyan); margin-top: -1rem;">FUSED SUPERINSTRUCTIONS. EXTENSION DISPATCH. 3-TIER CRANELIFT JIT.</p>
 
         <div class="stat-grid">
-          <div><div class="stat">224</div><div class="stat-label">opcodes</div></div>
-          <div><div class="stat">17</div><div class="stat-label">op sections</div></div>
+          <div><div class="stat">233</div><div class="stat-label">opcodes</div></div>
+          <div><div class="stat">22</div><div class="stat-label">op sections</div></div>
           <div><div class="stat">11</div><div class="stat-label">fused superinstructions</div></div>
           <div><div class="stat">29</div><div class="stat-label">shell ops</div></div>
           <div><div class="stat">61</div><div class="stat-label">AWK ops</div></div>
-          <div><div class="stat">23,781</div><div class="stat-label">production lines</div></div>
+          <div><div class="stat">27,813</div><div class="stat-label">production lines</div></div>
           <!-- production lines derived from: find src -name '*.rs' | xargs wc -l | tail -1 -->
-          <div><div class="stat">7,636</div><div class="stat-label">#[test] fns</div></div>
+          <div><div class="stat">7,718</div><div class="stat-label">#[test] fns</div></div>
           <!-- test fns derived from: grep -rc '#\[test\]\|#\[tokio::test\]' --include='*.rs' . | awk -F: '{s+=$2}END{print s}' -->
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
           <div><div class="stat">16</div><div class="stat-label">language frontends</div></div>
@@ -383,7 +383,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
         <h2><span class="section-num">[0x03]</span> OP CATEGORIES</h2>
 
         <p style="font-size: 14px; color: var(--text); margin-bottom: 0.8rem;">
-        224 opcodes across 17 categories in <code>src/op.rs</code>. Every op is &le;24 bytes for cache-friendly dispatch.</p>
+        233 opcodes across 22 categories in <code>src/op.rs</code>. Every op is &le;24 bytes for cache-friendly dispatch.</p>
 
         <div class="cat-grid">
           <div class="cat-card">
