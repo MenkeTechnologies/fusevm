@@ -741,6 +741,14 @@ impl VM {
     #[cfg(feature = "jit")]
     fn lookup_trace_for_backward(&mut self, anchor_ip: usize, fallthrough_ip: usize) -> usize {
         self.refresh_slot_buffers();
+        // Strict numeric mode: a slot holding something that is not an i64/f64 —
+        // a host bignum, a string — reaches native code as the integer 0
+        // (`refresh_slot_buffers` has no richer encoding), the exact silent
+        // coercion the `NumericHook` exists to reject. Same gate the block tier
+        // applies in `run`; the interpreter sees the real value instead.
+        if self.numeric_hook.is_some() && !self.slots_all_numeric {
+            return anchor_ip;
+        }
         let lookup = self.jit.trace_lookup(
             &self.chunk,
             anchor_ip,
@@ -750,6 +758,17 @@ impl VM {
         );
         match lookup {
             TraceLookup::Ran { resume_ip } => {
+                // Strict-numeric integer overflow inside the trace: it bailed
+                // before spilling slots or writing the deopt buffer, so nothing
+                // it computed escaped. Discard the whole invocation and re-run
+                // the loop in the interpreter, where the `NumericHook` produces
+                // the exact value (Python: a bignum). The promoted value is no
+                // longer an i64, so the guard above keeps later iterations out
+                // of the trace rather than bailing on every back-edge.
+                if crate::jit::take_num_overflow_trap() {
+                    self.jit.trace_overflow_bail(&self.chunk, anchor_ip);
+                    return anchor_ip;
+                }
                 self.write_slots_back();
                 self.materialize_deopt_frames();
                 // Phase 9: if the trace deopted (returned non-fallthrough),
@@ -814,6 +833,10 @@ impl VM {
                 .map(|(_, fallthrough)| fallthrough);
 
             self.refresh_slot_buffers();
+            // Same strict-numeric gate as `lookup_trace_for_backward`.
+            if self.numeric_hook.is_some() && !self.slots_all_numeric {
+                return current;
+            }
             let lookup = self.jit.trace_lookup(
                 &self.chunk,
                 current,
@@ -823,6 +846,12 @@ impl VM {
             );
             match lookup {
                 TraceLookup::Ran { resume_ip } => {
+                    // Overflow bail: nothing was spilled, so drop the invocation
+                    // and let the interpreter redo it exactly.
+                    if crate::jit::take_num_overflow_trap() {
+                        self.jit.trace_overflow_bail(&self.chunk, current);
+                        return current;
+                    }
                     self.write_slots_back();
                     self.materialize_deopt_frames();
                     current = resume_ip;

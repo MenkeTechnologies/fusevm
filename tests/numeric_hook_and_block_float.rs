@@ -491,3 +491,141 @@ fn strict_mode_never_delegates_exact_float_arithmetic() {
         assert_eq!(v, Value::Float(i64::MAX as f64 + 2.0), "run {i}");
     }
 }
+
+/// Build a strict-mode accumulator loop, the shape a compiled frontend emits for
+/// `for i in range(limit): acc += step`:
+///
+/// ```text
+///   LoadInt(0);    SetSlot(0)          // i = 0
+///   LoadInt(start); SetSlot(1)         // acc = start
+/// anchor:
+///   GetSlot(1); LoadInt(step); Add; SetSlot(1)
+///   GetSlot(0); LoadInt(1);    Add; SetSlot(0)
+///   GetSlot(0); LoadInt(limit); NumLt; JumpIfTrue(anchor)
+///   GetSlot(1)                         // result = acc
+/// ```
+///
+/// Only ops a strict VM keeps JIT-eligible are used (no `Inc`/`PreIncSlotVoid`),
+/// so the loop really does reach the trace tier. Returns (chunk, anchor_ip).
+fn strict_accum_loop(start: i64, step: i64, limit: i64) -> (Chunk, usize) {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::LoadInt(start), 1);
+    b.emit(Op::SetSlot(1), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::LoadInt(step), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(limit), 1);
+    b.emit(Op::NumLt, 1);
+    let jmp = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(jmp, anchor);
+    b.emit(Op::GetSlot(1), 1);
+    (b.build(), anchor)
+}
+
+fn run_with_slots(chunk: Chunk, hook: fusevm::NumericHook, slots: usize) -> Value {
+    let mut vm = VM::new(chunk);
+    vm.enable_tracing_jit();
+    vm.set_numeric_hook(hook);
+    {
+        let frame = vm.frames.last_mut().unwrap();
+        while frame.slots.len() < slots {
+            frame.slots.push(Value::Int(0));
+        }
+    }
+    match vm.run() {
+        VMResult::Ok(v) => v,
+        VMResult::Halted => vm.stack.last().cloned().unwrap_or(Value::Undef),
+        VMResult::Error(e) => panic!("vm error: {e}"),
+    }
+}
+
+/// Integer overflow inside a *compiled trace* must reach the hook, exactly as it
+/// does in the interpreter and in the block tier.
+///
+/// This is the loop tier, not the straight-line one the tests above cover: the
+/// accumulator overflows only after the loop is hot, so the overflowing `Add`
+/// executes in native trace code. That code wrapped silently — a frontend with
+/// bignums (pythonrs: `sum(i*i*i)`) got an `i64`-wrapped answer with no
+/// diagnostic, while the same program run below the trace threshold was
+/// correct. The trace now carries the block tier's overflow accumulator and
+/// bails to the interpreter, where the hook runs.
+#[test]
+fn strict_mode_delegates_overflow_inside_a_compiled_trace() {
+    let (calls, hook) = counting_bignum_hook();
+    // 400 iterations: past the trace threshold, and the accumulator crosses
+    // i64::MAX at iteration ~301 — long after the loop is running natively.
+    let step = 1_000_000_000_000_000;
+    let start = i64::MAX - step * 300;
+    let (chunk, _anchor) = strict_accum_loop(start, step, 400);
+
+    let v = run_with_slots(chunk, hook, 2);
+    assert_eq!(
+        v,
+        Value::str("BIGNUM".to_string()),
+        "overflow in a hot loop must delegate to the hook, not wrap to an i64"
+    );
+    assert!(
+        calls.load(Ordering::Relaxed) > 0,
+        "the hook was never consulted — the trace wrapped silently"
+    );
+}
+
+/// The same loop below the overflow point must stay entirely native: exact
+/// `i64` arithmetic, hook never consulted. Guards against "fix overflow by
+/// delegating everything", which would erase the JIT's reason to exist.
+#[test]
+fn strict_mode_hot_loop_without_overflow_never_delegates() {
+    let hook: fusevm::NumericHook =
+        Arc::new(|op, a, b| panic!("exact i64 arithmetic delegated: {op:?} {a:?} {b:?}"));
+    let (chunk, _anchor) = strict_accum_loop(0, 7, 400);
+    let v = run_with_slots(chunk, hook, 2);
+    assert_eq!(v, Value::Int(7 * 400));
+}
+
+/// `Op::Mod` by a nonzero constant `|k| >= 2` is JIT-eligible in strict mode:
+/// `checked_rem` cannot fail for such a divisor, so native `srem` and the
+/// interpreter agree exactly and the hook is never needed. A loop full of them
+/// must produce the interpreter's answer without a single delegation.
+#[test]
+fn strict_mode_compiles_modulo_by_a_constant_divisor() {
+    let hook: fusevm::NumericHook =
+        Arc::new(|op, a, b| panic!("constant-divisor modulo delegated: {op:?} {a:?} {b:?}"));
+
+    // acc += i % 7, over 400 iterations.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(1), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(7), 1);
+    b.emit(Op::Mod, 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(400), 1);
+    b.emit(Op::NumLt, 1);
+    let jmp = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(jmp, anchor);
+    b.emit(Op::GetSlot(1), 1);
+    let _ = anchor;
+
+    let expected: i64 = (0..400).map(|i: i64| i % 7).sum();
+    let v = run_with_slots(b.build(), hook, 2);
+    assert_eq!(v, Value::Int(expected));
+}

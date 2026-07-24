@@ -3898,6 +3898,11 @@ mod cranelift_jit_impl {
             constants: &[FuseValue],
         ) -> Option<CompiledTrace> {
             let sub = record_anchor_ip as u64;
+            // Salt the verification word with the numeric policy, exactly as
+            // `try_load_or_build_block` does: strict-mode trace code bails to the
+            // interpreter on integer overflow where coercing-mode code wraps, so
+            // a blob written by one policy must never be loaded under the other.
+            let meta_hash = meta_hash ^ crate::jit::numeric_policy_salt();
             if let Some(blob) = read_blob(dir, "trc", op_hash, sub, meta_hash) {
                 if let Some(compiled) = load_native_trace(&blob) {
                     return Some(compiled);
@@ -4103,7 +4108,24 @@ mod cranelift_jit_impl {
         leaders
     }
 
-    fn is_block_eligible_op(op: &Op) -> bool {
+    /// Whether the `Op::Mod` at `ip` divides by a compile-time constant the
+    /// native `srem` handles exactly as the interpreter would — the one strict
+    /// -mode modulo that is safe to compile (see `is_block_eligible_op_at`).
+    ///
+    /// The divisor is the immediately preceding `LoadInt(k)`, and `|k| >= 2`
+    /// rules out both interpreter/native divergences: `k == 0` (the interpreter
+    /// pushes `0`, `srem` traps) and `|k| == 1` (whose `srem(i64::MIN, -1)` also
+    /// traps). For every other constant, `checked_rem` never fails, so the
+    /// interpreter never delegates to the `NumericHook` and native code and
+    /// interpreter agree bit for bit.
+    fn strict_safe_const_mod(ops: &[Op], ip: usize) -> bool {
+        ip > 0 && matches!(ops[ip - 1], Op::LoadInt(k) if k.saturating_abs() >= 2)
+    }
+
+    /// Per-op block-JIT eligibility. `ops`/`ip` give the op its context: the
+    /// strict-mode `Op::Mod` carve-out needs to see its divisor.
+    fn is_block_eligible_op_at(ops: &[Op], ip: usize) -> bool {
+        let op = &ops[ip];
         if let Op::Extended(id, _) = op {
             return super::global_extension_for(*id).is_some();
         }
@@ -4111,12 +4133,14 @@ mod cranelift_jit_impl {
         // value the interpreter would not have produced is not JIT-able here.
         // `Add`/`Sub`/`Mul`/`Negate` ARE compiled — with overflow checks (see
         // `emit_data_op`) — because they are the ops a strict frontend actually
-        // emits on its hot path. The rest are declined rather than checked: they
-        // overflow in ways that need their own guards (`i64::MIN / -1`,
-        // `wrapping_pow`, the fused int superinstructions), and a strict
-        // frontend either implements them as builtins (elisp `/`, `%`, `expt`)
-        // or never emits them at all. Declining just means "run in the
-        // interpreter", where the `NumericHook` gives the exact answer.
+        // emits on its hot path, and `Mod` by a constant `|k| >= 2` is compiled
+        // because it provably cannot diverge (`strict_safe_const_mod`). The rest
+        // are declined rather than checked: they overflow in ways that need their
+        // own guards (`i64::MIN / -1`, `wrapping_pow`, the fused int
+        // superinstructions), and a strict frontend either implements them as
+        // builtins (elisp `/`, `expt`) or never emits them at all. Declining just
+        // means "run in the interpreter", where the `NumericHook` gives the exact
+        // answer.
         if super::strict_numeric()
             && matches!(
                 op,
@@ -4131,6 +4155,7 @@ mod cranelift_jit_impl {
                     | Op::AccumSumLoop(_, _, _)
                     | Op::AddAssignSlotVoid(_, _)
             )
+            && !(matches!(op, Op::Mod) && strict_safe_const_mod(ops, ip))
         {
             return false;
         }
@@ -4267,7 +4292,7 @@ mod cranelift_jit_impl {
         }
         // Slow path: scan ops, cache result.
         let ops = &chunk.ops;
-        let result = !ops.is_empty() && ops.iter().all(is_block_eligible_op);
+        let result = !ops.is_empty() && (0..ops.len()).all(|ip| is_block_eligible_op_at(ops, ip));
         BLOCK_ELIGIBLE_TLS.with(|c| c.borrow_mut().insert(key, result));
         result
     }
@@ -4282,8 +4307,8 @@ mod cranelift_jit_impl {
         let mut best: Option<(usize, usize)> = None;
         let mut start: Option<usize> = None;
 
-        for (ip, op) in ops.iter().enumerate() {
-            if is_block_eligible_op(op) {
+        for ip in 0..ops.len() {
+            if is_block_eligible_op_at(ops, ip) {
                 if start.is_none() {
                     start = Some(ip);
                 }
@@ -5703,6 +5728,11 @@ mod cranelift_jit_impl {
         }
     }
 
+    /// How many strict-mode integer-overflow bails a trace may take before it is
+    /// blacklisted (see `trace_overflow_bail`). Small: a loop that overflows
+    /// `i64` twice is working in bignums, and bignums live in the interpreter.
+    const TRACE_OVERFLOW_BAIL_LIMIT: u32 = 2;
+
     // Field readers used internally by trace_lookup / is_trace_eligible /
     // recorder push hook. Other thresholds (max_inline_recursion,
     // max_trace_chain) are read directly via `get_config()` from the VM
@@ -5827,6 +5857,26 @@ mod cranelift_jit_impl {
         TRACE_CACHE_TLS.with(|cache_cell| {
             if let Some(entry) = cache_cell.borrow_mut().get_mut(&key) {
                 entry.aborted = true;
+            }
+        });
+    }
+
+    /// Record that a strict-mode trace bailed on integer overflow, blacklisting
+    /// it once it has done so `TRACE_OVERFLOW_BAIL_LIMIT` times.
+    ///
+    /// A bail costs the interpreter nothing but wastes the iteration the trace
+    /// ran before overflowing. A loop whose arithmetic has grown past `i64`
+    /// keeps overflowing, so retrying the trace on every back-edge would pay
+    /// that cost forever; blacklisting settles the loop into the interpreter,
+    /// where the `NumericHook` runs it exactly.
+    pub(crate) fn trace_overflow_bail(chunk: &Chunk, anchor_ip: usize) {
+        let key = (chunk.op_hash, anchor_ip);
+        TRACE_CACHE_TLS.with(|cache_cell| {
+            if let Some(entry) = cache_cell.borrow_mut().get_mut(&key) {
+                entry.deopt_count = entry.deopt_count.saturating_add(1);
+                if entry.deopt_count >= TRACE_OVERFLOW_BAIL_LIMIT {
+                    entry.blacklisted = true;
+                }
             }
         });
     }
@@ -5992,8 +6042,11 @@ mod cranelift_jit_impl {
     /// embedded jumps and are rejected — chunks that contain these are
     /// already block-JIT-optimized and tracing them would just compile the
     /// same loop pattern twice.
-    fn is_trace_op_allowed(op: &Op) -> bool {
-        match op {
+    ///
+    /// `ops`/`ip` give the op its context, which the strict-mode `Op::Mod`
+    /// carve-out needs to see its (constant) divisor.
+    fn is_trace_op_allowed_at(ops: &[Op], ip: usize) -> bool {
+        match &ops[ip] {
             Op::Call(_, _) | Op::Return | Op::ReturnValue => true,
             Op::CallBuiltin(_, _) | Op::PushFrame | Op::PopFrame => false,
             Op::SlotLtIntJumpIfFalse(_, _, _)
@@ -6003,7 +6056,7 @@ mod cranelift_jit_impl {
             // counter loops and are handled by the block JIT (whole-chunk);
             // the trace tier has no codegen for them, so reject to fall back.
             Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_) => false,
-            _ => is_block_eligible_op(op),
+            _ => is_block_eligible_op_at(ops, ip),
         }
     }
 
@@ -6111,6 +6164,44 @@ mod cranelift_jit_impl {
             .store(MemFlags::trusted(), value, deopt_ptr, offset);
     }
 
+    /// Strict-numeric overflow state for a trace: the accumulator every integer
+    /// `Add`/`Sub`/`Mul`/`Negate` ORs its overflow bit into, the trap libcall,
+    /// and the anchor IP the bail returns (the trace's own entry, so the
+    /// interpreter re-runs the loop from the top with exact arithmetic).
+    #[derive(Clone, Copy)]
+    struct TraceOverflow {
+        acc: cranelift_frontend::Variable,
+        trap: cranelift_codegen::ir::FuncRef,
+        anchor_ip: usize,
+    }
+
+    /// The trace-tier counterpart of `emit_overflow_bail`: if any integer op in
+    /// this trace overflowed `i64` (or left the host's fixnum range), call the
+    /// trap libcall and return the anchor IP **without spilling slots or writing
+    /// the deopt buffer**. Nothing the trace computed escapes, so the VM can
+    /// discard the whole invocation and re-run the loop in the interpreter,
+    /// where the `NumericHook` promotes to a bignum.
+    ///
+    /// Unlike the block tier — which returns a sentinel and relies on `VM::run`
+    /// to re-dispatch the chunk — a trace returns a resume IP, so the bail
+    /// returns the anchor: the interpreter resumes exactly where it entered.
+    fn emit_trace_overflow_bail(bcx: &mut FunctionBuilder, o: TraceOverflow) {
+        let cur = bcx.use_var(o.acc);
+        let bail = bcx.create_block();
+        let cont = bcx.create_block();
+        bcx.ins().brif(cur, bail, &[], cont, &[]);
+
+        bcx.switch_to_block(bail);
+        bcx.seal_block(bail);
+        let kind = bcx.ins().iconst(types::I64, 0);
+        bcx.ins().call(o.trap, &[kind]);
+        let anchor = bcx.ins().iconst(types::I64, o.anchor_ip as i64);
+        bcx.ins().return_(&[anchor]);
+
+        bcx.switch_to_block(cont);
+        bcx.seal_block(cont);
+    }
+
     /// Emit the IR sequence shared by every trace exit (normal loop
     /// fallthrough OR a per-branch side-exit):
     /// 1. Spill caller-frame slot Variables back to `*slot_base`.
@@ -6135,7 +6226,15 @@ mod cranelift_jit_impl {
         frames_to_materialize: &[(usize, usize, Vec<(u16, Variable)>)],
         abstract_stack: &[(cranelift_codegen::ir::Value, JitTy)],
         resume_ip: usize,
+        ovf: Option<TraceOverflow>,
     ) {
+        // 0. Strict-numeric overflow bail, BEFORE anything is spilled: if any
+        //    integer op in this trace overflowed, its wrapped result must never
+        //    reach the VM. Emitted here — at the single choke point every exit
+        //    goes through — so no exit path can leak overflowed state.
+        if let Some(o) = ovf {
+            emit_trace_overflow_bail(bcx, o);
+        }
         // 1. Spill caller-frame slots.
         for (&slot, &var) in caller_slot_vars {
             let val = bcx.use_var(var);
@@ -6250,8 +6349,8 @@ mod cranelift_jit_impl {
         }
 
         // Per-op allowance + slot-index bound check.
-        for op in ops {
-            if !is_trace_op_allowed(op) {
+        for (ip, op) in ops.iter().enumerate() {
+            if !is_trace_op_allowed_at(ops, ip) {
                 return false;
             }
             let bad_slot = match op {
@@ -6577,6 +6676,24 @@ mod cranelift_jit_impl {
                 frames[0].slot_vars.insert(slot, var);
             }
 
+            // Strict numeric mode: give the trace the same overflow accumulator
+            // the block tier uses. Every integer `Add`/`Sub`/`Mul`/`Negate` ORs
+            // its overflow bit in (branch-free); `emit_exit` tests it once per
+            // exit and bails to the interpreter instead of returning a wrapped
+            // result. Without this, a strict frontend's hot loop silently
+            // produces `i64`-wrapped integers where the `NumericHook` would have
+            // promoted to a bignum.
+            let ovf = math.num_ovf_trap.map(|trap| {
+                let acc = bcx.declare_var(types::I64);
+                let zero = bcx.ins().iconst(types::I64, 0);
+                bcx.def_var(acc, zero);
+                TraceOverflow {
+                    acc,
+                    trap,
+                    anchor_ip: recorded_ips.first().copied().unwrap_or(0),
+                }
+            });
+
             // Jump to loop header.
             bcx.ins().jump(loop_hdr, &[]);
 
@@ -6586,6 +6703,16 @@ mod cranelift_jit_impl {
             // separated by brif guards leading either forward (recorded
             // direction) or to a side-exit.
             bcx.switch_to_block(loop_hdr);
+            // Per-iteration overflow check. A trace loops internally, so testing
+            // the accumulator only at the exits would let a trace whose FIRST
+            // iteration overflows still run the loop to completion before
+            // bailing — and since the bail discards everything, the interpreter
+            // would re-enter the same trace at the next back-edge and repeat
+            // forever. Testing at the loop header caps the wasted work at one
+            // iteration and guarantees forward progress.
+            if let Some(o) = ovf {
+                emit_trace_overflow_bail(&mut bcx, o);
+            }
             let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::with_capacity(32);
 
             // Helper: emit a side-exit block that spills caller-frame slots
@@ -6828,6 +6955,7 @@ mod cranelift_jit_impl {
                             &frames_to_materialize,
                             &stack,
                             side_exit_ip,
+                            ovf,
                         );
                         // Resume IR emission in the continue block.
                         bcx.switch_to_block(cont);
@@ -6859,7 +6987,7 @@ mod cranelift_jit_impl {
                             lognot_ref,
                             math,
                             constants,
-                            None,
+                            ovf.map(|o| o.acc),
                         )?;
                     }
                 }
@@ -6916,6 +7044,7 @@ mod cranelift_jit_impl {
                             &[],
                             &[],
                             target_ip,
+                            ovf,
                         );
                     } else {
                         bcx.ins().brif(pred, loop_hdr, &[], exit_block, &[]);
@@ -6947,6 +7076,7 @@ mod cranelift_jit_impl {
                             &[],
                             &[],
                             target_ip,
+                            ovf,
                         );
                     } else {
                         bcx.ins().brif(pred, exit_block, &[], loop_hdr, &[]);
@@ -6968,6 +7098,7 @@ mod cranelift_jit_impl {
                 &[],
                 &[],
                 fallthrough_ip,
+                ovf,
             );
 
             bcx.seal_all_blocks();
@@ -6992,36 +7123,6 @@ mod cranelift_jit_impl {
         })
     }
 
-    /// Whether a recorded trace contains integer arithmetic that could overflow.
-    ///
-    /// The block tier compiles these ops with overflow checks; the trace tier
-    /// does not yet (an overflow inside a trace has to side-exit through the
-    /// deopt path, restoring the abstract stack, rather than simply re-running
-    /// the chunk). Until it does, a strict-numeric VM declines to compile such a
-    /// trace and runs the loop in the interpreter, where the `NumericHook` gives
-    /// the exact result. Loops with no integer arithmetic still trace-compile.
-    fn trace_has_int_arith(ops: &[Op]) -> bool {
-        ops.iter().any(|op| {
-            matches!(
-                op,
-                Op::Add
-                    | Op::Sub
-                    | Op::Mul
-                    | Op::Negate
-                    | Op::Inc
-                    | Op::Dec
-                    | Op::Div
-                    | Op::Mod
-                    | Op::Pow
-                    | Op::PreIncSlot(_)
-                    | Op::PreIncSlotVoid(_)
-                    | Op::SlotIncLtIntJumpBack(_, _, _)
-                    | Op::AccumSumLoop(_, _, _)
-                    | Op::AddAssignSlotVoid(_, _)
-            )
-        })
-    }
-
     fn compile_trace_inner(
         ops: &[Op],
         recorded_ips: &[usize],
@@ -7030,9 +7131,18 @@ mod cranelift_jit_impl {
         slot_types: &[(u16, JitTy)],
         constants: &[FuseValue],
     ) -> Option<CompiledTrace> {
-        if super::strict_numeric() && trace_has_int_arith(ops) {
-            return None;
-        }
+        // Strict numeric mode used to decline any trace containing integer
+        // arithmetic, because the trace tier emitted wrapping `iadd`/`isub`/
+        // `imul`. It now emits the checked forms and bails at every exit
+        // (`emit_trace_overflow_bail`), so such traces are compiled — and the
+        // ops that are still unchecked (`Div`, `Pow`, `Inc`, `Dec`, the fused
+        // slot superinstructions) never reach here: `is_block_eligible_op_at`
+        // declines them in strict mode.
+        //
+        // The guard must NOT be reinstated here alone: the disk-cache path
+        // (`compile_trace_native`) builds the same function without passing
+        // through this fn, so a check here is not a safety property — the
+        // checks inside `build_trace_function` are.
         let BuiltFn {
             mut module,
             mut ctx,
@@ -7681,6 +7791,13 @@ impl JitCompiler {
         cranelift_jit_impl::trace_abort(chunk, anchor_ip);
     }
 
+    /// Record a strict-mode integer-overflow bail for this trace, blacklisting
+    /// it after a couple of them so the loop settles into the interpreter.
+    #[cfg(feature = "jit")]
+    pub fn trace_overflow_bail(&self, chunk: &crate::Chunk, anchor_ip: usize) {
+        cranelift_jit_impl::trace_overflow_bail(chunk, anchor_ip);
+    }
+
     /// Whether a recorded sequence is eligible for trace JIT compilation.
     #[cfg(feature = "jit")]
     /// Public method `is_trace_eligible` — see the implementing block's surrounding context for the call contract.
@@ -7872,6 +7989,10 @@ impl JitCompiler {
     #[cfg(not(feature = "jit"))]
     /// No-op stub for `trace_abort` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
     pub fn trace_abort(&self, _chunk: &crate::Chunk, _anchor_ip: usize) {}
+
+    #[cfg(not(feature = "jit"))]
+    /// No-op stub for `trace_overflow_bail` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
+    pub fn trace_overflow_bail(&self, _chunk: &crate::Chunk, _anchor_ip: usize) {}
 
     #[cfg(not(feature = "jit"))]
     /// No-op stub for `is_trace_eligible` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
