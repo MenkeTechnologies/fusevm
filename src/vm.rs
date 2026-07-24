@@ -1006,6 +1006,43 @@ impl VM {
     /// numeric mode (a [`NumericHook`] is installed), where an integer result
     /// that does not fit `i64` — and any operand that is not a number — goes to
     /// the host instead of being wrapped or coerced. Returns the error message
+    /// Turn a truncating remainder on top of the stack into a floored one for
+    /// divisor `k` — the fallback half of [`Op::MulModFloor`] /
+    /// [`Op::MulAddModFloor`], whose fast path floors in `floor_rem_i128`.
+    ///
+    /// Applied after the unfused `Mod` those ops replay for non-integer operands:
+    /// that `Mod` truncates when it stays native (a `Bool` or float operand) and
+    /// defers to the `NumericHook` otherwise. Correcting here makes the op's
+    /// contract hold on every path, and it is idempotent — a hook that already
+    /// floored leaves the sign agreeing with `k`, so nothing is added. A
+    /// non-numeric result (a frontend whose `%` formats a string) is left alone.
+    fn floor_correct_top(&mut self, k: &Value) {
+        let kk = match k {
+            Value::Int(n) => *n,
+            Value::Bool(b) => i64::from(*b),
+            _ => return,
+        };
+        if kk == 0 {
+            return;
+        }
+        match self.stack.last_mut() {
+            // |r| < |kk|, so the shift cannot overflow.
+            Some(Value::Int(r)) => {
+                if *r != 0 && (*r < 0) != (kk < 0) {
+                    *r += kk;
+                }
+            }
+            Some(Value::Float(f)) => {
+                if *f != 0.0 && (*f < 0.0) != (kk < 0) {
+                    *f += kk as f64;
+                } else if *f == 0.0 {
+                    *f = 0.0; // normalize -0.0, which floors to +0.0
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// if the hook signalled.
     #[inline(always)]
     fn arith_int_fast(
@@ -3147,6 +3184,97 @@ impl VM {
             Op::AbsInt => {
                 let a = self.pop();
                 self.push(Value::Int(a.to_int().wrapping_abs()));
+            }
+            // Fused `(a * b) % k`, product taken exactly in i128 (see Op::MulModFloor).
+            // Three native ints: one exact remainder, no overflow, no bignum. Any
+            // other operand shape replays the unfused `Mul` then `Mod` through
+            // `arith_int_fast`, so a `NumericHook` sees precisely the two ops it
+            // would have seen without the fusion.
+            Op::MulModFloor => {
+                let len = self.stack.len();
+                let all_int = len >= 3
+                    && self.stack[len - 3..]
+                        .iter()
+                        .all(|v| matches!(v, Value::Int(_)));
+                if all_int {
+                    let k = self.pop().to_int();
+                    let b = self.pop().to_int();
+                    let a = self.pop().to_int();
+                    self.push(Value::Int(crate::floor_rem_i128(a as i128 * b as i128, k)));
+                } else {
+                    let k = self.pop();
+                    let k_for_floor = k.clone();
+                    if let Some(e) = self.arith_int_fast(
+                        NumOp::Mul,
+                        i64::wrapping_mul,
+                        i64::checked_mul,
+                        |a, b| a * b,
+                    ) {
+                        return ExecFlow::Ret(VMResult::Error(e));
+                    }
+                    self.push(k);
+                    if let Some(e) = self.arith_int_fast(
+                        NumOp::Mod,
+                        |x, y| if y != 0 { x % y } else { 0 },
+                        |x, y| if y != 0 { x.checked_rem(y) } else { Some(0) },
+                        |a, b| a % b,
+                    ) {
+                        return ExecFlow::Ret(VMResult::Error(e));
+                    }
+                    self.floor_correct_top(&k_for_floor);
+                }
+            }
+            // Fused `(a * b + c) % k` — the linear-congruential idiom. Same
+            // contract as MulModFloor: exact i128 intermediates for four native ints,
+            // otherwise replay the unfused `Mul`, `Add`, `Mod` through the hook.
+            Op::MulAddModFloor => {
+                let len = self.stack.len();
+                let all_int = len >= 4
+                    && self.stack[len - 4..]
+                        .iter()
+                        .all(|v| matches!(v, Value::Int(_)));
+                if all_int {
+                    let k = self.pop().to_int();
+                    let c = self.pop().to_int();
+                    let b = self.pop().to_int();
+                    let a = self.pop().to_int();
+                    // |a*b| < 2^126, so adding c cannot overflow i128 either.
+                    self.push(Value::Int(crate::floor_rem_i128(
+                        a as i128 * b as i128 + c as i128,
+                        k,
+                    )));
+                } else {
+                    let k = self.pop();
+                    let k_for_floor = k.clone();
+                    let c = self.pop();
+                    if let Some(e) = self.arith_int_fast(
+                        NumOp::Mul,
+                        i64::wrapping_mul,
+                        i64::checked_mul,
+                        |a, b| a * b,
+                    ) {
+                        return ExecFlow::Ret(VMResult::Error(e));
+                    }
+                    self.push(c);
+                    if let Some(e) = self.arith_int_fast(
+                        NumOp::Add,
+                        i64::wrapping_add,
+                        i64::checked_add,
+                        |a, b| a + b,
+                    ) {
+                        return ExecFlow::Ret(VMResult::Error(e));
+                    }
+                    self.push(k);
+                    if let Some(e) = self.arith_int_fast(
+                        NumOp::Mod,
+                        |x, y| if y != 0 { x % y } else { 0 },
+                        |x, y| if y != 0 { x.checked_rem(y) } else { Some(0) },
+                        |a, b| a % b,
+                    ) {
+                        return ExecFlow::Ret(VMResult::Error(e));
+                    }
+                    self.floor_correct_top(&k_for_floor);
+                }
             }
             Op::GcdInt => {
                 let b = self.pop().to_int().unsigned_abs();

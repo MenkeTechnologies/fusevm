@@ -643,6 +643,47 @@ pub enum Op {
     /// known at run time (closures passed as arguments, function-typed fields).
     /// Additive; frontends that never emit it are unaffected.
     CallDynamic(u8),
+
+    /// Fused `(a * b) % k` on integers, with the product taken **exactly**.
+    /// Pops `k`, `b`, `a` (`k` on top) and pushes the remainder.
+    ///
+    /// The product is computed in `i128`, so a product that leaves `i64` — the
+    /// normal case in modular arithmetic (`(seed * 6364136223846793005) % m`,
+    /// `(i * i * i) % 1000000007`) — never overflows and never needs a bignum.
+    /// The result always fits `i64` (`|r| < |k|`), so unlike `Mul` this op can
+    /// not overflow and a strict-numeric frontend needs no deopt for it.
+    ///
+    /// The remainder is **floored**, not truncated — it takes the sign of the
+    /// divisor (`(-7 * 1) mod 3 == 2`), which is Python's and elisp's `%`, NOT
+    /// `Op::Mod`'s C-style one. The `Floor` in the name is the whole point: a
+    /// frontend that emits this op needs no sign-correction sequence after it,
+    /// which is what lets the fusion stay correct for operand types the frontend
+    /// could not prove numeric. An awk/shell frontend, whose `%` truncates, must
+    /// not emit it. A zero divisor pushes `0`, matching `Op::Mod`.
+    ///
+    /// Any operand that is not a native integer (a host bignum, a float, a
+    /// string) falls back to running the unfused `Mul` then `Mod`, so the
+    /// `NumericHook` sees exactly the ops it would have seen unfused; the result
+    /// is then floored the same way, so the contract holds on every path.
+    ///
+    /// Additive; frontends that never emit it are unaffected.
+    MulModFloor,
+
+    /// Fused `(a * b + c) % k` on integers, product and sum taken **exactly**.
+    /// Pops `k`, `c`, `b`, `a` (`k` on top) and pushes the remainder.
+    ///
+    /// The `MulModFloor` of the linear-congruential idiom: `(seed * A + C) % M` for a
+    /// PRNG, `(hash * 31 + byte) % M` for a rolling hash. Both intermediates are
+    /// taken in `i128` (`|a*b| < 2^126`, so adding `c` cannot overflow either),
+    /// so the whole expression stays native where the unfused form would build a
+    /// bignum for a product that the remainder immediately discards.
+    ///
+    /// Same contract as [`Op::MulModFloor`] otherwise: floored remainder,
+    /// `k == 0` pushes `0`, cannot overflow, and a non-integer operand replays
+    /// the unfused `Mul`, `Add`, `Mod` so a `NumericHook` sees those three ops.
+    ///
+    /// Additive; frontends that never emit it are unaffected.
+    MulAddModFloor,
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -923,6 +964,8 @@ impl Hash for Op {
             | Op::AbsInt
             | Op::GcdInt
             | Op::LcmInt
+            | Op::MulModFloor
+            | Op::MulAddModFloor
             | Op::TimeInt
             | Op::Negate
             | Op::Inc

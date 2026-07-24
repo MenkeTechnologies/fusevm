@@ -84,6 +84,29 @@ pub use jit::{
     SlotKind, TraceJitConfig, TraceLookup, TraceMetadata,
 };
 pub use op::Op;
+
+/// Reduce an exact `i128` numerator by `k`, **flooring** — the remainder takes
+/// the sign of the divisor (`-7 mod 3 == 2`), which is Python's and elisp's `%`
+/// rather than C's truncating one.
+///
+/// The single implementation behind [`Op::MulModFloor`] / [`Op::MulAddModFloor`]
+/// in all three tiers (interpreter, JIT libcall, AOT libcall), so they cannot
+/// drift. `k == 0` yields `0`, matching [`Op::Mod`]'s zero divisor. The result
+/// always fits `i64` because `|r| < |k|`.
+#[inline]
+pub fn floor_rem_i128(n: i128, k: i64) -> i64 {
+    if k == 0 {
+        return 0;
+    }
+    let k = k as i128;
+    let r = n % k;
+    // Signs disagree (and there is a remainder to shift) -> add one divisor.
+    if r != 0 && (r < 0) != (k < 0) {
+        (r + k) as i64
+    } else {
+        r as i64
+    }
+}
 #[cfg(feature = "ffi")]
 pub use rust_sugar::RustSugar;
 pub use sched::{SchedError, SchedReq, Scheduler, SelectCase};

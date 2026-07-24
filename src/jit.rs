@@ -1047,6 +1047,20 @@ mod cranelift_jit_impl {
                     _ => stack.push(Cell::Dyn),
                 }
             }
+            // Fused exact `(a*b) % k` — three ints in, one int out. Never
+            // const-folded here: the point of the op is the i128 product, and
+            // the abstract cell model is i64.
+            Op::MulModFloor => {
+                let _ = pop2_strict(stack)?;
+                stack.pop()?;
+                stack.push(Cell::Dyn);
+            }
+            Op::MulAddModFloor => {
+                let _ = pop2_strict(stack)?;
+                stack.pop()?;
+                stack.pop()?;
+                stack.push(Cell::Dyn);
+            }
             Op::GcdInt => {
                 let (_, _) = pop2_strict(stack)?;
                 stack.push(Cell::Dyn);
@@ -1420,6 +1434,26 @@ mod cranelift_jit_impl {
         }
     }
 
+    /// `(a * b) % k` with the product taken exactly in `i128` (see
+    /// [`crate::Op::MulModFloor`]). `k == 0` yields `0`, matching the interpreter's
+    /// zero-divisor behaviour for `Op::Mod`; every other divisor is safe because
+    /// the i128 remainder can neither trap nor leave `i64` (`|r| < |k|`).
+    ///
+    /// A libcall rather than inline IR: Cranelift's `i128` division/remainder
+    /// legalizes to a compiler-rt call anyway, and this way the JIT, the AOT and
+    /// the interpreter all reduce through one implementation.
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_mulmod_floor_i64(a: i64, b: i64, k: i64) -> i64 {
+        crate::floor_rem_i128(a as i128 * b as i128, k)
+    }
+
+    /// `(a * b + c) % k`, floored, with exact i128 intermediates (see
+    /// [`crate::Op::MulAddModFloor`]).
+    #[no_mangle]
+    pub extern "C" fn fusevm_jit_muladdmod_floor_i64(a: i64, b: i64, c: i64, k: i64) -> i64 {
+        crate::floor_rem_i128(a as i128 * b as i128 + c as i128, k)
+    }
+
     /// GCD of two i64s (reduced by absolute value). gcd(0, 0) = 0.
     #[no_mangle]
     pub extern "C" fn fusevm_jit_gcd_i64(a: i64, b: i64) -> i64 {
@@ -1475,6 +1509,8 @@ mod cranelift_jit_impl {
         log2: Option<cranelift_module::FuncId>,
         log10: Option<cranelift_module::FuncId>,
         gcd_i64: Option<cranelift_module::FuncId>,
+        mulmod_floor_i64: Option<cranelift_module::FuncId>,
+        muladdmod_floor_i64: Option<cranelift_module::FuncId>,
         lcm_i64: Option<cranelift_module::FuncId>,
         time_i64: Option<cranelift_module::FuncId>,
         awk_div_trap: Option<cranelift_module::FuncId>,
@@ -1503,6 +1539,8 @@ mod cranelift_jit_impl {
         log2: Option<cranelift_codegen::ir::FuncRef>,
         log10: Option<cranelift_codegen::ir::FuncRef>,
         gcd_i64: Option<cranelift_codegen::ir::FuncRef>,
+        mulmod_floor_i64: Option<cranelift_codegen::ir::FuncRef>,
+        muladdmod_floor_i64: Option<cranelift_codegen::ir::FuncRef>,
         lcm_i64: Option<cranelift_codegen::ir::FuncRef>,
         time_i64: Option<cranelift_codegen::ir::FuncRef>,
         awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
@@ -1553,6 +1591,27 @@ mod cranelift_jit_impl {
         let mut ps = module.make_signature();
         ps.params.push(AbiParam::new(types::I64));
         ps.params.push(AbiParam::new(types::I64));
+        ps.returns.push(AbiParam::new(types::I64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_ternary_i64(module: &mut JITModule, name: &str) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::I64));
+        ps.params.push(AbiParam::new(types::I64));
+        ps.params.push(AbiParam::new(types::I64));
+        ps.returns.push(AbiParam::new(types::I64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_quaternary_i64(
+        module: &mut JITModule,
+        name: &str,
+    ) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        for _ in 0..4 {
+            ps.params.push(AbiParam::new(types::I64));
+        }
         ps.returns.push(AbiParam::new(types::I64));
         module.declare_function(name, Linkage::Import, &ps).ok()
     }
@@ -1614,6 +1673,14 @@ mod cranelift_jit_impl {
                     Op::GcdInt if m.gcd_i64.is_none() => {
                         m.gcd_i64 = declare_binary_i64(module, "fusevm_jit_gcd_i64");
                     }
+                    Op::MulModFloor if m.mulmod_floor_i64.is_none() => {
+                        m.mulmod_floor_i64 =
+                            declare_ternary_i64(module, "fusevm_jit_mulmod_floor_i64");
+                    }
+                    Op::MulAddModFloor if m.muladdmod_floor_i64.is_none() => {
+                        m.muladdmod_floor_i64 =
+                            declare_quaternary_i64(module, "fusevm_jit_muladdmod_floor_i64");
+                    }
                     Op::LcmInt if m.lcm_i64.is_none() => {
                         m.lcm_i64 = declare_binary_i64(module, "fusevm_jit_lcm_i64");
                     }
@@ -1674,6 +1741,12 @@ mod cranelift_jit_impl {
                 log2: self.log2.map(|id| module.declare_func_in_func(id, func)),
                 log10: self.log10.map(|id| module.declare_func_in_func(id, func)),
                 gcd_i64: self.gcd_i64.map(|id| module.declare_func_in_func(id, func)),
+                mulmod_floor_i64: self
+                    .mulmod_floor_i64
+                    .map(|id| module.declare_func_in_func(id, func)),
+                muladdmod_floor_i64: self
+                    .muladdmod_floor_i64
+                    .map(|id| module.declare_func_in_func(id, func)),
                 lcm_i64: self.lcm_i64.map(|id| module.declare_func_in_func(id, func)),
                 time_i64: self
                     .time_i64
@@ -1716,6 +1789,14 @@ mod cranelift_jit_impl {
         builder.symbol("fusevm_jit_log2_f64", fusevm_jit_log2_f64 as *const u8);
         builder.symbol("fusevm_jit_log10_f64", fusevm_jit_log10_f64 as *const u8);
         builder.symbol("fusevm_jit_gcd_i64", fusevm_jit_gcd_i64 as *const u8);
+        builder.symbol(
+            "fusevm_jit_mulmod_floor_i64",
+            fusevm_jit_mulmod_floor_i64 as *const u8,
+        );
+        builder.symbol(
+            "fusevm_jit_muladdmod_floor_i64",
+            fusevm_jit_muladdmod_floor_i64 as *const u8,
+        );
         builder.symbol("fusevm_jit_lcm_i64", fusevm_jit_lcm_i64 as *const u8);
         builder.symbol("fusevm_jit_time_i64", fusevm_jit_time_i64 as *const u8);
         builder.symbol(
@@ -2286,6 +2367,29 @@ mod cranelift_jit_impl {
                         stack.push((bcx.ins().iabs(i), JitTy::Int));
                     }
                 }
+            }
+            // Fused exact `(a * b) % k`. Int-only: a float operand would need the
+            // unfused float `Mul`/`fmod` pair, so the frontend must not emit
+            // `MulModFloor` where an operand can be a float (pythonrs gates on a
+            // provably-integer dividend). No overflow check is needed — the i128
+            // product cannot overflow and `|r| < |k|` always fits i64 — which is
+            // exactly why this op exists for strict-numeric frontends.
+            Op::MulModFloor => {
+                let (k, _) = stack.pop()?;
+                let (b, _) = stack.pop()?;
+                let (a, _) = stack.pop()?;
+                let c = bcx.ins().call(math.mulmod_floor_i64?, &[a, b, k]);
+                stack.push((*bcx.inst_results(c).first()?, JitTy::Int));
+            }
+            Op::MulAddModFloor => {
+                let (k, _) = stack.pop()?;
+                let (addend, _) = stack.pop()?;
+                let (b, _) = stack.pop()?;
+                let (a, _) = stack.pop()?;
+                let call = bcx
+                    .ins()
+                    .call(math.muladdmod_floor_i64?, &[a, b, addend, k]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Int));
             }
             Op::GcdInt => {
                 let (b, _) = stack.pop()?;
@@ -2913,6 +3017,10 @@ mod cranelift_jit_impl {
         /// known host helper keeps strict-mode chunks eligible for the native
         /// disk cache (the relocation is re-resolved live at load time).
         pub(crate) const H_NUM_OVF_TRAP: u32 = 22;
+        /// Fused exact `(a*b) % k` libcall (see `Op::MulModFloor`).
+        pub(crate) const H_MULMOD_I64: u32 = 23;
+        /// Fused exact `(a*b + c) % k` libcall (see `Op::MulAddModFloor`).
+        pub(crate) const H_MULADDMOD_I64: u32 = 24;
 
         // Native-blob tier discriminator. Persisted in the file and verified on
         // load so a block blob can never be transmuted with a linear signature.
@@ -2971,6 +3079,8 @@ mod cranelift_jit_impl {
                 H_LOG2_F64 => super::fusevm_jit_log2_f64 as *const u8 as usize,
                 H_LOG10_F64 => super::fusevm_jit_log10_f64 as *const u8 as usize,
                 H_GCD_I64 => super::fusevm_jit_gcd_i64 as *const u8 as usize,
+                H_MULMOD_I64 => super::fusevm_jit_mulmod_floor_i64 as *const u8 as usize,
+                H_MULADDMOD_I64 => super::fusevm_jit_muladdmod_floor_i64 as *const u8 as usize,
                 H_LCM_I64 => super::fusevm_jit_lcm_i64 as *const u8 as usize,
                 H_TIME_I64 => super::fusevm_jit_time_i64 as *const u8 as usize,
                 H_AWK_DIV_TRAP => super::super::fusevm_jit_awk_div_trap as *const u8 as usize,
@@ -3376,6 +3486,18 @@ mod cranelift_jit_impl {
                         &mut bcx,
                         H_LCM_I64,
                         &[types::I64, types::I64],
+                        types::I64,
+                    )),
+                    mulmod_floor_i64: Some(import(
+                        &mut bcx,
+                        H_MULMOD_I64,
+                        &[types::I64, types::I64, types::I64],
+                        types::I64,
+                    )),
+                    muladdmod_floor_i64: Some(import(
+                        &mut bcx,
+                        H_MULADDMOD_I64,
+                        &[types::I64, types::I64, types::I64, types::I64],
                         types::I64,
                     )),
                     time_i64: Some(import(&mut bcx, H_TIME_I64, &[], types::I64)),
@@ -4202,6 +4324,8 @@ mod cranelift_jit_impl {
                 | Op::AbsInt
                 | Op::GcdInt
                 | Op::LcmInt
+                | Op::MulModFloor
+                | Op::MulAddModFloor
                 | Op::TimeInt
                 | Op::Negate
                 | Op::Inc
@@ -5360,6 +5484,14 @@ mod cranelift_jit_impl {
                     #[cfg(feature = "jit-disk-cache")]
                     if let Some(fid) = math_ids.gcd_i64 {
                         v.push((fid, disk_cache::H_GCD_I64));
+                    }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.mulmod_floor_i64 {
+                        v.push((fid, disk_cache::H_MULMOD_I64));
+                    }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.muladdmod_floor_i64 {
+                        v.push((fid, disk_cache::H_MULADDMOD_I64));
                     }
                     #[cfg(feature = "jit-disk-cache")]
                     if let Some(fid) = math_ids.lcm_i64 {
@@ -7375,6 +7507,8 @@ impl JitCompiler {
                 | Op::AbsInt
                 | Op::GcdInt
                 | Op::LcmInt
+                | Op::MulModFloor
+                | Op::MulAddModFloor
                 | Op::TimeInt
                 | Op::Negate
                 | Op::Inc

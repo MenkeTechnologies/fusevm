@@ -629,3 +629,76 @@ fn strict_mode_compiles_modulo_by_a_constant_divisor() {
     let v = run_with_slots(b.build(), hook, 2);
     assert_eq!(v, Value::Int(expected));
 }
+
+/// `Op::MulModFloor` in a hot loop under a strict VM: the products overflow `i64`
+/// every iteration, and the whole point of the op is that this needs neither a
+/// bignum nor an overflow bail. The hook panics if consulted.
+#[test]
+fn strict_mode_mulmod_never_delegates_and_stays_exact() {
+    let hook: fusevm::NumericHook =
+        Arc::new(|op, a, b| panic!("exact mulmod_floor delegated: {op:?} {a:?} {b:?}"));
+
+    // acc = (acc + (i * 6364136223846793005) % 1000000007) over 400 iterations.
+    const MUL: i64 = 6_364_136_223_846_793_005;
+    const K: i64 = 1_000_000_007;
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(1), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(MUL), 1);
+    b.emit(Op::LoadInt(K), 1);
+    b.emit(Op::MulModFloor, 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(400), 1);
+    b.emit(Op::NumLt, 1);
+    let jmp = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(jmp, anchor);
+    b.emit(Op::GetSlot(1), 1);
+
+    // Floored remainder, exactly as the op documents.
+    let expected: i64 = (0..400i64)
+        .map(|i| fusevm::floor_rem_i128(i as i128 * MUL as i128, K))
+        .sum();
+    let v = run_with_slots(b.build(), hook, 2);
+    assert_eq!(v, Value::Int(expected));
+}
+
+/// A non-integer operand must take the unfused `Mul`-then-`Mod` path so the hook
+/// sees the same two ops it would have seen without the fusion — that is what
+/// keeps a frontend's bignum/`__mul__` semantics intact when the fusion fires on
+/// a value that turns out not to be an integer.
+#[test]
+fn mulmod_with_a_non_integer_operand_replays_the_unfused_ops() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let hook: fusevm::NumericHook = Arc::new(move |op, _a, _b| {
+        log.lock().unwrap().push(op);
+        Ok(Value::Int(7))
+    });
+
+    let mut b = ChunkBuilder::new();
+    let c = b.add_constant(Value::str("x"));
+    b.emit(Op::LoadConst(c), 1); // a string: not a native number
+    b.emit(Op::LoadInt(3), 1);
+    b.emit(Op::LoadInt(5), 1);
+    b.emit(Op::MulModFloor, 1);
+
+    let v = run(b.build(), Some(hook)).expect("delegated mulmod_floor runs");
+    // Mul delegated (string operand) -> 7; then 7 % 5 is native = 2.
+    assert_eq!(v, Value::Int(2));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![NumOp::Mul],
+        "the fusion must delegate the Mul exactly once, then reduce natively"
+    );
+}

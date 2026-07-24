@@ -486,6 +486,20 @@ pub extern "C" fn fusevm_aot_unary_math(id: u32, x: f64) -> f64 {
     }
 }
 
+/// Libcall for `Op::MulAddModFloor`: `(a * b + c) % k`, exact in `i128`.
+#[no_mangle]
+pub extern "C" fn fusevm_aot_muladdmod_floor(a: i64, b: i64, c: i64, k: i64) -> i64 {
+    crate::floor_rem_i128(a as i128 * b as i128 + c as i128, k)
+}
+
+/// Libcall for `Op::MulModFloor`: `(a * b) % k` with the product taken exactly in
+/// `i128`, so a product that leaves `i64` needs no bignum and cannot overflow.
+/// `k == 0` yields `0`, matching the interpreter. Pure (no VM access).
+#[no_mangle]
+pub extern "C" fn fusevm_aot_mulmod_floor(a: i64, b: i64, k: i64) -> i64 {
+    crate::floor_rem_i128(a as i128 * b as i128, k)
+}
+
 /// Math libcall for `Op::Atan2Float` (`y.atan2(x)`). Pure (no VM access).
 #[no_mangle]
 pub extern "C" fn fusevm_aot_atan2(y: f64, x: f64) -> f64 {
@@ -1216,6 +1230,26 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
+            // Fused exact `(a * b) % k` → Int. Int-like operands only: a float
+            // operand would take the interpreter's unfused `Mul`/`Mod` path, so
+            // it deopts instead of silently truncating.
+            Op::MulModFloor => {
+                let k = st.pop()?;
+                let b = st.pop()?;
+                let a = st.pop()?;
+                deopt_unless!(a.is_intlike() && b.is_intlike() && k.is_intlike());
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
+            Op::MulAddModFloor => {
+                let k = st.pop()?;
+                let c = st.pop()?;
+                let b = st.pop()?;
+                let a = st.pop()?;
+                deopt_unless!(a.is_intlike() && b.is_intlike() && c.is_intlike() && k.is_intlike());
+                st.push(Kind::Int);
+                succs.push((ip + 1, st, inits));
+            }
             // gcd/lcm via internal Euclid loops on magnitudes → Int. Int-like
             // operands only (the interpreter's `to_int().unsigned_abs()`).
             Op::GcdInt | Op::LcmInt => {
@@ -1668,8 +1702,8 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     // flag — every integer `Add`/`Sub`/`Mul` (overflow) also deopt but are NOT in
     // `deopt_points`. Compute `may` whenever any of those are present, else the
     // spill set is empty and a slot set natively is lost across the deopt.
-    let has_ovf_arith = chunk.int_overflow_deopt
-        && ops.iter().any(|o| matches!(o, Op::Add | Op::Sub | Op::Mul));
+    let has_ovf_arith =
+        chunk.int_overflow_deopt && ops.iter().any(|o| matches!(o, Op::Add | Op::Sub | Op::Mul));
     let has_div = ops.iter().any(|o| matches!(o, Op::Div));
     let may = if deopt_points.is_empty() && !has_ovf_arith && !has_div {
         HashMap::new()
@@ -1762,6 +1796,30 @@ fn build_entry_native<M: Module>(
     let atan2_id = module
         .declare_function("fusevm_aot_atan2", Linkage::Import, &math_sig)
         .map_err(|e| format!("aot: declare atan2: {e}"))?;
+
+    // Fused exact `(a*b) % k`: fn(i64, i64, i64) -> i64.
+    let mut mulmod_sig = module.make_signature();
+    mulmod_sig.params.push(AbiParam::new(types::I64));
+    mulmod_sig.params.push(AbiParam::new(types::I64));
+    mulmod_sig.params.push(AbiParam::new(types::I64));
+    mulmod_sig.returns.push(AbiParam::new(types::I64));
+    let mulmod_id = module
+        .declare_function("fusevm_aot_mulmod_floor", Linkage::Import, &mulmod_sig)
+        .map_err(|e| format!("aot: declare mulmod_floor: {e}"))?;
+
+    // Fused exact `(a*b + c) % k`: fn(i64, i64, i64, i64) -> i64.
+    let mut muladdmod_sig = module.make_signature();
+    for _ in 0..4 {
+        muladdmod_sig.params.push(AbiParam::new(types::I64));
+    }
+    muladdmod_sig.returns.push(AbiParam::new(types::I64));
+    let muladdmod_id = module
+        .declare_function(
+            "fusevm_aot_muladdmod_floor",
+            Linkage::Import,
+            &muladdmod_sig,
+        )
+        .map_err(|e| format!("aot: declare muladdmod_floor: {e}"))?;
 
     // Unary transcendental dispatcher: fn(u32 id, f64) -> f64.
     let mut unary_sig = module.make_signature();
@@ -1912,6 +1970,8 @@ fn build_entry_native<M: Module>(
         let serr_ref = module.declare_func_in_func(serr_id, b.func);
         let powf_ref = module.declare_func_in_func(powf_id, b.func);
         let fmod_ref = module.declare_func_in_func(fmod_id, b.func);
+        let mulmod_ref = module.declare_func_in_func(mulmod_id, b.func);
+        let muladdmod_ref = module.declare_func_in_func(muladdmod_id, b.func);
         let atan2_ref = module.declare_func_in_func(atan2_id, b.func);
         let unary_ref = module.declare_func_in_func(unary_id, b.func);
         let warn_ref = module.declare_func_in_func(warn_id, b.func);
@@ -2493,6 +2553,41 @@ fn build_entry_native<M: Module>(
                     let r = b.inst_results(call)[0];
                     b.def_var(fvars[ix], r);
                     kinds.push(Kind::Float);
+                }
+                // Fused exact `(a*b) % k` via the i128 libcall — no overflow
+                // check needed (the product is exact and `|r| < |k|`).
+                Op::MulModFloor => {
+                    let _ = kinds.pop().unwrap();
+                    let ik = kinds.len();
+                    let _ = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let _ = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let av = b.use_var(ivars[ix]);
+                    let bv = b.use_var(ivars[iy]);
+                    let kv = b.use_var(ivars[ik]);
+                    let call = b.ins().call(mulmod_ref, &[av, bv, kv]);
+                    let r = b.inst_results(call)[0];
+                    b.def_var(ivars[ix], r);
+                    kinds.push(Kind::Int);
+                }
+                Op::MulAddModFloor => {
+                    let _ = kinds.pop().unwrap();
+                    let ik = kinds.len();
+                    let _ = kinds.pop().unwrap();
+                    let ic = kinds.len();
+                    let _ = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let _ = kinds.pop().unwrap();
+                    let ix = kinds.len();
+                    let av = b.use_var(ivars[ix]);
+                    let bv = b.use_var(ivars[iy]);
+                    let cv = b.use_var(ivars[ic]);
+                    let kv = b.use_var(ivars[ik]);
+                    let call = b.ins().call(muladdmod_ref, &[av, bv, cv, kv]);
+                    let r = b.inst_results(call)[0];
+                    b.def_var(ivars[ix], r);
+                    kinds.push(Kind::Int);
                 }
                 // gcd via an internal Euclid loop on the magnitudes (`urem`,
                 // guarded by the `y != 0` loop condition). Result is `x` as i64.
@@ -3476,6 +3571,14 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
     builder.symbol("fusevm_aot_fmod", fusevm_aot_fmod as *const u8);
     builder.symbol("fusevm_aot_unary_math", fusevm_aot_unary_math as *const u8);
     builder.symbol("fusevm_aot_atan2", fusevm_aot_atan2 as *const u8);
+    builder.symbol(
+        "fusevm_aot_mulmod_floor",
+        fusevm_aot_mulmod_floor as *const u8,
+    );
+    builder.symbol(
+        "fusevm_aot_muladdmod_floor",
+        fusevm_aot_muladdmod_floor as *const u8,
+    );
     builder.symbol("fusevm_aot_set_error", fusevm_aot_set_error as *const u8);
     builder.symbol("fusevm_aot_awk_warn", fusevm_aot_awk_warn as *const u8);
     builder.symbol("fusevm_aot_push_int", fusevm_aot_push_int as *const u8);
@@ -5447,6 +5550,111 @@ mod tests {
         }
     }
 
+    /// `Op::MulModFloor` must agree with the interpreter across the whole i64 range,
+    /// which is the point of the op: the products here overflow `i64` in almost
+    /// every iteration, and both paths have to reduce the EXACT product (i128 in
+    /// native code, i128 in the interpreter) rather than the wrapped one.
+    #[test]
+    fn native_differential_mulmod() {
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        // Divisors worth pinning: zero (interpreter yields 0), ±1 (always 0,
+        // and the `srem(i64::MIN, -1)` trap this op sidesteps), and randoms.
+        let fixed = [0i64, 1, -1, 2, -2, 7, -7, 1_000_000_007, i64::MIN, i64::MAX];
+        for i in 0..300 {
+            let a = next() as i64;
+            let bb = next() as i64;
+            let k = if i < fixed.len() {
+                fixed[i]
+            } else {
+                next() as i64
+            };
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(a), 1);
+            b.emit(Op::LoadInt(bb), 1);
+            b.emit(Op::LoadInt(k), 1);
+            b.emit(Op::MulModFloor, 1);
+            let chunk = b.build();
+            assert!(native_lowerable(&chunk), "mulmod_floor must lower natively");
+            assert_native_matches_interp(chunk);
+        }
+    }
+
+    /// The fusion must equal the unfused `Mul; Mod` pair whenever the product
+    /// stays in `i64` — where the two are required to agree exactly — and must
+    /// give the mathematically exact answer where it doesn't.
+    #[test]
+    fn mulmod_matches_unfused_and_is_exact() {
+        let mut fused = ChunkBuilder::new();
+        fused.emit(Op::LoadInt(123_456), 1);
+        fused.emit(Op::LoadInt(789), 1);
+        fused.emit(Op::LoadInt(1000), 1);
+        fused.emit(Op::MulModFloor, 1);
+        assert_native_int(
+            fused.build(),
+            crate::floor_rem_i128(123_456i128 * 789, 1000),
+        );
+
+        // 4e9^2 = 1.6e19 > i64::MAX (9.22e18): the unfused form wraps, the fused
+        // one reduces the exact product.
+        let a: i64 = 4_000_000_000;
+        let mut big = ChunkBuilder::new();
+        big.emit(Op::LoadInt(a), 1);
+        big.emit(Op::LoadInt(a), 1);
+        big.emit(Op::LoadInt(1_000_000_007), 1);
+        big.emit(Op::MulModFloor, 1);
+        let expect = crate::floor_rem_i128(a as i128 * a as i128, 1_000_000_007);
+        assert_native_int(big.build(), expect);
+        assert_ne!(
+            expect,
+            a.wrapping_mul(a) % 1_000_000_007,
+            "test is vacuous unless the wrapped product differs"
+        );
+    }
+
+    /// The mul-add fusion must equal the exact math on the whole i64 range —
+    /// the LCG shape `(seed * A + C) % M`, whose product overflows every step.
+    #[test]
+    fn native_differential_muladdmod() {
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            seed = seed.wrapping_add(0xD1B5_4A32_D192_ED03);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let fixed = [0i64, 1, -1, 2, -2, 1_000_000_007, i64::MIN, i64::MAX];
+        for i in 0..300 {
+            let a = next() as i64;
+            let bb = next() as i64;
+            let c = next() as i64;
+            let k = if i < fixed.len() {
+                fixed[i]
+            } else {
+                next() as i64
+            };
+            let mut b = ChunkBuilder::new();
+            b.emit(Op::LoadInt(a), 1);
+            b.emit(Op::LoadInt(bb), 1);
+            b.emit(Op::LoadInt(c), 1);
+            b.emit(Op::LoadInt(k), 1);
+            b.emit(Op::MulAddModFloor, 1);
+            let chunk = b.build();
+            assert!(
+                native_lowerable(&chunk),
+                "muladdmod_floor must lower natively"
+            );
+            assert_native_matches_interp(chunk);
+        }
+    }
+
     #[test]
     fn native_int_math_ops() {
         // TruncInt of a float truncates toward zero; AbsInt is wrapping abs.
@@ -5577,7 +5785,10 @@ mod tests {
         b.emit(Op::Add, 1);
         b.set_int_overflow_deopt(true);
         let chunk = b.build();
-        assert!(native_lowerable(&chunk), "int add must still lower natively");
+        assert!(
+            native_lowerable(&chunk),
+            "int add must still lower natively"
+        );
         match run_chunk_native(&chunk, sentinel_hook).expect("native run") {
             VMResult::Ok(v) => assert_eq!(v, Value::Int(-42), "overflow must deopt to hook"),
             other => panic!("expected Ok(-42), got {other:?}"),
