@@ -746,9 +746,11 @@ fn emit_deopt(
     assigned: &BTreeSet<u32>,
     deopt_ip: usize,
 ) {
-    // Slots/globals: write back ONLY the definitely-assigned ones, boxed per
-    // kind. An unassigned register holds a dead zero; writing it would make the
-    // resumed interpreter see 0 where it expects `Undef`.
+    // Slots/globals: write back the may-assigned ones (`assigned`), boxed per
+    // kind. Each such register is a phi over incoming paths, so it holds the
+    // taken path's value (or the zero-init the native code already used where the
+    // slot wasn't assigned on that path); a slot never assigned on any path here
+    // isn't in the set and stays `Undef` in the VM.
     for (i, &sv) in slot_vars.iter().enumerate() {
         if !assigned.contains(&(i as u32)) {
             continue;
@@ -1648,29 +1650,27 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
         return None;
     }
 
-    // Soundness: a deopt resumes the interpreter, which reads slots/globals from
-    // the VM. `emit_deopt` writes back only the *definitely* assigned ones, so a
-    // slot that is only *maybe* assigned at a deopt point (conditionally written
-    // before it) would be read as `Undef` instead of its live register value.
-    // Reject such chunks (they fall back to threaded). (`Div`'s deopt is exempt:
-    // its successors are native and definite-assignment-checked.)
-    if !deopt_points.is_empty() {
-        let may = may_assigned(chunk, n, &deopt_points);
-        for &ip in &deopt_points {
-            let must = state.get(&ip).map(|(_, m)| m);
-            if must != may.get(&ip) {
-                return None;
-            }
-        }
-    }
-
-    // Definite-assignment set at each ip that may emit a deopt: the deopt points
-    // plus every `Div` (whose divide-by-zero deopts). Codegen writes back only
-    // these slots/globals.
+    // Slots/globals to spill at each ip that may emit a deopt (the deopt points
+    // plus every `Div`, whose divide-by-zero deopts): the **may**-assigned set —
+    // every slot/global assigned on *some* path here. A deopt resumes the
+    // interpreter, which reads these from the VM; `emit_deopt` writes each one
+    // back from its register. That register is a phi over all incoming paths, so
+    // it already holds the taken path's value — an assigned value, or the
+    // zero-init the native code itself used for a slot not yet assigned on that
+    // path — so the resumed VM stays consistent with native execution. (Spilling
+    // only the *definitely*-assigned set instead forced a bail whenever any slot
+    // was merely maybe-assigned — e.g. a variable written inside a loop and live
+    // at a later deopt such as the program's final builtin call — which sent
+    // every such chunk, including all nested-loop programs, to the interpreter.)
+    let may = if deopt_points.is_empty() {
+        HashMap::new()
+    } else {
+        may_assigned(chunk, n, &deopt_points)
+    };
     let mut inits_at: HashMap<usize, BTreeSet<u32>> = HashMap::new();
-    for (&ip, (_k, inits)) in &state {
+    for &ip in state.keys() {
         if deopt_points.contains(&ip) || matches!(ops[ip], Op::Div) {
-            inits_at.insert(ip, inits.clone());
+            inits_at.insert(ip, may.get(&ip).cloned().unwrap_or_default());
         }
     }
 
