@@ -30,6 +30,15 @@ pub struct Chunk {
     pub sub_chunks: Vec<Chunk>,
     /// Source file name (for error messages)
     pub source: String,
+    /// Opt-in: native codegen (AOT/JIT) treats integer `Add`/`Sub`/`Mul` as
+    /// *overflow-checked* — on i64 overflow it deopts to the interpreter (which
+    /// runs the op through the frontend's numeric hook) instead of wrapping. A
+    /// frontend with arbitrary-precision integers (pythonrs) sets this so its
+    /// native loops stay both fast (native i64 on the common path) and correct
+    /// (bignum promotion on overflow). Default `false` keeps the raw-wrapping
+    /// behavior awk/shell rely on, so existing frontends are byte-identical.
+    #[serde(default)]
+    pub int_overflow_deopt: bool,
     /// Cached hash of ops + constants (computed once at build time for O(1) JIT cache lookup)
     #[serde(skip)]
     pub op_hash: u64,
@@ -116,6 +125,14 @@ impl ChunkBuilder {
             chunk: Chunk::new(),
             name_map: std::collections::HashMap::new(),
         }
+    }
+
+    /// Opt in to overflow-checked native integer arithmetic for this chunk (see
+    /// [`Chunk::int_overflow_deopt`]). Frontends with arbitrary-precision ints
+    /// call this so native `Add`/`Sub`/`Mul` deopt to the interpreter on i64
+    /// overflow instead of wrapping.
+    pub fn set_int_overflow_deopt(&mut self, on: bool) {
+        self.chunk.int_overflow_deopt = on;
     }
 
     /// Emit an op at the current position.

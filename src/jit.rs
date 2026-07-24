@@ -4337,6 +4337,7 @@ mod cranelift_jit_impl {
             block_ranges: Vec::new(),
             sub_chunks: Vec::new(),
             source: chunk.source.clone(),
+            int_overflow_deopt: chunk.int_overflow_deopt,
             op_hash: 0,
         };
         for op in &chunk.ops[start..end] {

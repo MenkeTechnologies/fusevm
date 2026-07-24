@@ -1662,14 +1662,26 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     // was merely maybe-assigned — e.g. a variable written inside a loop and live
     // at a later deopt such as the program's final builtin call — which sent
     // every such chunk, including all nested-loop programs, to the interpreter.)
-    let may = if deopt_points.is_empty() {
+    // A deopt exit needs `may`-assigned state to spill the live slots/globals so
+    // the resumed interpreter sees them. `deopt_points` alone under-counts the
+    // ops that deopt at runtime: `Div` (divide-by-zero) and — with the opt-in
+    // flag — every integer `Add`/`Sub`/`Mul` (overflow) also deopt but are NOT in
+    // `deopt_points`. Compute `may` whenever any of those are present, else the
+    // spill set is empty and a slot set natively is lost across the deopt.
+    let has_ovf_arith = chunk.int_overflow_deopt
+        && ops.iter().any(|o| matches!(o, Op::Add | Op::Sub | Op::Mul));
+    let has_div = ops.iter().any(|o| matches!(o, Op::Div));
+    let may = if deopt_points.is_empty() && !has_ovf_arith && !has_div {
         HashMap::new()
     } else {
         may_assigned(chunk, n, &deopt_points)
     };
     let mut inits_at: HashMap<usize, BTreeSet<u32>> = HashMap::new();
     for &ip in state.keys() {
-        if deopt_points.contains(&ip) || matches!(ops[ip], Op::Div) {
+        if deopt_points.contains(&ip)
+            || matches!(ops[ip], Op::Div)
+            || (chunk.int_overflow_deopt && matches!(ops[ip], Op::Add | Op::Sub | Op::Mul))
+        {
             inits_at.insert(ip, may.get(&ip).cloned().unwrap_or_default());
         }
     }
@@ -2203,10 +2215,14 @@ fn build_entry_native<M: Module>(
                 // `a` is the lower slot, `b`(=y) the top; matches the
                 // interpreter's `arith_int_fast` (int if both Int, else float).
                 op @ (Op::Add | Op::Sub | Op::Mul) => {
-                    let ky = kinds.pop().unwrap();
-                    let iy = kinds.len();
-                    let kx = kinds.pop().unwrap();
-                    let ix = kinds.len();
+                    // Peek operand positions/kinds WITHOUT popping: an
+                    // overflow-checked int op may deopt (like `Div`), and
+                    // `emit_deopt` needs the operands still on the abstract stack.
+                    let d = kinds.len();
+                    let ky = kinds[d - 1];
+                    let iy = d - 1;
+                    let kx = kinds[d - 2];
+                    let ix = d - 2;
                     if ky.promotes_float() || kx.promotes_float() {
                         let y = load_f64(&mut b, &ivars, &fvars, iy, ky);
                         let x = load_f64(&mut b, &ivars, &fvars, ix, kx);
@@ -2215,8 +2231,66 @@ fn build_entry_native<M: Module>(
                             Op::Sub => b.ins().fsub(x, y),
                             _ => b.ins().fmul(x, y),
                         };
+                        kinds.pop();
+                        kinds.pop();
                         b.def_var(fvars[ix], r);
                         kinds.push(Kind::Float);
+                    } else if chunk.int_overflow_deopt {
+                        // Overflow-checked integer op: native i64 on the common
+                        // path; on signed i64 overflow, deopt to the interpreter
+                        // (which runs the op through the frontend's numeric hook —
+                        // e.g. Python bignum promotion) instead of wrapping.
+                        let y = b.use_var(ivars[iy]);
+                        let x = b.use_var(ivars[ix]);
+                        let (r, overflow) = match op {
+                            // add overflow: (x^r) & (y^r) < 0
+                            Op::Add => {
+                                let r = b.ins().iadd(x, y);
+                                let xr = b.ins().bxor(x, r);
+                                let yr = b.ins().bxor(y, r);
+                                let a = b.ins().band(xr, yr);
+                                (r, b.ins().icmp_imm(IntCC::SignedLessThan, a, 0))
+                            }
+                            // sub overflow: (x^y) & (x^r) < 0
+                            Op::Sub => {
+                                let r = b.ins().isub(x, y);
+                                let xy = b.ins().bxor(x, y);
+                                let xr = b.ins().bxor(x, r);
+                                let a = b.ins().band(xy, xr);
+                                (r, b.ins().icmp_imm(IntCC::SignedLessThan, a, 0))
+                            }
+                            // mul overflow: high half != sign-extension of low half
+                            _ => {
+                                let r = b.ins().imul(x, y);
+                                let hi = b.ins().smulhi(x, y);
+                                let sr = b.ins().sshr_imm(r, 63);
+                                (r, b.ins().icmp(IntCC::NotEqual, hi, sr))
+                            }
+                        };
+                        let deopt_blk = b.create_block();
+                        let ok_blk = b.create_block();
+                        b.ins().brif(overflow, deopt_blk, &[], ok_blk, &[]);
+
+                        b.switch_to_block(deopt_blk);
+                        emit_deopt(
+                            &mut b,
+                            plan,
+                            vm_var,
+                            &ivars,
+                            &fvars,
+                            &slot_vars,
+                            &global_vars,
+                            &deopt_refs,
+                            &kinds,
+                            &plan.inits_at[&ip],
+                            ip,
+                        );
+
+                        b.switch_to_block(ok_blk);
+                        kinds.pop();
+                        kinds.pop();
+                        b.def_var(ivars[ix], r);
+                        kinds.push(Kind::Int);
                     } else {
                         let y = b.use_var(ivars[iy]);
                         let x = b.use_var(ivars[ix]);
@@ -2225,6 +2299,8 @@ fn build_entry_native<M: Module>(
                             Op::Sub => b.ins().isub(x, y),
                             _ => b.ins().imul(x, y),
                         };
+                        kinds.pop();
+                        kinds.pop();
                         b.def_var(ivars[ix], r);
                         kinds.push(Kind::Int);
                     }
@@ -5480,6 +5556,87 @@ mod tests {
             "unset global read must fall back"
         );
         assert_native_matches_interp(chunk);
+    }
+
+    // A sentinel numeric hook: every op it's asked about returns Int(-42). In a
+    // native run it is consulted ONLY if native code deopts to the interpreter,
+    // so a -42 result is proof the deopt fired (and a non--42 result is proof it
+    // stayed native).
+    fn sentinel_hook(vm: &mut VM) {
+        vm.set_numeric_hook(std::sync::Arc::new(|_op, _a, _b| Ok(Value::Int(-42))));
+    }
+
+    #[test]
+    fn native_int_overflow_deopts_to_hook_when_flag_set() {
+        // i64::MAX + 1 overflows. With the opt-in flag, native detects the
+        // overflow and deopts to the interpreter, whose hook returns the -42
+        // sentinel — i.e. the frontend's arbitrary-precision path gets to run.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(i64::MAX), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Add, 1);
+        b.set_int_overflow_deopt(true);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk), "int add must still lower natively");
+        match run_chunk_native(&chunk, sentinel_hook).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Int(-42), "overflow must deopt to hook"),
+            other => panic!("expected Ok(-42), got {other:?}"),
+        }
+        // Sub overflow: i64::MIN - 1.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(i64::MIN), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Sub, 1);
+        b.set_int_overflow_deopt(true);
+        match run_chunk_native(&b.build(), sentinel_hook).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Int(-42), "sub overflow must deopt"),
+            other => panic!("expected Ok(-42), got {other:?}"),
+        }
+        // Mul overflow: i64::MAX * 2.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(i64::MAX), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::Mul, 1);
+        b.set_int_overflow_deopt(true);
+        match run_chunk_native(&b.build(), sentinel_hook).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Int(-42), "mul overflow must deopt"),
+            other => panic!("expected Ok(-42), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_int_no_overflow_stays_native_with_flag() {
+        // 2 + 3 does not overflow: even with the flag on and a sentinel hook
+        // installed, the common path stays native (no deopt) → 5, not -42.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::Add, 1);
+        b.set_int_overflow_deopt(true);
+        let chunk = b.build();
+        assert!(native_lowerable(&chunk));
+        match run_chunk_native(&chunk, sentinel_hook).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Int(5), "non-overflow must stay native"),
+            other => panic!("expected Ok(5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_int_overflow_wraps_without_flag() {
+        // Default (flag off): unchanged behavior — native wraps at i64 and never
+        // consults the hook, so awk/shell frontends are byte-identical. (This is
+        // the very behavior the flag exists to override for Python.)
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(i64::MAX), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Add, 1);
+        let chunk = b.build();
+        assert!(!chunk.int_overflow_deopt);
+        assert!(native_lowerable(&chunk));
+        match run_chunk_native(&chunk, sentinel_hook).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Int(i64::MIN), "flag off must wrap, no hook"),
+            other => panic!("expected Ok(i64::MIN), got {other:?}"),
+        }
     }
 
     #[test]
