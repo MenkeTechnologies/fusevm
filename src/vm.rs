@@ -3715,7 +3715,7 @@ impl VM {
 
     /// Take the result captured by the AOT driver, leaving `None` behind.
     #[cfg(feature = "aot")]
-    pub(crate) fn take_aot_result(&mut self) -> VMResult {
+    pub fn take_aot_result(&mut self) -> VMResult {
         self.aot_result.take().unwrap_or(VMResult::Halted)
     }
 

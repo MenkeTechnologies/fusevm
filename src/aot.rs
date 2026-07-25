@@ -538,9 +538,23 @@ fn host_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
 ///   everything the native path doesn't yet cover (strings, arrays, hashes,
 ///   calls, float arithmetic, …).
 pub fn build_entry<M: Module>(module: &mut M, chunk: &Chunk) -> Result<FuncId, String> {
+    build_named(module, chunk, AOT_ENTRY_SYMBOL)
+}
+
+/// Like [`build_entry`], but exports the lowered driver under `symbol` instead of
+/// the fixed [`AOT_ENTRY_SYMBOL`]. Lets a caller emit *many* chunks (a program's
+/// method/block bodies) into one object, each under its own symbol, and resolve
+/// them by name — see [`compile_program_object`]. Every function still lowers to
+/// native code (the fully-native path when the chunk qualifies, else the threaded
+/// path); only the export name differs.
+pub fn build_named<M: Module>(
+    module: &mut M,
+    chunk: &Chunk,
+    symbol: &str,
+) -> Result<FuncId, String> {
     match analyze_native(chunk) {
-        Some(plan) => build_entry_native(module, chunk, &plan),
-        None => build_entry_threaded(module, chunk),
+        Some(plan) => build_entry_native(module, chunk, &plan, symbol),
+        None => build_entry_threaded(module, chunk, symbol),
     }
 }
 
@@ -1757,6 +1771,7 @@ fn build_entry_native<M: Module>(
     module: &mut M,
     chunk: &Chunk,
     plan: &NativePlan,
+    symbol: &str,
 ) -> Result<FuncId, String> {
     let ptr_ty = module.target_config().pointer_type();
 
@@ -1957,7 +1972,7 @@ fn build_entry_native<M: Module>(
     entry_sig.params.push(AbiParam::new(ptr_ty));
     entry_sig.returns.push(AbiParam::new(types::I64));
     let entry_id = module
-        .declare_function(AOT_ENTRY_SYMBOL, Linkage::Export, &entry_sig)
+        .declare_function(symbol, Linkage::Export, &entry_sig)
         .map_err(|e| format!("aot: declare entry: {e}"))?;
 
     let mut ctx = module.make_context();
@@ -3446,7 +3461,11 @@ fn truthy(
 /// Threaded fallback codegen: one Cranelift block per op, each running the op's
 /// semantics through the [`fusevm_aot_exec_op`] shim and re-dispatching on the
 /// returned next-ip. See the module docs for the control-flow shape.
-fn build_entry_threaded<M: Module>(module: &mut M, chunk: &Chunk) -> Result<FuncId, String> {
+fn build_entry_threaded<M: Module>(
+    module: &mut M,
+    chunk: &Chunk,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let ptr_ty = module.target_config().pointer_type();
 
     // Imported runtime shims.
@@ -3469,7 +3488,7 @@ fn build_entry_threaded<M: Module>(module: &mut M, chunk: &Chunk) -> Result<Func
     entry_sig.params.push(AbiParam::new(ptr_ty));
     entry_sig.returns.push(AbiParam::new(types::I64));
     let entry_id = module
-        .declare_function(AOT_ENTRY_SYMBOL, Linkage::Export, &entry_sig)
+        .declare_function(symbol, Linkage::Export, &entry_sig)
         .map_err(|e| format!("aot: declare entry: {e}"))?;
 
     let mut ctx = module.make_context();
@@ -3696,6 +3715,64 @@ pub fn compile_object(chunk: &Chunk, out_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("aot: define len: {e}"))?;
 
     build_entry(&mut module, chunk)?;
+
+    let product = module.finish();
+    let bytes = product
+        .emit()
+        .map_err(|e| format!("aot: emit object: {e}"))?;
+    std::fs::write(out_path, bytes)
+        .map_err(|e| format!("aot: write {}: {e}", out_path.display()))?;
+    Ok(())
+}
+
+/// Compile a whole program into ONE relocatable object: the `main` chunk under
+/// [`AOT_ENTRY_SYMBOL`], plus every `(symbol, chunk)` in `extras` under its own
+/// exported symbol. Also exports the serialized main-chunk blob (like
+/// [`compile_object`]) so the runtime driver can build the VM. This is what lets
+/// a frontend AOT-lower a program's method/block bodies to native code — not just
+/// its top-level chunk — and resolve each by symbol to build a native dispatch
+/// table. Every chunk lowers through the same [`build_named`] path (fully-native
+/// when it qualifies, else threaded), so each is real machine code.
+pub fn compile_program_object(
+    main: &Chunk,
+    extras: &[(String, &Chunk)],
+    out_path: &Path,
+) -> Result<(), String> {
+    let isa = object_isa()?;
+    let builder = ObjectBuilder::new(isa, "fusevm_aot", default_libcall_names())
+        .map_err(|e| format!("aot: object builder: {e}"))?;
+    let mut module = ObjectModule::new(builder);
+
+    // Serialized main chunk + length, same exported symbols `compile_object` uses,
+    // so the runtime driver deserializes and builds the VM identically.
+    let blob = bincode::serialize(main).map_err(|e| format!("aot: serialize chunk: {e}"))?;
+    let blob_id = module
+        .declare_data(AOT_CHUNK_BLOB_SYMBOL, Linkage::Export, false, false)
+        .map_err(|e| format!("aot: declare blob: {e}"))?;
+    let mut blob_desc = DataDescription::new();
+    blob_desc.define(blob.clone().into_boxed_slice());
+    module
+        .define_data(blob_id, &blob_desc)
+        .map_err(|e| format!("aot: define blob: {e}"))?;
+    let len_id = module
+        .declare_data(AOT_CHUNK_LEN_SYMBOL, Linkage::Export, false, false)
+        .map_err(|e| format!("aot: declare len: {e}"))?;
+    let mut len_desc = DataDescription::new();
+    len_desc.define(
+        (blob.len() as u64)
+            .to_le_bytes()
+            .to_vec()
+            .into_boxed_slice(),
+    );
+    module
+        .define_data(len_id, &len_desc)
+        .map_err(|e| format!("aot: define len: {e}"))?;
+
+    // The top-level driver, then each method/block body under its own symbol.
+    build_named(&mut module, main, AOT_ENTRY_SYMBOL)?;
+    for (sym, chunk) in extras {
+        build_named(&mut module, chunk, sym)?;
+    }
 
     let product = module.finish();
     let bytes = product

@@ -42,6 +42,14 @@ pub struct Chunk {
     /// Cached hash of ops + constants (computed once at build time for O(1) JIT cache lookup)
     #[serde(skip)]
     pub op_hash: u64,
+    /// AOT native-function slot. `0` means "run through the interpreter/JIT" (the
+    /// default for every normal run); a non-zero `n` means this chunk was
+    /// ahead-of-time lowered and its native driver is registered at slot `n` in
+    /// the AOT dispatch table (see the `aot` module). A frontend that AOT-compiles
+    /// a whole program tags each method/block chunk here so its runtime can call
+    /// the native code directly instead of interpreting the ops.
+    #[serde(default)]
+    pub native_id: u32,
 }
 
 impl Chunk {
