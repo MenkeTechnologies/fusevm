@@ -1372,6 +1372,14 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 st.push(Kind::Bool);
                 succs.push((ip + 1, st, inits));
             }
+            // Ruby truthiness of any lowered kind → Bool. A native register is
+            // never `nil`/`Undef` (those deopt), so a numeric operand is always
+            // truthy and a `Bool` operand is already the answer.
+            Op::RubyTruthy => {
+                st.pop()?;
+                st.push(Kind::Bool);
+                succs.push((ip + 1, st, inits));
+            }
             // Bitwise/shift: int-like operands (carried as i64), int result.
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
                 let b = st.pop()?;
@@ -3164,6 +3172,19 @@ fn build_entry_native<M: Module>(
                     let one = b.ins().iconst(types::I64, 1);
                     let zero = b.ins().iconst(types::I64, 0);
                     let r = b.ins().select(pred, zero, one);
+                    b.def_var(ivars[idx], r);
+                    kinds.push(Kind::Bool);
+                }
+                Op::RubyTruthy => {
+                    let k = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    // A `Bool` register already holds 0/1; every other lowered kind
+                    // (Int/Float/…) is a non-nil, non-false value, so Ruby-truthy is
+                    // a constant `true`.
+                    let r = match k {
+                        Kind::Bool => b.use_var(ivars[idx]),
+                        _ => b.ins().iconst(types::I64, 1),
+                    };
                     b.def_var(ivars[idx], r);
                     kinds.push(Kind::Bool);
                 }

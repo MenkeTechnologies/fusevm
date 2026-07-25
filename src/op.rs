@@ -163,6 +163,15 @@ pub enum Op {
     StrCmp,
 
     // ── Logical / Bitwise ──
+    /// Normalize the top value to a boolean under **Ruby** truthiness — only
+    /// `Undef` (Ruby `nil`) and `Bool(false)` are falsy; every other value,
+    /// including `Int(0)`, `""`, `[]`, `{}`, is truthy. (`is_truthy` uses shell
+    /// truthiness where `0`/`""`/empty collections are falsy, so a frontend with
+    /// Ruby semantics normalizes through this op before a `JumpIf*`.) Pushes a
+    /// `Bool`. Native-lowerable: on a numeric register it is a constant `true`; on
+    /// a `Bool` register it is the identity — so a `NumLt; RubyTruthy; JumpIfFalse`
+    /// condition lowers to a bare compare-and-branch.
+    RubyTruthy,
     /// Boolean `!` (eager, evaluates both operands for binary forms).
     LogNot,
     /// differs from short-circuit jumps: evaluates both
@@ -987,6 +996,7 @@ impl Hash for Op {
             | Op::StrLe
             | Op::StrGe
             | Op::StrCmp
+            | Op::RubyTruthy
             | Op::LogNot
             | Op::LogAnd
             | Op::LogOr

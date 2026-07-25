@@ -1815,6 +1815,12 @@ impl VM {
             }
 
             // ── Logical / Bitwise ──
+            Op::RubyTruthy => {
+                // Ruby truthiness: only `nil` (Undef) and `false` are falsy.
+                let val = self.pop();
+                let truthy = !matches!(val, Value::Undef | Value::Bool(false));
+                self.push(Value::Bool(truthy));
+            }
             Op::LogNot => {
                 let val = self.pop();
                 self.push(Value::Bool(!val.is_truthy()));
