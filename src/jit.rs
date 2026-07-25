@@ -4489,6 +4489,7 @@ mod cranelift_jit_impl {
             int_overflow_deopt: chunk.int_overflow_deopt,
             op_hash: 0,
             native_id: 0,
+            aot_seeded_slots: 0,
         };
         for op in &chunk.ops[start..end] {
             // Rebase jump targets to be local to the sub-chunk.

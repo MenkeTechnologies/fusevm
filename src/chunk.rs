@@ -50,6 +50,15 @@ pub struct Chunk {
     /// the native code directly instead of interpreting the ops.
     #[serde(default)]
     pub native_id: u32,
+    /// Number of leading frame slots (`0..aot_seeded_slots`) the caller seeds with
+    /// values before the chunk runs — a native calling convention where the first
+    /// N slots are the function's arguments rather than being assigned in the body.
+    /// The native AOT path treats them as definitely-assigned on entry and, since
+    /// their runtime type is dynamic, guards each on entry (speculating integer,
+    /// deopting to the interpreter on a mismatch). `0` = no seeded slots (the
+    /// default: every slot is assigned by the body before use).
+    #[serde(default)]
+    pub aot_seeded_slots: u16,
 }
 
 impl Chunk {

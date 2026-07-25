@@ -217,6 +217,13 @@ pub struct VM {
     /// [`VM::aot_finish`]; the caller takes it after the driver returns.
     #[cfg(feature = "aot")]
     aot_result: Option<VMResult>,
+    /// Set by a native driver's entry guard when a seeded param slot
+    /// (`Chunk::aot_seeded_slots`) held a value of the wrong type for the driver's
+    /// speculated register kind. The driver checks it after loading its seeded
+    /// slots and, if set, deopts to the interpreter at ip 0 (which reads the boxed
+    /// slots directly). Cleared per driver run.
+    #[cfg(feature = "aot")]
+    aot_guard_failed: bool,
     /// Value arena for natively-lowered heap values. The native fast path keeps
     /// scalars in registers, but a boxed value (string/array/…) can't fit one,
     /// so it lives here and the register holds an `i64` *handle* (an index). See
@@ -375,6 +382,8 @@ impl VM {
             block_eligible_cached: None,
             #[cfg(feature = "aot")]
             aot_result: None,
+            #[cfg(feature = "aot")]
+            aot_guard_failed: false,
             #[cfg(feature = "aot")]
             aot_arena: Vec::new(),
             #[cfg(feature = "aot")]
@@ -3723,6 +3732,28 @@ impl VM {
     #[cfg(feature = "aot")]
     pub fn take_aot_result(&mut self) -> VMResult {
         self.aot_result.take().unwrap_or(VMResult::Halted)
+    }
+
+    /// Entry-guard load of a seeded param slot for the native AOT path: return the
+    /// slot's integer value, or flag a guard failure (and return 0) when the slot
+    /// does not hold an `Int`. The driver speculated an integer register for the
+    /// slot; anything else must fall back to the interpreter.
+    #[cfg(feature = "aot")]
+    pub fn aot_load_slot_int(&mut self, idx: u32) -> i64 {
+        if let Value::Int(n) = self.get_slot(idx as u16) {
+            n
+        } else {
+            self.aot_guard_failed = true;
+            0
+        }
+    }
+
+    /// Read and clear the native entry-guard failure flag (set by
+    /// [`VM::aot_load_slot_int`] when a seeded slot's type didn't match the
+    /// speculated register kind). The driver deopts to the interpreter when true.
+    #[cfg(feature = "aot")]
+    pub fn aot_guard_taken(&mut self) -> bool {
+        std::mem::take(&mut self.aot_guard_failed)
     }
 
     // ── Helpers ──

@@ -312,6 +312,30 @@ pub extern "C" fn fusevm_aot_store_slot_int(vm: *mut VM, idx: u32, n: i64) {
     unsafe { (*vm).aot_store_slot_int(idx, n) }
 }
 
+/// Entry-guard load of a seeded param slot: return its integer value, flagging a
+/// guard failure when the slot is not an `Int` (see `VM::aot_load_slot_int`).
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_load_slot_int(vm: *mut VM, idx: u32) -> i64 {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_load_slot_int(idx) }
+}
+
+/// Read and clear the native entry-guard failure flag (see `VM::aot_guard_taken`).
+/// Returns 1 when a seeded slot mismatched the speculated register kind.
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_guard_taken(vm: *mut VM) -> i64 {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_guard_taken() as i64 }
+}
+
 /// Float analog of [`fusevm_aot_store_slot_int`].
 ///
 /// # Safety
@@ -892,6 +916,9 @@ struct NativePlan {
     /// slots/globals, so an unassigned slot stays `Undef` for the resumed
     /// interpreter rather than becoming a register's zero.
     inits_at: HashMap<usize, BTreeSet<u32>>,
+    /// Leading slots the caller seeds before the run (`Chunk::aot_seeded_slots`):
+    /// codegen loads and integer-guards each on entry instead of zero-initing it.
+    seeded_slots: u16,
 }
 
 /// Whether `chunk` lowers natively — thin wrapper over `analyze_native` used
@@ -1006,6 +1033,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             var_kinds: HashMap::new(),
             deopt_points: BTreeSet::new(),
             inits_at: HashMap::new(),
+            seeded_slots: 0,
         });
     }
 
@@ -1027,7 +1055,23 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     let mut deopt_points: BTreeSet<usize> = BTreeSet::new();
     let mut end_state: Option<Vec<Kind>> = None;
 
-    state.insert(0, (Vec::new(), BTreeSet::new()));
+    // Seed the leading `aot_seeded_slots` as definitely-assigned integer slots on
+    // entry: the caller fills them before the chunk runs, and codegen's entry guard
+    // unboxes each as an `Int` (deopting to the interpreter otherwise). Speculating
+    // `Int` means an integer-argument method lowers; a body that uses a seeded slot
+    // with a conflicting kind (e.g. stores a `Float` to it) fails the mixed-kind
+    // check below and falls back, and a non-integer argument trips the entry guard.
+    let seeded = chunk.aot_seeded_slots;
+    if seeded as usize > NATIVE_SLOT_LIMIT {
+        return None;
+    }
+    let mut entry_inits = BTreeSet::new();
+    for s in 0..seeded {
+        entry_inits.insert(u32::from(s));
+        var_kind.insert(u32::from(s), Kind::Int);
+        max_slot = Some(max_slot.map_or(s, |m| m.max(s)));
+    }
+    state.insert(0, (Vec::new(), entry_inits));
     leaders.insert(0);
     let mut work = vec![0usize];
 
@@ -1759,6 +1803,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
         var_kinds: var_kind,
         deopt_points,
         inits_at,
+        seeded_slots: seeded,
     })
 }
 
@@ -1960,6 +2005,21 @@ fn build_entry_native<M: Module>(
         .declare_function("fusevm_aot_resume", Linkage::Import, &resume_sig)
         .map_err(|e| format!("aot: declare resume: {e}"))?;
 
+    // Entry-guard shims: load_slot_int (vm, i32) -> i64 and guard_taken (vm) -> i64.
+    let mut lsi_sig = module.make_signature();
+    lsi_sig.params.push(AbiParam::new(ptr_ty));
+    lsi_sig.params.push(AbiParam::new(types::I32));
+    lsi_sig.returns.push(AbiParam::new(types::I64));
+    let lsi_id = module
+        .declare_function("fusevm_aot_load_slot_int", Linkage::Import, &lsi_sig)
+        .map_err(|e| format!("aot: declare load_slot_int: {e}"))?;
+    let mut guard_sig = module.make_signature();
+    guard_sig.params.push(AbiParam::new(ptr_ty));
+    guard_sig.returns.push(AbiParam::new(types::I64));
+    let guard_id = module
+        .declare_function("fusevm_aot_guard_taken", Linkage::Import, &guard_sig)
+        .map_err(|e| format!("aot: declare guard_taken: {e}"))?;
+
     // Status source/result: pop_int (vm) -> i64, push_status/set_status_result
     // (vm, i64).
     let mut popi_sig = module.make_signature();
@@ -2011,6 +2071,9 @@ fn build_entry_native<M: Module>(
         let obj_res_ref = module.declare_func_in_func(obj_res_id, b.func);
         let clone_ref = module.declare_func_in_func(clone_id, b.func);
         let free_ref = module.declare_func_in_func(free_id, b.func);
+        let lsi_ref = module.declare_func_in_func(lsi_id, b.func);
+        let guard_ref = module.declare_func_in_func(guard_id, b.func);
+        let resume_ref = module.declare_func_in_func(resume_id, b.func);
         let deopt_refs = DeoptRefs {
             store_slot_int: module.declare_func_in_func(ssi_id, b.func),
             store_slot_float: module.declare_func_in_func(ssf_id, b.func),
@@ -2023,7 +2086,7 @@ fn build_entry_native<M: Module>(
             push_bool: pushb_ref,
             push_status: push_status_ref,
             unbox: unbox_ref,
-            resume: module.declare_func_in_func(resume_id, b.func),
+            resume: resume_ref,
         };
 
         // The VM pointer and each operand-stack position are frontend Variables;
@@ -2079,6 +2142,7 @@ fn build_entry_native<M: Module>(
         b.switch_to_block(entry_block);
         let vm_param = b.block_params(entry_block)[0];
         b.def_var(vm_var, vm_param);
+        let seeded = plan.seeded_slots as usize;
         if !slot_vars.is_empty() || !global_vars.is_empty() {
             let zi = b.ins().iconst(types::I64, 0);
             let zf = b.ins().f64const(Ieee64::with_bits(0f64.to_bits()));
@@ -2087,12 +2151,23 @@ fn build_entry_native<M: Module>(
             // assignment, per definite-assignment).
             let neg1 = b.ins().iconst(types::I64, -1);
             for (i, &sv) in slot_vars.iter().enumerate() {
-                let init = match var_ty_kind(plan, i as u32) {
-                    Kind::Obj => neg1,
-                    Kind::Float => zf,
-                    _ => zi,
-                };
-                b.def_var(sv, init);
+                if i < seeded {
+                    // Seeded param slot: load its (speculated integer) value from
+                    // the VM frame. The shim flags a guard failure when the slot
+                    // isn't an `Int`; that is checked once below.
+                    let vm = b.use_var(vm_var);
+                    let idx = b.ins().iconst(types::I32, i as i64);
+                    let call = b.ins().call(lsi_ref, &[vm, idx]);
+                    let v = b.inst_results(call)[0];
+                    b.def_var(sv, v);
+                } else {
+                    let init = match var_ty_kind(plan, i as u32) {
+                        Kind::Obj => neg1,
+                        Kind::Float => zf,
+                        _ => zi,
+                    };
+                    b.def_var(sv, init);
+                }
             }
             for (i, &gv) in global_vars.iter().enumerate() {
                 let init = match var_ty_kind(plan, i as u32 | GLOBAL_TAG) {
@@ -2103,10 +2178,28 @@ fn build_entry_native<M: Module>(
                 b.def_var(gv, init);
             }
         }
-        if n == 0 {
-            b.ins().jump(ret_block, &[]);
+        let start_target = if n == 0 { ret_block } else { blocks[&0] };
+        if seeded > 0 {
+            // A seeded slot held a non-`Int` value: deopt by running the
+            // interpreter from ip 0 (it reads the boxed slots directly) and
+            // returning. The driver's return value is ignored — the result is the
+            // `aot_result` the resumed interpreter stores — so this must NOT flow
+            // through `ret_block`, which would re-box the (uncomputed) native
+            // end-state register over the interpreter's result.
+            let guard_deopt = b.create_block();
+            let vm = b.use_var(vm_var);
+            let call = b.ins().call(guard_ref, &[vm]);
+            let failed = b.inst_results(call)[0];
+            b.ins().brif(failed, guard_deopt, &[], start_target, &[]);
+            b.switch_to_block(guard_deopt);
+            let vm = b.use_var(vm_var);
+            let zero = b.ins().iconst(types::I32, 0);
+            b.ins().call(resume_ref, &[vm, zero]);
+            let status = b.ins().iconst(types::I64, 0);
+            b.ins().return_(&[status]);
+            b.seal_block(guard_deopt);
         } else {
-            b.ins().jump(blocks[&0], &[]);
+            b.ins().jump(start_target, &[]);
         }
 
         // `kinds` is the compile-time operand-stack kind stack (its length is
