@@ -143,6 +143,11 @@ pub struct VM {
     /// the default — pushes `Value::Undef`, the shell/awk reading zshrs, awkrs
     /// and stryke rely on. See [`UndefHook`].
     undef_hook: Option<UndefHook>,
+    /// Identity of the chunk this VM runs, for [`UndefRead::chunk`]. Computed
+    /// on the first undef read and kept, because an undef read is the rare
+    /// path — an error or an `incr` initialising — and every other read must
+    /// not pay for it.
+    chunk_ident: std::cell::Cell<u64>,
     /// The inclusive range the VM may keep as a native `Value::Int`. `None` (the
     /// default) is the whole `i64`. A Lisp with tagged fixnums has a narrower one
     /// — Emacs's is ±2^61 — and every result outside it is a bignum, so strict
@@ -346,6 +351,20 @@ pub struct UndefRead<'a> {
     pub index: u16,
     /// Whether the read was a frame slot rather than a global.
     pub from_slot: bool,
+    /// Which chunk the read belongs to.
+    ///
+    /// [`UndefRead::ip`] alone does not identify a site: a frontend that
+    /// compiles a nested script — an `eval`, a lambda — holds two chunks whose
+    /// op indices both start at zero, and a set of tolerant sites keyed by
+    /// index alone would answer for the wrong one. Pair the two.
+    ///
+    /// Deliberately *not* [`Chunk::op_hash`], which ignores the name pool
+    /// because it keys the JIT's native-code cache, where a name is only an
+    /// index. Two chunks can share an op vector and disagree about a site:
+    /// Tcl's `incr x` and `set y [expr {$z + 1}]` lower alike, and the first
+    /// read tolerates absence where the second must refuse. This hashes the
+    /// names as well, so those two are distinct.
+    pub chunk: u64,
     /// The op index of the read itself.
     ///
     /// A frontend usually wants *some* reads to refuse and others to tolerate
@@ -442,6 +461,7 @@ impl VM {
             input_source: None,
             numeric_hook: None,
             undef_hook: None,
+            chunk_ident: std::cell::Cell::new(0),
             fixnum_range: None,
             #[cfg(feature = "jit")]
             slots_all_numeric: true,
@@ -512,6 +532,25 @@ impl VM {
     /// Off by default, so a VM without one is byte-for-byte unchanged. The mode
     /// also arms the JIT's existing non-numeric gates — see [`UndefHook`] for
     /// why a native tier cannot observe an `Undef` in the first place.
+    /// This chunk's identity for [`UndefRead::chunk`] — its ops and its names.
+    ///
+    /// Computed once and cached: reached only from an undef read, which is the
+    /// exceptional path either way.
+    fn chunk_identity(&self) -> u64 {
+        let cached = self.chunk_ident.get();
+        if cached != 0 {
+            return cached;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.chunk.op_hash.hash(&mut h);
+        self.chunk.names.hash(&mut h);
+        // Zero is the "not yet computed" marker, so never hand it back as one.
+        let ident = h.finish() | 1;
+        self.chunk_ident.set(ident);
+        ident
+    }
+
     pub fn set_undef_hook(&mut self, hook: UndefHook) {
         self.undef_hook = Some(hook);
         #[cfg(feature = "jit")]
@@ -1718,6 +1757,7 @@ impl VM {
                         name,
                         index: *idx,
                         from_slot: false,
+                        chunk: self.chunk_identity(),
                         ip,
                     }) {
                         Ok(v) => self.push(v),
@@ -1747,6 +1787,7 @@ impl VM {
                         name: None,
                         index: *slot,
                         from_slot: true,
+                        chunk: self.chunk_identity(),
                         ip,
                     }) {
                         Ok(v) => self.push(v),

@@ -25,7 +25,7 @@
 //!    check at all.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use fusevm::{Chunk, ChunkBuilder, Op, UndefRead, VMResult, Value, VM};
 
@@ -220,5 +220,46 @@ fn a_frontend_can_refuse_one_read_site_and_tolerate_another() {
         run(chunk, Some(hook)),
         Err("can't read \"x\": no such variable".to_string()),
         "the tolerant site passed and the refusing one raised"
+    );
+}
+
+/// The read's site is `(chunk, ip)`, not `ip` alone.
+///
+/// A frontend that compiles a nested script — Tcl's `eval`, a lambda — holds
+/// two chunks whose op indices both start at zero. A set of tolerant sites
+/// keyed by index alone would answer for whichever chunk lowered last, so the
+/// hook is told which chunk the read came from and the two can be told apart.
+#[test]
+fn the_hook_can_tell_two_chunks_apart_at_the_same_ip() {
+    let seen: Arc<Mutex<Vec<(u64, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let mut hashes = Vec::new();
+    for name in ["a", "b"] {
+        let mut b = ChunkBuilder::new();
+        let idx = b.add_name(name);
+        b.emit(Op::GetVar(idx), 1);
+        let chunk = b.build();
+        hashes.push(chunk.op_hash);
+
+        let log = Arc::clone(&seen);
+        let mut vm = VM::new(chunk);
+        vm.set_undef_hook(Arc::new(move |read: UndefRead<'_>| {
+            log.lock().expect("log").push((read.chunk, read.ip));
+            Ok(Value::Int(0))
+        }));
+        vm.run();
+    }
+
+    let seen = seen.lock().expect("log").clone();
+    assert_eq!(seen.len(), 2, "one read per chunk: {seen:?}");
+    assert_eq!(seen[0].1, seen[1].1, "both reads are at the same op index");
+    assert_ne!(
+        seen[0].0, seen[1].0,
+        "and the chunk hash is what separates them: {seen:?}"
+    );
+    assert_eq!(
+        hashes[0], hashes[1],
+        "the two chunks share an op vector, so `op_hash` alone would have \
+         collided — which is why the identity hashes the name pool too"
     );
 }
