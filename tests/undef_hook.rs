@@ -35,9 +35,11 @@ type Seen = Arc<std::sync::Mutex<Vec<(Option<String>, bool, usize)>>>;
 fn recording_hook(seen: &Seen, answer: Result<Value, String>) -> fusevm::UndefHook {
     let seen = Arc::clone(seen);
     Arc::new(move |read: UndefRead<'_>| {
-        seen.lock()
-            .expect("seen lock")
-            .push((read.name.map(str::to_string), read.from_slot, read.ip));
+        seen.lock().expect("seen lock").push((
+            read.name.map(str::to_string),
+            read.from_slot,
+            read.ip,
+        ));
         answer.clone()
     })
 }

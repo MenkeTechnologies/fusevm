@@ -139,6 +139,10 @@ pub struct VM {
     /// operand, or integer overflow). `None` — the default — keeps the
     /// coerce-and-wrap semantics zshrs/awkrs/stryke rely on. See [`NumericHook`].
     numeric_hook: Option<NumericHook>,
+    /// The same, told the site of the operation. Takes precedence over
+    /// `numeric_hook`; either one means strict numeric mode. See
+    /// [`SitedNumericHook`].
+    sited_numeric_hook: Option<SitedNumericHook>,
     /// Host callback for a read of a variable that was never assigned. `None` —
     /// the default — pushes `Value::Undef`, the shell/awk reading zshrs, awkrs
     /// and stryke rely on. See [`UndefHook`].
@@ -337,6 +341,53 @@ pub enum NumOp {
 pub type NumericHook =
     std::sync::Arc<dyn Fn(NumOp, &Value, &Value) -> Result<Value, String> + Send + Sync>;
 
+/// The arithmetic that reached a [`SitedNumericHook`], with the site that
+/// emitted it.
+///
+/// `op`, `a` and `b` are what a [`NumericHook`] receives. `chunk` and `ip` are
+/// the addition: which chunk the operation belongs to and its op index, so a
+/// frontend can tell two operations apart that are identical as arithmetic and
+/// different as source.
+///
+/// Tcl is the case this exists for. `incr x` and `expr {$x + 1}` both lower to
+/// `GetVar` / `LoadInt(1)` / `Add`, and on a non-numeric `x` the reference
+/// interpreter words the two refusals differently — `expected integer but got
+/// "abc"` for the first, `cannot use non-numeric string "abc" as left operand of
+/// "+"` for the second. Nothing about `Add`, `"abc"` or `1` separates them; the
+/// site does. The alternative was an extension op in `incr`'s lowering, which
+/// the tracing JIT refuses, costing every counted loop its trace.
+pub struct NumericCall<'a> {
+    /// Which arithmetic the VM could not complete natively.
+    pub op: NumOp,
+    /// The left operand — the only operand for [`NumOp::Neg`].
+    pub a: &'a Value,
+    /// The right operand, or `Value::Undef` for a unary op.
+    pub b: &'a Value,
+    /// Which chunk the operation belongs to, by the same identity
+    /// [`UndefRead::chunk`] carries: a hash of the ops *and* the name pool, so
+    /// two chunks that share an op vector are still distinct. See
+    /// [`UndefRead::chunk`] for why `Chunk::op_hash` will not do.
+    pub chunk: u64,
+    /// The op index of the operation itself.
+    ///
+    /// This is the interpreter's index in every case, including one a native
+    /// tier started: the ahead-of-time driver re-enters `exec_op` at the op's
+    /// own index, and a trace that traps on overflow is discarded whole and the
+    /// loop re-run interpreted, so a delegated op is never reported at a
+    /// native tier's idea of where it was.
+    pub ip: usize,
+}
+
+/// Host callback for arithmetic fusevm cannot complete natively, told *where*
+/// the arithmetic was.
+///
+/// Everything [`NumericHook`] does, plus the site — see [`NumericCall`] for what
+/// that buys and why a frontend may need it. Installed with
+/// [`VM::set_sited_numeric_hook`]; a VM may have this or [`NumericHook`], and
+/// this one wins if both are set. Either puts the VM in strict numeric mode.
+pub type SitedNumericHook =
+    std::sync::Arc<dyn for<'a> Fn(NumericCall<'a>) -> Result<Value, String> + Send + Sync>;
+
 /// The read that reached an unset variable, handed to an [`UndefHook`].
 ///
 /// `name` is the chunk's interned name for a global and `None` for a frame slot:
@@ -460,6 +511,7 @@ impl VM {
             output_sink: None,
             input_source: None,
             numeric_hook: None,
+            sited_numeric_hook: None,
             undef_hook: None,
             chunk_ident: std::cell::Cell::new(0),
             fixnum_range: None,
@@ -516,6 +568,19 @@ impl VM {
     /// integer `Add`/`Sub`/`Mul` are emitted with overflow checks that bail back
     /// to the interpreter (where the hook runs). Native code compiled in strict
     /// mode is cached separately from the coercing kind, so the two never mix.
+    /// Install a [`SitedNumericHook`] — a numeric hook that is also told which
+    /// chunk and op index the arithmetic came from.
+    ///
+    /// Puts the VM in strict numeric mode exactly as [`VM::set_numeric_hook`]
+    /// does, and takes precedence over one installed there.
+    pub fn set_sited_numeric_hook(&mut self, hook: SitedNumericHook) {
+        self.sited_numeric_hook = Some(hook);
+        #[cfg(feature = "jit")]
+        {
+            self.block_eligible_cached = None;
+        }
+    }
+
     pub fn set_numeric_hook(&mut self, hook: NumericHook) {
         self.numeric_hook = Some(hook);
         #[cfg(feature = "jit")]
@@ -571,7 +636,7 @@ impl VM {
     #[cfg(feature = "jit")]
     #[inline]
     fn strict_values(&self) -> bool {
-        self.numeric_hook.is_some() || self.undef_hook.is_some()
+        self.strict_numeric_mode() || self.undef_hook.is_some()
     }
 
     /// Install an [`OutputSink`] so `Op::Print`/`Op::PrintLn` route through
@@ -606,7 +671,38 @@ impl VM {
 
     /// Whether a [`NumericHook`] is installed (strict numeric mode).
     pub fn is_strict_numeric(&self) -> bool {
-        self.numeric_hook.is_some()
+        self.strict_numeric_mode()
+    }
+
+    /// Whether either numeric hook is installed. Every strictness decision asks
+    /// this rather than a single field, so a frontend that installs only the
+    /// sited hook still gets the checked arithmetic and the armed JIT gates —
+    /// without it the native tiers would wrap an overflow and the hook would
+    /// never be reached.
+    #[inline]
+    fn strict_numeric_mode(&self) -> bool {
+        self.numeric_hook.is_some() || self.sited_numeric_hook.is_some()
+    }
+
+    /// Hand a delegated operation to whichever numeric hook is installed.
+    ///
+    /// Only called in strict numeric mode, so one of the two is present.
+    #[inline]
+    fn call_numeric(&self, op: NumOp, a: &Value, b: &Value, ip: usize) -> Result<Value, String> {
+        if let Some(sited) = &self.sited_numeric_hook {
+            return sited(NumericCall {
+                op,
+                a,
+                b,
+                chunk: self.chunk_identity(),
+                ip,
+            });
+        }
+        match &self.numeric_hook {
+            Some(hook) => hook(op, a, b),
+            // Unreachable: strict mode is exactly "one of the two is set".
+            None => Ok(Value::Undef),
+        }
     }
 
     /// Narrow the range the VM keeps as a native `Value::Int` (strict mode only).
@@ -1268,23 +1364,25 @@ impl VM {
         int_op: fn(i64, i64) -> i64,
         ck_op: fn(i64, i64) -> Option<i64>,
         float_op: fn(f64, f64) -> f64,
+        ip: usize,
     ) -> Option<String> {
         let len = self.stack.len();
         if len < 2 {
             return None;
         }
+        let strict = self.strict_numeric_mode();
         // Borrow both slots without popping (avoid branch + unwrap_or)
         let b = &self.stack[len - 1];
         let a = &self.stack[len - 2];
-        let result = match (a, b, &self.numeric_hook) {
+        let result = match (a, b, strict) {
             // Fast path, both policies: two fixnums.
-            (Value::Int(x), Value::Int(y), None) => Value::Int(int_op(*x, *y)),
-            (Value::Int(x), Value::Int(y), Some(hook)) => match ck_op(*x, *y) {
+            (Value::Int(x), Value::Int(y), false) => Value::Int(int_op(*x, *y)),
+            (Value::Int(x), Value::Int(y), true) => match ck_op(*x, *y) {
                 // Exact, and inside the host's fixnum range.
                 Some(r) if self.in_fixnum_range(r) => Value::Int(r),
                 // Overflowed `i64`, or left the host's fixnum range: either way
                 // only the host can represent it (a bignum).
-                _ => match hook(op, a, b) {
+                _ => match self.call_numeric(op, a, b, ip) {
                     Ok(v) => v,
                     Err(e) => return Some(e),
                 },
@@ -1295,8 +1393,8 @@ impl VM {
                 Value::Float(float_op(a.to_float(), b.to_float()))
             }
             // A non-number. Coerce (awk/shell) or delegate (strict).
-            (a, b, None) => Value::Float(float_op(a.to_float(), b.to_float())),
-            (a, b, Some(hook)) => match hook(op, a, b) {
+            (a, b, false) => Value::Float(float_op(a.to_float(), b.to_float())),
+            (a, b, true) => match self.call_numeric(op, a, b, ip) {
                 Ok(v) => v,
                 Err(e) => return Some(e),
             },
@@ -1317,20 +1415,22 @@ impl VM {
         op: NumOp,
         int_cmp: fn(i64, i64) -> bool,
         float_cmp: fn(f64, f64) -> bool,
+        ip: usize,
     ) -> Option<String> {
         let len = self.stack.len();
         if len < 2 {
             return None;
         }
+        let strict = self.strict_numeric_mode();
         let b = &self.stack[len - 1];
         let a = &self.stack[len - 2];
-        let result = match (a, b, &self.numeric_hook) {
+        let result = match (a, b, strict) {
             (Value::Int(x), Value::Int(y), _) => Value::Bool(int_cmp(*x, *y)),
             (a, b, _) if is_native_num(a) && is_native_num(b) => {
                 Value::Bool(float_cmp(a.to_float(), b.to_float()))
             }
-            (a, b, None) => Value::Bool(float_cmp(a.to_float(), b.to_float())),
-            (a, b, Some(hook)) => match hook(op, a, b) {
+            (a, b, false) => Value::Bool(float_cmp(a.to_float(), b.to_float())),
+            (a, b, true) => match self.call_numeric(op, a, b, ip) {
                 Ok(v) => v,
                 Err(e) => return Some(e),
             },
@@ -1344,14 +1444,13 @@ impl VM {
     /// strict mode, for the ops (`Div`, `Pow`) whose native path is float-only
     /// and therefore has no overflow case to check — just a type case.
     #[inline(always)]
-    fn delegate_binary(&mut self, op: NumOp) -> Option<String> {
+    fn delegate_binary(&mut self, op: NumOp, ip: usize) -> Option<String> {
         let b = self.pop();
         let a = self.pop();
-        let hook = match &self.numeric_hook {
-            Some(h) => h,
-            None => return None,
-        };
-        match hook(op, &a, &b) {
+        if !self.strict_numeric_mode() {
+            return None;
+        }
+        match self.call_numeric(op, &a, &b, ip) {
             Ok(v) => {
                 self.push(v);
                 None
@@ -1363,20 +1462,21 @@ impl VM {
     /// Unary negate, strict-aware: `i64::MIN` has no positive counterpart and a
     /// non-number is not negatable, so both go to the [`NumericHook`].
     #[inline(always)]
-    fn negate_strict(&mut self) -> Option<String> {
+    fn negate_strict(&mut self, ip: usize) -> Option<String> {
         let val = self.pop();
-        let result = match (&val, &self.numeric_hook) {
-            (Value::Int(n), None) => Value::Int(n.wrapping_neg()),
-            (Value::Int(n), Some(hook)) => match n.checked_neg() {
+        let strict = self.strict_numeric_mode();
+        let result = match (&val, strict) {
+            (Value::Int(n), false) => Value::Int(n.wrapping_neg()),
+            (Value::Int(n), true) => match n.checked_neg() {
                 Some(r) if self.in_fixnum_range(r) => Value::Int(r),
-                _ => match hook(NumOp::Neg, &val, &Value::Undef) {
+                _ => match self.call_numeric(NumOp::Neg, &val, &Value::Undef, ip) {
                     Ok(v) => v,
                     Err(e) => return Some(e),
                 },
             },
             (Value::Float(f), _) => Value::Float(-f),
-            (v, None) => Value::Float(-v.to_float()),
-            (v, Some(hook)) => match hook(NumOp::Neg, v, &Value::Undef) {
+            (v, false) => Value::Float(-v.to_float()),
+            (v, true) => match self.call_numeric(NumOp::Neg, v, &Value::Undef, ip) {
                 Ok(v) => v,
                 Err(e) => return Some(e),
             },
@@ -1431,7 +1531,7 @@ impl VM {
         // eligibility, salts every cache key, and switches integer arithmetic to
         // its overflow-checked lowering.
         #[cfg(feature = "jit")]
-        crate::jit::set_strict_numeric(self.numeric_hook.is_some(), self.fixnum_range);
+        crate::jit::set_strict_numeric(self.strict_numeric_mode(), self.fixnum_range);
 
         #[cfg(feature = "jit")]
         if self.tracing_jit && self.frames.len() == 1 && self.ip == 0 {
@@ -1826,29 +1926,35 @@ impl VM {
 
             // ── Arithmetic (type-specialized: Int×Int avoids to_float) ──
             Op::Add => {
-                if let Some(e) =
-                    self.arith_int_fast(NumOp::Add, i64::wrapping_add, i64::checked_add, |a, b| {
-                        a + b
-                    })
-                {
+                if let Some(e) = self.arith_int_fast(
+                    NumOp::Add,
+                    i64::wrapping_add,
+                    i64::checked_add,
+                    |a, b| a + b,
+                    ip,
+                ) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::Sub => {
-                if let Some(e) =
-                    self.arith_int_fast(NumOp::Sub, i64::wrapping_sub, i64::checked_sub, |a, b| {
-                        a - b
-                    })
-                {
+                if let Some(e) = self.arith_int_fast(
+                    NumOp::Sub,
+                    i64::wrapping_sub,
+                    i64::checked_sub,
+                    |a, b| a - b,
+                    ip,
+                ) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::Mul => {
-                if let Some(e) =
-                    self.arith_int_fast(NumOp::Mul, i64::wrapping_mul, i64::checked_mul, |a, b| {
-                        a * b
-                    })
-                {
+                if let Some(e) = self.arith_int_fast(
+                    NumOp::Mul,
+                    i64::wrapping_mul,
+                    i64::checked_mul,
+                    |a, b| a * b,
+                    ip,
+                ) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
@@ -1857,13 +1963,13 @@ impl VM {
                 // and always-float results are unchanged (a frontend whose `/`
                 // has other semantics — elisp's integer division — implements it
                 // as a builtin rather than lowering to this op).
-                if self.numeric_hook.is_some() {
+                if self.strict_numeric_mode() {
                     let len = self.stack.len();
                     if len >= 2
                         && !(is_native_num(&self.stack[len - 1])
                             && is_native_num(&self.stack[len - 2]))
                     {
-                        if let Some(e) = self.delegate_binary(NumOp::Div) {
+                        if let Some(e) = self.delegate_binary(NumOp::Div, ip) {
                             return ExecFlow::Ret(VMResult::Error(e));
                         }
                         return ExecFlow::Cont;
@@ -1884,18 +1990,19 @@ impl VM {
                     |x, y| if y != 0 { x % y } else { 0 },
                     |x, y| if y != 0 { x.checked_rem(y) } else { Some(0) },
                     |a, b| a % b,
+                    ip,
                 ) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::Pow => {
-                if self.numeric_hook.is_some() {
+                if self.strict_numeric_mode() {
                     let len = self.stack.len();
                     if len >= 2
                         && !(is_native_num(&self.stack[len - 1])
                             && is_native_num(&self.stack[len - 2]))
                     {
-                        if let Some(e) = self.delegate_binary(NumOp::Pow) {
+                        if let Some(e) = self.delegate_binary(NumOp::Pow, ip) {
                             return ExecFlow::Ret(VMResult::Error(e));
                         }
                         return ExecFlow::Cont;
@@ -1906,23 +2013,24 @@ impl VM {
                 self.push(Value::Float(a.to_float().powf(b.to_float())));
             }
             Op::Negate => {
-                if let Some(e) = self.negate_strict() {
+                if let Some(e) = self.negate_strict(ip) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::Inc => {
                 let val = self.pop();
-                let result = match (&val, &self.numeric_hook) {
-                    (Value::Int(n), None) => Value::Int(n.wrapping_add(1)),
-                    (Value::Int(n), Some(hook)) => match n.checked_add(1) {
+                let strict = self.strict_numeric_mode();
+                let result = match (&val, strict) {
+                    (Value::Int(n), false) => Value::Int(n.wrapping_add(1)),
+                    (Value::Int(n), true) => match n.checked_add(1) {
                         Some(r) if self.in_fixnum_range(r) => Value::Int(r),
-                        _ => match hook(NumOp::Add, &val, &Value::Int(1)) {
+                        _ => match self.call_numeric(NumOp::Add, &val, &Value::Int(1), ip) {
                             Ok(v) => v,
                             Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
                         },
                     },
-                    (v, None) => Value::Int(v.to_int().wrapping_add(1)),
-                    (v, Some(hook)) => match hook(NumOp::Add, v, &Value::Int(1)) {
+                    (v, false) => Value::Int(v.to_int().wrapping_add(1)),
+                    (v, true) => match self.call_numeric(NumOp::Add, v, &Value::Int(1), ip) {
                         Ok(v) => v,
                         Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
                     },
@@ -1931,17 +2039,18 @@ impl VM {
             }
             Op::Dec => {
                 let val = self.pop();
-                let result = match (&val, &self.numeric_hook) {
-                    (Value::Int(n), None) => Value::Int(n.wrapping_sub(1)),
-                    (Value::Int(n), Some(hook)) => match n.checked_sub(1) {
+                let strict = self.strict_numeric_mode();
+                let result = match (&val, strict) {
+                    (Value::Int(n), false) => Value::Int(n.wrapping_sub(1)),
+                    (Value::Int(n), true) => match n.checked_sub(1) {
                         Some(r) if self.in_fixnum_range(r) => Value::Int(r),
-                        _ => match hook(NumOp::Sub, &val, &Value::Int(1)) {
+                        _ => match self.call_numeric(NumOp::Sub, &val, &Value::Int(1), ip) {
                             Ok(v) => v,
                             Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
                         },
                     },
-                    (v, None) => Value::Int(v.to_int().wrapping_sub(1)),
-                    (v, Some(hook)) => match hook(NumOp::Sub, v, &Value::Int(1)) {
+                    (v, false) => Value::Int(v.to_int().wrapping_sub(1)),
+                    (v, true) => match self.call_numeric(NumOp::Sub, v, &Value::Int(1), ip) {
                         Ok(v) => v,
                         Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
                     },
@@ -1972,32 +2081,32 @@ impl VM {
 
             // ── Comparison (type-specialized: Int×Int avoids to_float) ──
             Op::NumEq => {
-                if let Some(e) = self.cmp_int_fast(NumOp::Eq, |x, y| x == y, |a, b| a == b) {
+                if let Some(e) = self.cmp_int_fast(NumOp::Eq, |x, y| x == y, |a, b| a == b, ip) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::NumNe => {
-                if let Some(e) = self.cmp_int_fast(NumOp::Ne, |x, y| x != y, |a, b| a != b) {
+                if let Some(e) = self.cmp_int_fast(NumOp::Ne, |x, y| x != y, |a, b| a != b, ip) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::NumLt => {
-                if let Some(e) = self.cmp_int_fast(NumOp::Lt, |x, y| x < y, |a, b| a < b) {
+                if let Some(e) = self.cmp_int_fast(NumOp::Lt, |x, y| x < y, |a, b| a < b, ip) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::NumGt => {
-                if let Some(e) = self.cmp_int_fast(NumOp::Gt, |x, y| x > y, |a, b| a > b) {
+                if let Some(e) = self.cmp_int_fast(NumOp::Gt, |x, y| x > y, |a, b| a > b, ip) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::NumLe => {
-                if let Some(e) = self.cmp_int_fast(NumOp::Le, |x, y| x <= y, |a, b| a <= b) {
+                if let Some(e) = self.cmp_int_fast(NumOp::Le, |x, y| x <= y, |a, b| a <= b, ip) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
             Op::NumGe => {
-                if let Some(e) = self.cmp_int_fast(NumOp::Ge, |x, y| x >= y, |a, b| a >= b) {
+                if let Some(e) = self.cmp_int_fast(NumOp::Ge, |x, y| x >= y, |a, b| a >= b, ip) {
                     return ExecFlow::Ret(VMResult::Error(e));
                 }
             }
@@ -3467,6 +3576,7 @@ impl VM {
                         i64::wrapping_mul,
                         i64::checked_mul,
                         |a, b| a * b,
+                        ip,
                     ) {
                         return ExecFlow::Ret(VMResult::Error(e));
                     }
@@ -3476,6 +3586,7 @@ impl VM {
                         |x, y| if y != 0 { x % y } else { 0 },
                         |x, y| if y != 0 { x.checked_rem(y) } else { Some(0) },
                         |a, b| a % b,
+                        ip,
                     ) {
                         return ExecFlow::Ret(VMResult::Error(e));
                     }
@@ -3510,6 +3621,7 @@ impl VM {
                         i64::wrapping_mul,
                         i64::checked_mul,
                         |a, b| a * b,
+                        ip,
                     ) {
                         return ExecFlow::Ret(VMResult::Error(e));
                     }
@@ -3519,6 +3631,7 @@ impl VM {
                         i64::wrapping_add,
                         i64::checked_add,
                         |a, b| a + b,
+                        ip,
                     ) {
                         return ExecFlow::Ret(VMResult::Error(e));
                     }
@@ -3528,6 +3641,7 @@ impl VM {
                         |x, y| if y != 0 { x % y } else { 0 },
                         |x, y| if y != 0 { x.checked_rem(y) } else { Some(0) },
                         |a, b| a % b,
+                        ip,
                     ) {
                         return ExecFlow::Ret(VMResult::Error(e));
                     }
