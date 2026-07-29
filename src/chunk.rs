@@ -59,6 +59,26 @@ pub struct Chunk {
     /// default: every slot is assigned by the body before use).
     #[serde(default)]
     pub aot_seeded_slots: u16,
+    /// Names of each subroutine's frame slots: `(entry_ip, names)`, where
+    /// `names[i]` is the name the frontend's compiler gave slot `i`.
+    ///
+    /// Empty by default, and a frontend that records nothing behaves exactly as
+    /// before. A frontend that does record them can address a *running* frame's
+    /// variables by name — which is what an `eval` whose script must see the
+    /// calling procedure's locals needs, and what `upvar`-style aliasing needs
+    /// of a frame further out.
+    ///
+    /// Keyed by the subroutine's entry ip rather than by its name index,
+    /// because that is what `Op::Call` resolves to and what a pushed frame
+    /// records. Names belong to the *subroutine*, so two activations of a
+    /// recursive call share them while their slot **values** stay per-frame,
+    /// which is the distinction that makes recursion work.
+    ///
+    /// Declared last: [`Chunk`] is bincode-serialized into an ahead-of-time
+    /// object, and a field appended at the end makes an older blob run out of
+    /// input here instead of mis-reading something that follows.
+    #[serde(default)]
+    pub sub_slot_names: Vec<(usize, Vec<String>)>,
 }
 
 impl Chunk {
@@ -74,6 +94,19 @@ impl Chunk {
             .iter()
             .find(|(n, _)| *n == name_idx)
             .map(|(_, ip)| *ip)
+    }
+
+    /// The slot names recorded for the subroutine entered at `entry_ip`, or an
+    /// empty slice when none were recorded.
+    ///
+    /// A linear scan, as [`Chunk::find_sub`] is: a chunk holds few subroutines
+    /// and this is reached only when a frontend asks about a frame by name.
+    pub fn sub_slot_names_at(&self, entry_ip: usize) -> &[String] {
+        self.sub_slot_names
+            .iter()
+            .find(|(ip, _)| *ip == entry_ip)
+            .map(|(_, names)| names.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Human-readable disassembly listing of this chunk (and, recursively, its
@@ -249,6 +282,24 @@ impl ChunkBuilder {
     /// Register a subroutine entry point.
     pub fn add_sub_entry(&mut self, name_idx: u16, ip: usize) {
         self.chunk.sub_entries.push((name_idx, ip));
+    }
+
+    /// Record the names of a subroutine's frame slots, so a running frame can be
+    /// addressed by name — see [`Chunk::sub_slot_names`].
+    ///
+    /// `entry_ip` is the same op index given to
+    /// [`ChunkBuilder::add_sub_entry`]. Recording nothing leaves the VM behaving
+    /// exactly as it does without this.
+    pub fn set_sub_slot_names(&mut self, entry_ip: usize, names: Vec<String>) {
+        match self
+            .chunk
+            .sub_slot_names
+            .iter_mut()
+            .find(|(ip, _)| *ip == entry_ip)
+        {
+            Some((_, existing)) => *existing = names,
+            None => self.chunk.sub_slot_names.push((entry_ip, names)),
+        }
     }
 
     /// Register a block region (for map/grep/sort).

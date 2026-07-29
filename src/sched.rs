@@ -428,6 +428,7 @@ impl<F: FnMut() -> VM> Scheduler<F> {
             return_ip: vm.chunk.ops.len(), // returning ends the goroutine's run()
             stack_base: base,
             slots: Vec::new(),
+            entry_ip: Some(entry),
         });
         vm.ip = entry;
         Ok(())

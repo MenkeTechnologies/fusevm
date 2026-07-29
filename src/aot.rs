@@ -144,10 +144,32 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
+/// Magic and format version stamped in front of the embedded serialized chunk.
+///
+/// The blob is `bincode`, which is positional and self-describes nothing: a
+/// [`crate::Chunk`] field added or reordered changes the layout, and an object
+/// built by another fusevm deserializes into a bincode error at best. Without a
+/// stamp the runtime could only call that "corrupt", which names the symptom and
+/// not the cause; with one it can say the object was built by a different
+/// fusevm, which is what actually happened. Bump the last byte whenever
+/// `Chunk`'s serialized shape changes.
+///
+/// `FVAOT002` — 001 was the unstamped layout, before `Chunk::sub_slot_names`.
+pub const AOT_CHUNK_MAGIC: &[u8; 8] = b"FVAOT002";
+
 /// Exported symbol of the embedded serialized chunk (defined in the object).
 pub const AOT_CHUNK_BLOB_SYMBOL: &str = "fusevm_aot_chunk_blob";
 /// Exported symbol holding the embedded chunk's length (u64, little-endian).
 pub const AOT_CHUNK_LEN_SYMBOL: &str = "fusevm_aot_chunk_len";
+
+/// The embedded blob: [`AOT_CHUNK_MAGIC`] followed by the bincode chunk.
+fn stamped(chunk: &Chunk) -> Result<Vec<u8>, String> {
+    let body = bincode::serialize(chunk).map_err(|e| format!("aot: serialize chunk: {e}"))?;
+    let mut blob = Vec::with_capacity(AOT_CHUNK_MAGIC.len() + body.len());
+    blob.extend_from_slice(AOT_CHUNK_MAGIC);
+    blob.extend_from_slice(&body);
+    Ok(blob)
+}
 
 /// Exported symbol name of the compiled entry function.
 pub const AOT_ENTRY_SYMBOL: &str = "fusevm_aot_entry";
@@ -3804,7 +3826,7 @@ pub fn compile_object(chunk: &Chunk, out_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("aot: object builder: {e}"))?;
     let mut module = ObjectModule::new(builder);
 
-    let blob = bincode::serialize(chunk).map_err(|e| format!("aot: serialize chunk: {e}"))?;
+    let blob = stamped(chunk)?;
     let blob_id = module
         .declare_data(AOT_CHUNK_BLOB_SYMBOL, Linkage::Export, false, false)
         .map_err(|e| format!("aot: declare blob: {e}"))?;
@@ -3859,7 +3881,7 @@ pub fn compile_program_object(
 
     // Serialized main chunk + length, same exported symbols `compile_object` uses,
     // so the runtime driver deserializes and builds the VM identically.
-    let blob = bincode::serialize(main).map_err(|e| format!("aot: serialize chunk: {e}"))?;
+    let blob = stamped(main)?;
     let blob_id = module
         .declare_data(AOT_CHUNK_BLOB_SYMBOL, Linkage::Export, false, false)
         .map_err(|e| format!("aot: declare blob: {e}"))?;
@@ -3917,7 +3939,29 @@ pub extern "C" fn fusevm_aot_run_embedded() -> i64 {
     let chunk: Chunk = unsafe {
         let len = fusevm_aot_chunk_len as usize;
         let bytes = std::slice::from_raw_parts(&fusevm_aot_chunk_blob as *const u8, len);
-        match bincode::deserialize(bytes) {
+        let body = match bytes.strip_prefix(AOT_CHUNK_MAGIC.as_slice()) {
+            Some(rest) => rest,
+            None => {
+                let seen: String = bytes
+                    .iter()
+                    .take(AOT_CHUNK_MAGIC.len())
+                    .map(|b| {
+                        if b.is_ascii_graphic() {
+                            *b as char
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect();
+                eprintln!(
+                    "fusevm aot: this object was built by a different fusevm — \
+                     expected chunk format {}, found {seen:?}; rebuild it",
+                    String::from_utf8_lossy(AOT_CHUNK_MAGIC)
+                );
+                return 1;
+            }
+        };
+        match bincode::deserialize(body) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("fusevm aot: corrupt embedded chunk: {e}");

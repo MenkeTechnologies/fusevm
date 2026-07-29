@@ -4507,6 +4507,9 @@ mod cranelift_jit_impl {
             op_hash: 0,
             native_id: 0,
             aot_seeded_slots: 0,
+            // An extracted region carries no `sub_entries`, so it has no
+            // subroutine whose slots could be named.
+            sub_slot_names: Vec::new(),
         };
         for op in &chunk.ops[start..end] {
             // Rebase jump targets to be local to the sub-chunk.

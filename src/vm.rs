@@ -105,6 +105,18 @@ pub struct Frame {
     pub stack_base: usize,
     /// Local variable slots (indexed by `GetSlot`/`SetSlot`)
     pub slots: Vec<Value>,
+    /// Entry ip of the subroutine this frame is running, when it is one.
+    ///
+    /// Set by `Op::Call`, which resolves the entry it jumps to. `None` for the
+    /// base frame, for an `Op::PushFrame` scope frame — which enters no
+    /// subroutine — and for a frame materialized after a JIT side exit, whose
+    /// deopt record carries a return address and slot values but no subroutine
+    /// identity.
+    ///
+    /// It exists so [`Chunk::sub_slot_names`] can be reached from the frame that
+    /// is running: the names live on the chunk once per subroutine, the values
+    /// live here once per activation.
+    pub entry_ip: Option<usize>,
 }
 
 /// Extension handler for language-specific opcodes.
@@ -500,6 +512,7 @@ impl VM {
             return_ip: 0,
             stack_base: 0,
             slots: Vec::with_capacity(16),
+            entry_ip: None,
         });
         Self {
             stack: Vec::with_capacity(256),
@@ -597,6 +610,50 @@ impl VM {
     /// Off by default, so a VM without one is byte-for-byte unchanged. The mode
     /// also arms the JIT's existing non-numeric gates — see [`UndefHook`] for
     /// why a native tier cannot observe an `Undef` in the first place.
+    /// The slot names of the frame `up` levels out from the running one — `0` is
+    /// the current frame, `1` its caller — or an empty slice when that frame
+    /// entered no subroutine, when nothing was recorded for it, or when there is
+    /// no such frame.
+    ///
+    /// This is the question an `eval` whose script must run in the calling
+    /// frame's variable context asks: *what are this frame's variables called*.
+    /// The names come from [`Chunk::sub_slot_names`] and the values from the
+    /// frame, so two activations of a recursive subroutine answer with the same
+    /// names over their own slots.
+    pub fn slot_names_at(&self, up: usize) -> &[String] {
+        let depth = self.frames.len();
+        if up >= depth {
+            return &[];
+        }
+        match self.frames[depth - 1 - up].entry_ip {
+            Some(ip) => self.chunk.sub_slot_names_at(ip),
+            None => &[],
+        }
+    }
+
+    /// The slot index `name` has in the frame `up` levels out, or `None` when
+    /// that frame has no slot by that name.
+    ///
+    /// This is the question `upvar`-style aliasing asks: *which slot of that
+    /// frame is this name*. The answer indexes `Frame::slots` of the same frame,
+    /// so a caller pairs it with [`VM::slot_names_at`]'s `up`.
+    pub fn slot_of_at(&self, up: usize, name: &str) -> Option<u16> {
+        self.slot_names_at(up)
+            .iter()
+            .position(|n| n == name)
+            .and_then(|i| u16::try_from(i).ok())
+    }
+
+    /// The running frame's slot names — [`VM::slot_names_at`] at level 0.
+    pub fn frame_slot_names(&self) -> &[String] {
+        self.slot_names_at(0)
+    }
+
+    /// The slot `name` has in the running frame — [`VM::slot_of_at`] at level 0.
+    pub fn frame_slot_of(&self, name: &str) -> Option<u16> {
+        self.slot_of_at(0, name)
+    }
+
     /// This chunk's identity for [`UndefRead::chunk`] — its ops and its names.
     ///
     /// Computed once and cached: reached only from an undef read, which is the
@@ -785,6 +842,7 @@ impl VM {
             return_ip: 0,
             stack_base: 0,
             slots: Vec::with_capacity(16),
+            entry_ip: None,
         });
         self.ip = 0;
         self.last_status = 0;
@@ -1235,6 +1293,10 @@ impl VM {
                 return_ip: df.return_ip,
                 stack_base: self.stack.len(),
                 slots,
+                // A deopt record carries a return address and slot values, not
+                // the subroutine they belong to, so this frame cannot answer by
+                // name. A frontend asking gets nothing rather than a guess.
+                entry_ip: None,
             });
         }
     }
@@ -2308,6 +2370,7 @@ impl VM {
                         return_ip: self.ip,
                         stack_base: self.stack.len() - *argc as usize,
                         slots: Vec::new(),
+                        entry_ip: Some(entry_ip),
                     });
                     self.ip = entry_ip;
                 } else {
@@ -2347,6 +2410,8 @@ impl VM {
                     return_ip: self.ip,
                     stack_base: self.stack.len(),
                     slots: Vec::new(),
+                    // A scope frame enters no subroutine, so it has no names.
+                    entry_ip: None,
                 });
             }
             Op::PopFrame => {
@@ -2835,6 +2900,7 @@ impl VM {
                                 return_ip: self.ip,
                                 stack_base: self.stack.len() - (args.len() - 1),
                                 slots: Vec::with_capacity(8),
+                                entry_ip: Some(entry_ip),
                             });
                             self.ip = entry_ip;
                             return ExecFlow::Cont;
@@ -3225,6 +3291,7 @@ impl VM {
                             return_ip: self.ip,
                             stack_base: self.stack.len() - args.len(),
                             slots: Vec::with_capacity(8),
+                            entry_ip: Some(entry_ip),
                         });
                         self.ip = entry_ip;
                         return ExecFlow::Cont;
@@ -3757,6 +3824,7 @@ impl VM {
                         return_ip: self.ip,
                         stack_base: self.stack.len() - *argc as usize,
                         slots: Vec::new(),
+                        entry_ip: Some(entry_ip),
                     });
                     self.ip = entry_ip;
                 } else {
