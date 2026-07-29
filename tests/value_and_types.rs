@@ -335,6 +335,7 @@ fn trace_metadata_serde_roundtrip() {
         ops: vec![Op::LoadInt(1), Op::LoadInt(2), Op::Add],
         recorded_ips: vec![3, 4, 5],
         slot_kinds_at_anchor: vec![SlotKind::Int, SlotKind::Float],
+        global_kinds_at_anchor: vec![SlotKind::Int],
     };
     let j = serde_json::to_string(&md).expect("ser");
     let back: TraceMetadata = serde_json::from_str(&j).expect("de");
@@ -344,6 +345,17 @@ fn trace_metadata_serde_roundtrip() {
     assert_eq!(back.ops, md.ops);
     assert_eq!(back.recorded_ips, md.recorded_ips);
     assert_eq!(back.slot_kinds_at_anchor, md.slot_kinds_at_anchor);
+    assert_eq!(back.global_kinds_at_anchor, md.global_kinds_at_anchor);
+}
+
+/// Metadata written before traces could reference globals still loads: the
+/// field defaults to "no globals", which is what such a trace recorded.
+#[test]
+fn trace_metadata_without_globals_field_still_deserializes() {
+    let legacy = r#"{"chunk_op_hash":1,"anchor_ip":2,"fallthrough_ip":3,
+        "ops":[],"recorded_ips":[],"slot_kinds_at_anchor":["Int"]}"#;
+    let back: TraceMetadata = serde_json::from_str(legacy).expect("de");
+    assert!(back.global_kinds_at_anchor.is_empty());
 }
 
 #[test]

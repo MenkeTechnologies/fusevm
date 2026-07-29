@@ -281,6 +281,15 @@ pub struct TraceMetadata {
     /// mismatch → skip the trace and let the interpreter handle the
     /// iteration.
     pub slot_kinds_at_anchor: Vec<SlotKind>,
+    /// The same fingerprint for the globals the trace referenced. Whether
+    /// each was a number at the anchor is *not* carried: an imported trace
+    /// re-checks that against the live table before it runs.
+    ///
+    /// `serde(default)` so metadata persisted by a build that predates global
+    /// support still deserializes — such a trace referenced no global, which is
+    /// exactly what the empty vector says.
+    #[serde(default)]
+    pub global_kinds_at_anchor: Vec<SlotKind>,
 }
 
 /// Outcome of consulting the trace cache at a backward-branch site.
@@ -3028,7 +3037,11 @@ mod cranelift_jit_impl {
         pub(crate) const KIND_BLOCK: u8 = 1;
         pub(crate) const KIND_TRACE: u8 = 2;
 
-        const MAGIC: &[u8; 8] = b"FJITNAT2";
+        // Bumped when the compiled entry point's ABI changes. `FJITNAT3`: the
+        // trace function gained a second pointer parameter (the globals
+        // buffer), so a blob written by an earlier build would be called with
+        // the wrong signature.
+        const MAGIC: &[u8; 8] = b"FJITNAT3";
         // 7 -> 8: inserted `Op::PowFloat` mid-enum, shifting the serde/Hash
         // discriminants of all following ops; bumped to invalidate any prior
         // op_hash-keyed blobs that would otherwise collide.
@@ -4017,6 +4030,7 @@ mod cranelift_jit_impl {
             fallthrough_ip: usize,
             is_side_trace: bool,
             slot_types: &[(u16, JitTy)],
+            global_types: &[(u16, JitTy)],
             constants: &[FuseValue],
         ) -> Option<CompiledTrace> {
             let sub = record_anchor_ip as u64;
@@ -4036,6 +4050,7 @@ mod cranelift_jit_impl {
                 fallthrough_ip,
                 is_side_trace,
                 slot_types,
+                global_types,
                 constants,
                 meta_hash,
             )?;
@@ -4086,6 +4101,7 @@ mod cranelift_jit_impl {
             fallthrough_ip: usize,
             is_side_trace: bool,
             slot_types: &[(u16, JitTy)],
+            global_types: &[(u16, JitTy)],
             constants: &[FuseValue],
             meta_hash: u64,
         ) -> Option<NativeBlob> {
@@ -4101,6 +4117,7 @@ mod cranelift_jit_impl {
                 fallthrough_ip,
                 is_side_trace,
                 slot_types,
+                global_types,
                 constants,
             )?;
             let (code, relocs) = {
@@ -5726,12 +5743,15 @@ mod cranelift_jit_impl {
     /// Trace fn signature.
     ///
     /// - `slots` — pointer to the caller frame's i64 slot array.
+    /// - `globals` — pointer to the VM's i64 global buffer, addressed exactly
+    ///   as the slot array is. Each global the trace references is promoted to
+    ///   a register at entry and spilled back at every exit.
     /// - `deopt_info` — pointer to a `DeoptInfo` the trace populates on
     ///   every exit (normal loop fallthrough OR side-exit). The trace
     ///   writes `resume_ip` always; `frame_count` and `frames[0..frame_count]`
     ///   are populated only on callee-frame side-exits.
     /// - returns: the resume IP (also written to `*deopt_info`).
-    type TraceFn = unsafe extern "C" fn(*mut i64, *mut super::DeoptInfo) -> i64;
+    type TraceFn = unsafe extern "C" fn(*mut i64, *mut i64, *mut super::DeoptInfo) -> i64;
 
     /// Keeps the executable memory backing a [`CompiledTrace`] alive — either a
     /// `JITModule` (in-memory JIT path) or an mmap'd region of relocated native
@@ -5755,8 +5775,13 @@ mod cranelift_jit_impl {
         /// Invoke the trace. Returns the IP to resume interpretation at,
         /// and populates `deopt_info` for the caller to materialize any
         /// inlined frames.
-        pub(crate) fn invoke(&self, slots: *mut i64, deopt_info: &mut super::DeoptInfo) -> i64 {
-            unsafe { (self.run)(slots, deopt_info as *mut _) }
+        pub(crate) fn invoke(
+            &self,
+            slots: *mut i64,
+            globals: *mut i64,
+            deopt_info: &mut super::DeoptInfo,
+        ) -> i64 {
+            unsafe { (self.run)(slots, globals, deopt_info as *mut _) }
         }
     }
 
@@ -5785,6 +5810,11 @@ mod cranelift_jit_impl {
         /// Phase 1: all entries are JitTy::Int. The interpreter checks these
         /// before invoking the trace.
         slot_types: Vec<(u16, JitTy)>,
+        /// Global indices the trace touched, with their expected entry types.
+        /// Checked the same way as `slot_types`, and additionally against the
+        /// caller's per-index "was numeric" flags: a global that is not a
+        /// number at entry cannot be spilled back, so the trace is skipped.
+        global_types: Vec<(u16, JitTy)>,
         /// Phase 7: original recording metadata retained for persistent
         /// cache export. None until the trace is successfully installed.
         saved_metadata: Option<super::TraceMetadata>,
@@ -5798,6 +5828,11 @@ mod cranelift_jit_impl {
     /// Maximum slot index a trace can reference (keeps slot_types small).
     /// Not user-tunable — fundamental to the deopt buffer layout.
     pub(crate) const MAX_TRACE_SLOT: u16 = 64;
+
+    /// Maximum global index a trace can reference. Bounds the entry guard's
+    /// per-trace `global_types` list and the registers promoted at entry; a
+    /// frontend whose hot loop touches a global past this runs it interpreted.
+    pub(crate) const MAX_TRACE_GLOBAL: u16 = 256;
 
     thread_local! {
         /// Per-thread tunable thresholds for the tracing JIT. Callers
@@ -5908,11 +5943,47 @@ mod cranelift_jit_impl {
     /// `slot_kinds_at_anchor` is the runtime types of the frame's slots at the
     /// anchor IP. Used to (a) install the entry guard at compile time, (b) check
     /// it before invoking a previously compiled trace.
+    /// Fill the i64/kind/numeric buffers from the live global table.
+    ///
+    /// Called only from the paths that need them — a compiled trace about to
+    /// run, or a recording about to start — because a backward branch that
+    /// reaches neither would otherwise pay for a walk of the whole table on
+    /// every iteration it spends in the interpreter.
+    fn fill_global_buffers(
+        globals: &[FuseValue],
+        buf: &mut Vec<i64>,
+        kinds: &mut Vec<super::SlotKind>,
+        numeric: &mut Vec<bool>,
+    ) {
+        buf.clear();
+        kinds.clear();
+        numeric.clear();
+        buf.reserve(globals.len());
+        kinds.reserve(globals.len());
+        numeric.reserve(globals.len());
+        for v in globals {
+            let (i, kind, is_num) = match v {
+                FuseValue::Int(n) => (*n, super::SlotKind::Int, true),
+                FuseValue::Float(f) => (f.to_bits() as i64, super::SlotKind::Float, true),
+                FuseValue::Bool(b) => (*b as i64, super::SlotKind::Int, true),
+                _ => (0, super::SlotKind::Int, false),
+            };
+            buf.push(i);
+            kinds.push(kind);
+            numeric.push(is_num);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn trace_lookup(
         chunk: &Chunk,
         anchor_ip: usize,
         slots: *mut i64,
         slot_kinds_at_anchor: &[super::SlotKind],
+        globals: &[FuseValue],
+        global_buf: &mut Vec<i64>,
+        global_kinds: &mut Vec<super::SlotKind>,
+        global_numeric: &mut Vec<bool>,
         deopt_info: &mut super::DeoptInfo,
     ) -> super::TraceLookup {
         let key = (chunk.op_hash, anchor_ip);
@@ -5927,6 +5998,9 @@ mod cranelift_jit_impl {
                     return super::TraceLookup::Skip;
                 }
                 if let Some(ref compiled) = entry.compiled {
+                    // A trace is about to run: snapshot the global table so the
+                    // guard below can read it and the trace can address it.
+                    fill_global_buffers(globals, global_buf, global_kinds, global_numeric);
                     // Entry guard: verify referenced slots still match
                     // recorded types.
                     for &(slot, ty) in &entry.slot_types {
@@ -5943,17 +6017,45 @@ mod cranelift_jit_impl {
                             return super::TraceLookup::GuardMismatch;
                         }
                     }
+                    // Same guard over the globals the trace referenced, plus
+                    // the requirement that each still *is* a number: a global
+                    // that has become a string cannot carry the trace's result
+                    // back out of the i64 buffer, so the interpreter takes the
+                    // iteration instead.
+                    for &(g, ty) in &entry.global_types {
+                        let numeric = global_numeric.get(g as usize).copied().unwrap_or(false);
+                        let actual = global_kinds
+                            .get(g as usize)
+                            .copied()
+                            .map(slot_kind_to_jitty)
+                            .unwrap_or(JitTy::Int);
+                        if !numeric || actual != ty {
+                            entry.deopt_count = entry.deopt_count.saturating_add(1);
+                            if entry.deopt_count >= 5 {
+                                entry.blacklisted = true;
+                            }
+                            return super::TraceLookup::GuardMismatch;
+                        }
+                    }
                     // Reset deopt info before each invocation so stale
                     // records from prior calls don't leak through.
                     deopt_info.resume_ip = 0;
                     deopt_info.frame_count = 0;
                     deopt_info.stack_count = 0;
-                    let resume_ip = compiled.invoke(slots, deopt_info) as usize;
+                    let gptr = if global_buf.is_empty() {
+                        std::ptr::null_mut()
+                    } else {
+                        global_buf.as_mut_ptr()
+                    };
+                    let resume_ip = compiled.invoke(slots, gptr, deopt_info) as usize;
                     return super::TraceLookup::Ran { resume_ip };
                 }
                 // Not compiled yet — bump hot counter, decide arming.
                 entry.hot_count = entry.hot_count.saturating_add(1);
                 return if entry.hot_count >= cfg_trace_threshold() {
+                    // The caller is about to snapshot the anchor's types for
+                    // the recorder; give it the global half.
+                    fill_global_buffers(globals, global_buf, global_kinds, global_numeric);
                     super::TraceLookup::StartRecording
                 } else {
                     super::TraceLookup::NotHot
@@ -5974,10 +6076,12 @@ mod cranelift_jit_impl {
                     blacklisted: false,
                     fallthrough_ip: 0,
                     slot_types: Vec::new(),
+                    global_types: Vec::new(),
                     saved_metadata: None,
                 },
             );
             if 1 >= cfg_trace_threshold() {
+                fill_global_buffers(globals, global_buf, global_kinds, global_numeric);
                 super::TraceLookup::StartRecording
             } else {
                 super::TraceLookup::NotHot
@@ -6024,6 +6128,7 @@ mod cranelift_jit_impl {
     /// actually references and store them as the entry guard.
     ///
     /// Returns true if compile + install succeeded.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn trace_install(
         chunk: &Chunk,
         anchor_ip: usize,
@@ -6031,6 +6136,8 @@ mod cranelift_jit_impl {
         ops: &[Op],
         recorded_ips: &[usize],
         slot_kinds_at_anchor: &[super::SlotKind],
+        global_kinds_at_anchor: &[super::SlotKind],
+        global_numeric_at_anchor: &[bool],
         constants: &[FuseValue],
     ) -> bool {
         trace_install_with_kind(
@@ -6041,6 +6148,8 @@ mod cranelift_jit_impl {
             ops,
             recorded_ips,
             slot_kinds_at_anchor,
+            global_kinds_at_anchor,
+            global_numeric_at_anchor,
             constants,
         )
     }
@@ -6054,6 +6163,7 @@ mod cranelift_jit_impl {
     /// the main trace (or interpreter) at the loop header for the next
     /// iteration. Side traces are one-shot completions of the post-side-
     /// exit portion of the loop body, not standalone loops.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn trace_install_with_kind(
         chunk: &Chunk,
         record_anchor_ip: usize,
@@ -6062,6 +6172,8 @@ mod cranelift_jit_impl {
         ops: &[Op],
         recorded_ips: &[usize],
         slot_kinds_at_anchor: &[super::SlotKind],
+        global_kinds_at_anchor: &[super::SlotKind],
+        global_numeric_at_anchor: &[bool],
         constants: &[FuseValue],
     ) -> bool {
         let is_side_trace = record_anchor_ip != close_anchor_ip;
@@ -6078,6 +6190,35 @@ mod cranelift_jit_impl {
                 .unwrap_or(super::SlotKind::Int);
             let ty = slot_kind_to_jitty(kind);
             slot_types.push((slot, ty));
+        }
+
+        // The same list for globals. A global the trace touches that was not a
+        // number at the anchor is refused here rather than compiled: the trace
+        // would fail its own entry guard on every invocation, and the recording
+        // that produced it saw a value the i64 buffer cannot carry.
+        let used_globals = collect_trace_globals(ops);
+        let mut global_types: Vec<(u16, JitTy)> = Vec::with_capacity(used_globals.len());
+        for &g in &used_globals {
+            // An import (`trace_import`) has no numeric snapshot to offer and
+            // passes an empty slice; the runtime guard still checks every entry
+            // before the trace runs, so assuming numeric here is safe.
+            let numeric = if global_numeric_at_anchor.is_empty() {
+                true
+            } else {
+                global_numeric_at_anchor
+                    .get(g as usize)
+                    .copied()
+                    .unwrap_or(false)
+            };
+            if !numeric {
+                trace_abort(chunk, record_anchor_ip);
+                return false;
+            }
+            let kind = global_kinds_at_anchor
+                .get(g as usize)
+                .copied()
+                .unwrap_or(super::SlotKind::Int);
+            global_types.push((g, slot_kind_to_jitty(kind)));
         }
 
         let key = (chunk.op_hash, record_anchor_ip);
@@ -6097,6 +6238,7 @@ mod cranelift_jit_impl {
                     fallthrough_ip,
                     is_side_trace,
                     &slot_types,
+                    &global_types,
                     constants,
                 );
                 compiled = disk_cache::try_load_or_build_trace(
@@ -6109,6 +6251,7 @@ mod cranelift_jit_impl {
                     fallthrough_ip,
                     is_side_trace,
                     &slot_types,
+                    &global_types,
                     constants,
                 );
             }
@@ -6123,6 +6266,7 @@ mod cranelift_jit_impl {
                 fallthrough_ip,
                 is_side_trace,
                 &slot_types,
+                &global_types,
                 constants,
             ) {
                 Some(c) => c,
@@ -6143,11 +6287,13 @@ mod cranelift_jit_impl {
                 blacklisted: false,
                 fallthrough_ip,
                 slot_types: Vec::new(),
+                global_types: Vec::new(),
                 saved_metadata: None,
             });
             entry.compiled = Some(Box::new(compiled));
             entry.fallthrough_ip = fallthrough_ip;
             entry.slot_types = slot_types;
+            entry.global_types = global_types;
             // Phase 7: retain the recording so callers can export it for
             // persistent caching. The saved metadata records the
             // `close_anchor_ip` rather than `record_anchor_ip`, so on
@@ -6160,6 +6306,7 @@ mod cranelift_jit_impl {
                 ops: ops.to_vec(),
                 recorded_ips: recorded_ips.to_vec(),
                 slot_kinds_at_anchor: slot_kinds_at_anchor.to_vec(),
+                global_kinds_at_anchor: global_kinds_at_anchor.to_vec(),
             });
         });
         true
@@ -6190,6 +6337,12 @@ mod cranelift_jit_impl {
             // counter loops and are handled by the block JIT (whole-chunk);
             // the trace tier has no codegen for them, so reject to fall back.
             Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_) => false,
+            // Globals: the trace tier promotes each referenced one to a
+            // register at entry and spills it at every exit, the same way it
+            // treats a caller-frame slot. The block tier has no such buffer, so
+            // `is_block_eligible_op_at` still refuses these and a whole-chunk
+            // compile is unaffected.
+            Op::GetVar(_) | Op::SetVar(_) | Op::DeclareVar(_) => true,
             _ => is_block_eligible_op_at(ops, ip),
         }
     }
@@ -6352,11 +6505,14 @@ mod cranelift_jit_impl {
     /// each entry's i64 value is written to `stack_buf` in order. Phase 5a
     /// only supports Int entries — Float entries should be rejected by the
     /// caller before invoking emit_exit.
+    #[allow(clippy::too_many_arguments)]
     fn emit_exit(
         bcx: &mut FunctionBuilder,
         slot_base: cranelift_codegen::ir::Value,
+        global_base: cranelift_codegen::ir::Value,
         deopt_ptr: cranelift_codegen::ir::Value,
         caller_slot_vars: &HashMap<u16, Variable>,
+        global_vars: &HashMap<u16, Variable>,
         frames_to_materialize: &[(usize, usize, Vec<(u16, Variable)>)],
         abstract_stack: &[(cranelift_codegen::ir::Value, JitTy)],
         resume_ip: usize,
@@ -6369,11 +6525,18 @@ mod cranelift_jit_impl {
         if let Some(o) = ovf {
             emit_trace_overflow_bail(bcx, o);
         }
-        // 1. Spill caller-frame slots.
+        // 1. Spill caller-frame slots, then the globals the trace promoted.
+        //    Both must land before the deopt record is written: a side-exit
+        //    resumes the interpreter, which reads them straight back.
         for (&slot, &var) in caller_slot_vars {
             let val = bcx.use_var(var);
             bcx.ins()
                 .store(MemFlags::trusted(), val, slot_base, (slot as i32) * 8);
+        }
+        for (&g, &var) in global_vars {
+            let val = bcx.use_var(var);
+            bcx.ins()
+                .store(MemFlags::trusted(), val, global_base, (g as i32) * 8);
         }
         // 2. Write resume_ip / frame_count / stack_count.
         let resume_v = bcx.ins().iconst(types::I64, resume_ip as i64);
@@ -6497,6 +6660,9 @@ mod cranelift_jit_impl {
                 Op::AccumSumLoop(a, b, _) | Op::AddAssignSlotVoid(a, b) => {
                     *a >= MAX_TRACE_SLOT || *b >= MAX_TRACE_SLOT
                 }
+                // The guard list and the promoted-register set are per global
+                // as well, so bound the index the same way.
+                Op::GetVar(g) | Op::SetVar(g) | Op::DeclareVar(g) => *g >= MAX_TRACE_GLOBAL,
                 _ => false,
             };
             if bad_slot {
@@ -6606,6 +6772,24 @@ mod cranelift_jit_impl {
         seen
     }
 
+    /// Collect the global indices a recorded trace reads or writes, in first-
+    /// touch order.
+    ///
+    /// Unlike slots, globals are one table shared by every frame, so an access
+    /// inside an inlined callee counts exactly as one in the caller — there is
+    /// no depth filter here.
+    pub(crate) fn collect_trace_globals(ops: &[Op]) -> Vec<u16> {
+        let mut seen = Vec::new();
+        for op in ops {
+            if let Op::GetVar(g) | Op::SetVar(g) | Op::DeclareVar(g) = op {
+                if !seen.contains(g) {
+                    seen.push(*g);
+                }
+            }
+        }
+        seen
+    }
+
     /// Compile a recorded trace to native code.
     ///
     /// IR shape:
@@ -6635,6 +6819,7 @@ mod cranelift_jit_impl {
     /// (PreIncSlot, AddAssignSlotVoid, etc.) reject Float slots — those
     /// remain Int-only by design (they exist for tight integer counter
     /// loops).
+    #[allow(clippy::too_many_arguments)]
     fn compile_trace_kinded(
         ops: &[Op],
         recorded_ips: &[usize],
@@ -6642,6 +6827,7 @@ mod cranelift_jit_impl {
         fallthrough_ip: usize,
         is_side_trace: bool,
         slot_types: &[(u16, JitTy)],
+        global_types: &[(u16, JitTy)],
         constants: &[FuseValue],
     ) -> Option<CompiledTrace> {
         let _ = close_anchor_ip;
@@ -6651,6 +6837,7 @@ mod cranelift_jit_impl {
             fallthrough_ip,
             is_side_trace,
             slot_types,
+            global_types,
             constants,
         )
     }
@@ -6660,12 +6847,14 @@ mod cranelift_jit_impl {
     /// different path/types is rejected even when the `(op_hash, anchor)` key
     /// collides. Stable across processes of the same build.
     #[cfg(feature = "jit-disk-cache")]
+    #[allow(clippy::too_many_arguments)]
     fn trace_meta_hash(
         ops: &[Op],
         recorded_ips: &[usize],
         fallthrough_ip: usize,
         is_side_trace: bool,
         slot_types: &[(u16, JitTy)],
+        global_types: &[(u16, JitTy)],
         constants: &[FuseValue],
     ) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -6678,20 +6867,29 @@ mod cranelift_jit_impl {
             slot.hash(&mut h);
             (matches!(ty, JitTy::Float) as u8).hash(&mut h);
         }
+        for (global, ty) in global_types {
+            global.hash(&mut h);
+            (matches!(ty, JitTy::Float) as u8).hash(&mut h);
+        }
         format!("{constants:?}").hash(&mut h);
         h.finish()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_trace_function(
         ops: &[Op],
         recorded_ips: &[usize],
         fallthrough_ip: usize,
         is_side_trace: bool,
         slot_types: &[(u16, JitTy)],
+        global_types: &[(u16, JitTy)],
         constants: &[FuseValue],
     ) -> Option<BuiltFn> {
         // Quick lookup: slot index → its kind (Int / Float).
         let slot_kind_of: HashMap<u16, JitTy> = slot_types.iter().copied().collect();
+        // The same for globals: the kind each held at the anchor, which the
+        // entry guard has already checked still holds when the trace runs.
+        let global_kind_of: HashMap<u16, JitTy> = global_types.iter().copied().collect();
         // Defensive: catch struct-layout drift between Rust types and the
         // hardcoded offsets used in IR codegen below.
         assert_deopt_layout();
@@ -6761,6 +6959,7 @@ mod cranelift_jit_impl {
         let ptr_ty = module.target_config().pointer_type();
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 slots
+        sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 globals
         sig.params.push(AbiParam::new(ptr_ty)); // *mut DeoptInfo
         sig.returns.push(AbiParam::new(types::I64));
         let fid = module
@@ -6773,6 +6972,10 @@ mod cranelift_jit_impl {
         // Slots referenced by trace, ordered. Each becomes a Cranelift Variable
         // promoted in the entry block and spilled in the exit block.
         let trace_slots = collect_trace_slots(ops);
+        // Globals get the same treatment, in one scope rather than per frame:
+        // the table is shared, so an access inside an inlined callee is the
+        // same variable as one in the caller.
+        let trace_globals = collect_trace_globals(ops);
 
         let mut fctx = FunctionBuilderContext::new();
         {
@@ -6784,7 +6987,8 @@ mod cranelift_jit_impl {
             bcx.append_block_params_for_function_params(entry);
             bcx.switch_to_block(entry);
             let slot_base = bcx.block_params(entry)[0];
-            let deopt_ptr = bcx.block_params(entry)[1];
+            let global_base = bcx.block_params(entry)[1];
+            let deopt_ptr = bcx.block_params(entry)[2];
 
             let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
             let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
@@ -6808,6 +7012,18 @@ mod cranelift_jit_impl {
                     .load(types::I64, MemFlags::trusted(), slot_base, off);
                 bcx.def_var(var, v);
                 frames[0].slot_vars.insert(slot, var);
+            }
+            // Globals: one flat scope, loaded from the globals pointer at the
+            // same 8-byte stride.
+            let mut global_vars: HashMap<u16, Variable> = HashMap::new();
+            for &g in &trace_globals {
+                let var = bcx.declare_var(types::I64);
+                let off = (g as i32) * 8;
+                let v = bcx
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), global_base, off);
+                bcx.def_var(var, v);
+                global_vars.insert(g, var);
             }
 
             // Strict numeric mode: give the trace the same overflow accumulator
@@ -6933,6 +7149,45 @@ mod cranelift_jit_impl {
                                 stack.push((f, JitTy::Float));
                             }
                         }
+                    }
+                    // ── Global ops: one scope, promoted at entry ──
+                    // A referenced global is always in `global_vars`
+                    // (`collect_trace_globals` walked the same op list), so a
+                    // miss is a bug rather than a lazily-created variable.
+                    Op::GetVar(g) => {
+                        let var = *global_vars.get(g)?;
+                        let raw = bcx.use_var(var);
+                        match global_kind_of.get(g).copied().unwrap_or(JitTy::Int) {
+                            JitTy::Int => stack.push((raw, JitTy::Int)),
+                            JitTy::Float => {
+                                let f = bcx.ins().bitcast(
+                                    types::F64,
+                                    cranelift_codegen::ir::MemFlags::new(),
+                                    raw,
+                                );
+                                stack.push((f, JitTy::Float));
+                            }
+                        }
+                    }
+                    Op::SetVar(g) | Op::DeclareVar(g) => {
+                        let var = *global_vars.get(g)?;
+                        let (v, ty) = stack.pop()?;
+                        // A global's kind is fixed for the trace by the entry
+                        // guard, so a store of the other kind would be spilled
+                        // back under the wrong tag. Refuse the compile instead.
+                        let want = global_kind_of.get(g).copied().unwrap_or(JitTy::Int);
+                        if ty != want {
+                            return None;
+                        }
+                        let v_i = match ty {
+                            JitTy::Int => v,
+                            JitTy::Float => bcx.ins().bitcast(
+                                types::I64,
+                                cranelift_codegen::ir::MemFlags::new(),
+                                v,
+                            ),
+                        };
+                        bcx.def_var(var, v_i);
                     }
                     Op::SetSlot(slot) => {
                         let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
@@ -7084,8 +7339,10 @@ mod cranelift_jit_impl {
                         emit_exit(
                             &mut bcx,
                             slot_base,
+                            global_base,
                             deopt_ptr,
                             &frames[0].slot_vars,
+                            &global_vars,
                             &frames_to_materialize,
                             &stack,
                             side_exit_ip,
@@ -7173,8 +7430,10 @@ mod cranelift_jit_impl {
                         emit_exit(
                             &mut bcx,
                             slot_base,
+                            global_base,
                             deopt_ptr,
                             &frames[0].slot_vars,
+                            &global_vars,
                             &[],
                             &[],
                             target_ip,
@@ -7205,8 +7464,10 @@ mod cranelift_jit_impl {
                         emit_exit(
                             &mut bcx,
                             slot_base,
+                            global_base,
                             deopt_ptr,
                             &frames[0].slot_vars,
+                            &global_vars,
                             &[],
                             &[],
                             target_ip,
@@ -7227,8 +7488,10 @@ mod cranelift_jit_impl {
             emit_exit(
                 &mut bcx,
                 slot_base,
+                global_base,
                 deopt_ptr,
                 &frames[0].slot_vars,
+                &global_vars,
                 &[],
                 &[],
                 fallthrough_ip,
@@ -7257,12 +7520,14 @@ mod cranelift_jit_impl {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_trace_inner(
         ops: &[Op],
         recorded_ips: &[usize],
         fallthrough_ip: usize,
         is_side_trace: bool,
         slot_types: &[(u16, JitTy)],
+        global_types: &[(u16, JitTy)],
         constants: &[FuseValue],
     ) -> Option<CompiledTrace> {
         // Strict numeric mode used to decline any trace containing integer
@@ -7289,6 +7554,7 @@ mod cranelift_jit_impl {
             fallthrough_ip,
             is_side_trace,
             slot_types,
+            global_types,
             constants,
         )?;
         module.define_function(fid, &mut ctx).ok()?;
@@ -7393,6 +7659,11 @@ mod cranelift_jit_impl {
             &meta.ops,
             &meta.recorded_ips,
             &meta.slot_kinds_at_anchor,
+            &meta.global_kinds_at_anchor,
+            // No "was numeric" snapshot travels with an exported trace; the
+            // entry guard checks every referenced global before the trace runs,
+            // so an import that turns out to be wrong simply never fires.
+            &[],
             constants,
         )
     }
@@ -7874,12 +8145,17 @@ impl JitCompiler {
     /// Returns a `TraceLookup` describing what the interpreter should do next.
     #[cfg(feature = "jit")]
     /// Public method `trace_lookup` — see the implementing block's surrounding context for the call contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn trace_lookup(
         &self,
         chunk: &crate::Chunk,
         anchor_ip: usize,
         slots: &mut [i64],
         slot_kinds_at_anchor: &[SlotKind],
+        globals: &[crate::Value],
+        global_buf: &mut Vec<i64>,
+        global_kinds: &mut Vec<SlotKind>,
+        global_numeric: &mut Vec<bool>,
         deopt_info: &mut DeoptInfo,
     ) -> TraceLookup {
         let ptr = if slots.is_empty() {
@@ -7887,7 +8163,17 @@ impl JitCompiler {
         } else {
             slots.as_mut_ptr()
         };
-        cranelift_jit_impl::trace_lookup(chunk, anchor_ip, ptr, slot_kinds_at_anchor, deopt_info)
+        cranelift_jit_impl::trace_lookup(
+            chunk,
+            anchor_ip,
+            ptr,
+            slot_kinds_at_anchor,
+            globals,
+            global_buf,
+            global_kinds,
+            global_numeric,
+            deopt_info,
+        )
     }
 
     /// Compile and install a recorded trace.
@@ -7900,6 +8186,7 @@ impl JitCompiler {
     /// entry guard.
     #[cfg(feature = "jit")]
     /// Public method `trace_install` — see the implementing block's surrounding context for the call contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn trace_install(
         &self,
         chunk: &crate::Chunk,
@@ -7908,6 +8195,8 @@ impl JitCompiler {
         ops: &[crate::Op],
         recorded_ips: &[usize],
         slot_kinds_at_anchor: &[SlotKind],
+        global_kinds_at_anchor: &[SlotKind],
+        global_numeric_at_anchor: &[bool],
     ) -> bool {
         cranelift_jit_impl::trace_install(
             chunk,
@@ -7916,6 +8205,8 @@ impl JitCompiler {
             ops,
             recorded_ips,
             slot_kinds_at_anchor,
+            global_kinds_at_anchor,
+            global_numeric_at_anchor,
             &chunk.constants,
         )
     }
@@ -7984,6 +8275,7 @@ impl JitCompiler {
     /// `trace_install`.
     #[cfg(feature = "jit")]
     /// Public method `trace_install_with_kind` — see the implementing block's surrounding context for the call contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn trace_install_with_kind(
         &self,
         chunk: &crate::Chunk,
@@ -7993,6 +8285,8 @@ impl JitCompiler {
         ops: &[crate::Op],
         recorded_ips: &[usize],
         slot_kinds_at_anchor: &[SlotKind],
+        global_kinds_at_anchor: &[SlotKind],
+        global_numeric_at_anchor: &[bool],
     ) -> bool {
         cranelift_jit_impl::trace_install_with_kind(
             chunk,
@@ -8002,6 +8296,8 @@ impl JitCompiler {
             ops,
             recorded_ips,
             slot_kinds_at_anchor,
+            global_kinds_at_anchor,
+            global_numeric_at_anchor,
             &chunk.constants,
         )
     }
@@ -8097,12 +8393,17 @@ impl JitCompiler {
 
     #[cfg(not(feature = "jit"))]
     /// No-op stub for `trace_lookup` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
+    #[allow(clippy::too_many_arguments)]
     pub fn trace_lookup(
         &self,
         _chunk: &crate::Chunk,
         _anchor_ip: usize,
         _slots: &mut [i64],
         _slot_kinds_at_anchor: &[SlotKind],
+        _globals: &[crate::Value],
+        _global_buf: &mut Vec<i64>,
+        _global_kinds: &mut Vec<SlotKind>,
+        _global_numeric: &mut Vec<bool>,
         _deopt_info: &mut DeoptInfo,
     ) -> TraceLookup {
         TraceLookup::Skip
@@ -8110,6 +8411,7 @@ impl JitCompiler {
 
     #[cfg(not(feature = "jit"))]
     /// No-op stub for `trace_install` when the `jit` cargo feature is disabled. The real implementation lives behind `#[cfg(feature = "jit")]`.
+    #[allow(clippy::too_many_arguments)]
     pub fn trace_install(
         &self,
         _chunk: &crate::Chunk,
@@ -8118,6 +8420,8 @@ impl JitCompiler {
         _ops: &[crate::Op],
         _recorded_ips: &[usize],
         _slot_kinds_at_anchor: &[SlotKind],
+        _global_kinds_at_anchor: &[SlotKind],
+        _global_numeric_at_anchor: &[bool],
     ) -> bool {
         false
     }
@@ -8170,6 +8474,8 @@ impl JitCompiler {
         _ops: &[crate::Op],
         _recorded_ips: &[usize],
         _slot_kinds_at_anchor: &[SlotKind],
+        _global_kinds_at_anchor: &[SlotKind],
+        _global_numeric_at_anchor: &[bool],
     ) -> bool {
         false
     }

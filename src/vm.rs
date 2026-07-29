@@ -82,6 +82,11 @@ struct TraceRecorder {
     recorded_ips: Vec<usize>,
     /// Slot type snapshot at recording start; installed as the entry guard.
     slot_kinds_at_anchor: Vec<SlotKind>,
+    /// Global type snapshot at recording start, and which of them were numeric
+    /// there. A trace that references a global that was not numeric at the
+    /// anchor is never installed: it could not spill its result back.
+    global_kinds_at_anchor: Vec<SlotKind>,
+    global_numeric_at_anchor: Vec<bool>,
     /// Stack of bytecode entry IPs for currently inlined callees. Empty in
     /// the caller frame; pushed on Op::Call, popped on Op::Return /
     /// Op::ReturnValue. Used for recursion detection.
@@ -197,6 +202,26 @@ pub struct VM {
     /// Reusable scratch slot-kind snapshot for the trace entry guard.
     #[cfg(feature = "jit")]
     slot_kinds_buf: Vec<SlotKind>,
+    /// Reusable scratch i64 buffer of *global* values, passed to compiled
+    /// traces beside [`VM::slot_buf`]. A trace that reads or writes a global
+    /// addresses it here, at `index * 8`, exactly as it addresses a slot.
+    #[cfg(feature = "jit")]
+    global_buf: Vec<i64>,
+    /// Reusable scratch global-kind snapshot for the trace entry guard.
+    /// Meaningful only where [`VM::global_numeric`] is true.
+    #[cfg(feature = "jit")]
+    global_kinds_buf: Vec<SlotKind>,
+    /// Whether each global held an `Int`/`Float`/`Bool` at the last
+    /// `refresh_global_buffers`.
+    ///
+    /// Slots have one flag for the whole frame ([`VM::slots_all_numeric`]),
+    /// because a frame's slots are a procedure's own locals and a hot loop's
+    /// frame is usually all numbers. The global table is not: a frontend seeds
+    /// it with strings (`argv`, `argv0`, an environment) that no loop touches,
+    /// so one flag for the table would keep every trace out. This is per index,
+    /// and the entry guard reads only the indices the trace referenced.
+    #[cfg(feature = "jit")]
+    global_numeric: Vec<bool>,
     /// Reusable scratch buffer the trace fn populates on every invocation
     /// with the resume IP and (on callee-frame side-exits) inlined-frame
     /// materialization records the VM uses to reshape `vm.frames`.
@@ -377,6 +402,12 @@ impl VM {
             #[cfg(feature = "jit")]
             slot_kinds_buf: Vec::new(),
             #[cfg(feature = "jit")]
+            global_buf: Vec::new(),
+            #[cfg(feature = "jit")]
+            global_kinds_buf: Vec::new(),
+            #[cfg(feature = "jit")]
+            global_numeric: Vec::new(),
+            #[cfg(feature = "jit")]
             deopt_info: DeoptInfo::zeroed(),
             #[cfg(feature = "jit")]
             block_eligible_cached: None,
@@ -537,6 +568,9 @@ impl VM {
             self.recorder = None;
             self.slot_buf.clear();
             self.slot_kinds_buf.clear();
+            self.global_buf.clear();
+            self.global_kinds_buf.clear();
+            self.global_numeric.clear();
             self.deopt_info = DeoptInfo::zeroed();
             self.block_eligible_cached = None;
         }
@@ -741,6 +775,30 @@ impl VM {
         }
     }
 
+    /// Copy the i64 global buffer back into `self.globals`.
+    ///
+    /// Only indices that were numeric on entry are written: a global the trace
+    /// could not have touched — its guard would have refused — keeps the value
+    /// it has, rather than being flattened to `Int(0)` by a buffer slot that
+    /// never held it.
+    #[cfg(feature = "jit")]
+    #[inline]
+    fn write_globals_back(&mut self) {
+        let n = self.globals.len().min(self.global_buf.len());
+        for i in 0..n {
+            if !self.global_numeric.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            match self.global_kinds_buf.get(i) {
+                Some(SlotKind::Int) => self.globals[i] = Value::Int(self.global_buf[i]),
+                Some(SlotKind::Float) => {
+                    self.globals[i] = Value::Float(f64::from_bits(self.global_buf[i] as u64));
+                }
+                None => {}
+            }
+        }
+    }
+
     /// Consult the trace cache at a backward-branch site and return the IP
     /// the interpreter should resume at. If a compiled trace runs, slot state
     /// is copied back from the trace's i64 buffer into the frame, and any
@@ -754,7 +812,9 @@ impl VM {
         // a host bignum, a string — reaches native code as the integer 0
         // (`refresh_slot_buffers` has no richer encoding), the exact silent
         // coercion the `NumericHook` exists to reject. Same gate the block tier
-        // applies in `run`; the interpreter sees the real value instead.
+        // applies in `run`; the interpreter sees the real value instead. The
+        // globals need no such gate: a non-numeric one is flagged per index and
+        // the trace's entry guard refuses on the indices it actually reads.
         if self.numeric_hook.is_some() && !self.slots_all_numeric {
             return anchor_ip;
         }
@@ -763,6 +823,10 @@ impl VM {
             anchor_ip,
             &mut self.slot_buf,
             &self.slot_kinds_buf,
+            &self.globals,
+            &mut self.global_buf,
+            &mut self.global_kinds_buf,
+            &mut self.global_numeric,
             &mut self.deopt_info,
         );
         match lookup {
@@ -779,6 +843,7 @@ impl VM {
                     return anchor_ip;
                 }
                 self.write_slots_back();
+                self.write_globals_back();
                 self.materialize_deopt_frames();
                 // Phase 9: if the trace deopted (returned non-fallthrough),
                 // try to chain into a side trace at the resume IP.
@@ -795,6 +860,8 @@ impl VM {
                     ops: Vec::new(),
                     recorded_ips: Vec::new(),
                     slot_kinds_at_anchor: self.slot_kinds_buf.clone(),
+                    global_kinds_at_anchor: self.global_kinds_buf.clone(),
+                    global_numeric_at_anchor: self.global_numeric.clone(),
                     entered_ips: Vec::new(),
                     aborted: false,
                 });
@@ -851,6 +918,10 @@ impl VM {
                 current,
                 &mut self.slot_buf,
                 &self.slot_kinds_buf,
+                &self.globals,
+                &mut self.global_buf,
+                &mut self.global_kinds_buf,
+                &mut self.global_numeric,
                 &mut self.deopt_info,
             );
             match lookup {
@@ -862,6 +933,7 @@ impl VM {
                         return current;
                     }
                     self.write_slots_back();
+                    self.write_globals_back();
                     self.materialize_deopt_frames();
                     current = resume_ip;
                     if Some(current) == chained_fallthrough {
@@ -880,6 +952,8 @@ impl VM {
                         ops: Vec::new(),
                         recorded_ips: Vec::new(),
                         slot_kinds_at_anchor: self.slot_kinds_buf.clone(),
+                        global_kinds_at_anchor: self.global_kinds_buf.clone(),
+                        global_numeric_at_anchor: self.global_numeric.clone(),
                         entered_ips: Vec::new(),
                         aborted: false,
                     });
@@ -966,6 +1040,8 @@ impl VM {
                     &r.ops,
                     &r.recorded_ips,
                     &r.slot_kinds_at_anchor,
+                    &r.global_kinds_at_anchor,
+                    &r.global_numeric_at_anchor,
                 );
                 if !installed {
                     self.jit.trace_abort(&self.chunk, r.record_anchor_ip);

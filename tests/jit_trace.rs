@@ -1066,6 +1066,8 @@ fn side_trace_install_with_kind_distinct_record_and_close() {
         &meta.ops,
         &meta.recorded_ips,
         &meta.slot_kinds_at_anchor,
+        &meta.global_kinds_at_anchor,
+        &[],
     );
     assert!(
         installed,
@@ -1945,4 +1947,144 @@ fn empty_loop_body_stack_balanced_trace_compiles() {
     let _ = vm.run();
     let jit = JitCompiler::new();
     assert!(jit.trace_is_compiled(&chunk, anchor));
+}
+
+// ── Global variables in a trace ─────────────────────────────────────────
+//
+// A loop written against globals rather than frame slots is what a shell or a
+// Tcl script's *top level* compiles to: there is no procedure frame, so the
+// counter is `GetVar`/`SetVar`. These cover the three things that path has to
+// get right — that it traces at all, that the value it leaves in the global
+// table is the interpreter's, and that a global holding something the i64
+// buffer cannot carry keeps the trace out rather than being flattened.
+
+/// The counter loop of `build_counter_loop`, on a global instead of a slot:
+///
+/// ```text
+///   ip 0: LoadInt(0)      // g0 = 0
+///   ip 1: SetVar(0)
+///   ip 2: GetVar(0)       // anchor
+///   ip 3: LoadInt(1)
+///   ip 4: Add             // g0 + 1
+///   ip 5: SetVar(0)
+///   ip 6: GetVar(0)
+///   ip 7: LoadInt(limit)
+///   ip 8: NumLt
+///   ip 9: JumpIfTrue(2)
+///   ip10: GetVar(0)       // result
+/// ```
+fn build_global_counter_loop(limit: i64) -> (fusevm::Chunk, usize) {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetVar(0), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::GetVar(0), 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetVar(0), 1);
+    b.emit(Op::GetVar(0), 1);
+    b.emit(Op::LoadInt(limit), 1);
+    b.emit(Op::NumLt, 1);
+    let jmp = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(jmp, anchor);
+    b.emit(Op::GetVar(0), 1);
+    (b.build(), anchor)
+}
+
+#[test]
+fn a_loop_over_a_global_compiles_a_trace() {
+    let (chunk, anchor) = build_global_counter_loop(500);
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    let result = vm.run();
+
+    match result {
+        VMResult::Ok(Value::Int(n)) => assert_eq!(n, 500),
+        other => panic!("expected Ok(Int(500)), got {other:?}"),
+    }
+    let jit = JitCompiler::new();
+    assert!(
+        jit.trace_is_compiled(&chunk, anchor),
+        "a hot loop over a global should install a trace"
+    );
+    assert_eq!(
+        vm.globals[0],
+        Value::Int(500),
+        "the trace's last value must be spilled back into the global table"
+    );
+}
+
+#[test]
+fn a_traced_global_loop_agrees_with_the_interpreter() {
+    let (chunk, _) = build_global_counter_loop(1_000);
+
+    let mut traced = VM::new(chunk.clone());
+    traced.enable_tracing_jit();
+    let with_jit = traced.run();
+
+    let mut plain = VM::new(chunk);
+    let without_jit = plain.run();
+
+    assert_eq!(format!("{with_jit:?}"), format!("{without_jit:?}"));
+    assert_eq!(traced.globals[0], plain.globals[0]);
+}
+
+#[test]
+fn a_global_the_buffer_cannot_carry_keeps_the_trace_out() {
+    // Same loop, but a second global holds a string the whole time. It is not
+    // referenced by the loop, so it must neither block the trace nor be
+    // flattened to an integer when the trace spills.
+    let (chunk, anchor) = build_global_counter_loop(400);
+    let mut vm = VM::new(chunk.clone());
+    vm.enable_tracing_jit();
+    vm.globals.resize(4, Value::Undef);
+    vm.globals[3] = Value::str("untouched");
+    let result = vm.run();
+
+    match result {
+        VMResult::Ok(Value::Int(n)) => assert_eq!(n, 400),
+        other => panic!("expected Ok(Int(400)), got {other:?}"),
+    }
+    let jit = JitCompiler::new();
+    assert!(
+        jit.trace_is_compiled(&chunk, anchor),
+        "an unrelated non-numeric global must not stop the trace"
+    );
+    assert_eq!(
+        vm.globals[3],
+        Value::str("untouched"),
+        "a global the trace never touched must survive the spill unchanged"
+    );
+}
+
+#[test]
+fn a_float_global_round_trips_through_a_trace() {
+    // The counter is a float: the buffer carries the bit pattern and the entry
+    // guard records `SlotKind::Float`, so the spill must come back a Float.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadFloat(0.0), 1);
+    b.emit(Op::SetVar(0), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::GetVar(0), 1);
+    b.emit(Op::LoadFloat(1.5), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetVar(0), 1);
+    b.emit(Op::GetVar(0), 1);
+    b.emit(Op::LoadFloat(300.0), 1);
+    b.emit(Op::NumLt, 1);
+    let jmp = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(jmp, anchor);
+    b.emit(Op::GetVar(0), 1);
+    let chunk = b.build();
+
+    let mut traced = VM::new(chunk.clone());
+    traced.enable_tracing_jit();
+    let with_jit = traced.run();
+
+    let mut plain = VM::new(chunk);
+    let without_jit = plain.run();
+
+    assert_eq!(format!("{with_jit:?}"), format!("{without_jit:?}"));
+    assert_eq!(traced.globals[0], plain.globals[0]);
+    assert!(matches!(traced.globals[0], Value::Float(_)));
 }
