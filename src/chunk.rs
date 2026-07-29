@@ -160,22 +160,73 @@ impl ChunkBuilder {
         idx
     }
 
-    /// Add a constant to the pool, return its index.
-    pub fn add_constant(&mut self, val: Value) -> u16 {
+    /// How many entries a constant or name pool can hold.
+    ///
+    /// `Op::LoadConst`, `Op::GetVar` and the rest address a pool with a `u16`,
+    /// so the pool cannot be larger than the operand that indexes it.
+    pub const MAX_POOL: usize = u16::MAX as usize + 1;
+
+    /// Add a constant to the pool, return its index — `None` when the pool is
+    /// already full.
+    ///
+    /// Prefer this to [`ChunkBuilder::add_constant`] in a frontend that compiles
+    /// input it did not write: a generated script can carry more than 65,536
+    /// distinct literals, and a frontend that can see the `None` reports it as
+    /// its own error instead of taking the panic.
+    pub fn try_add_constant(&mut self, val: Value) -> Option<u16> {
         let idx = self.chunk.constants.len();
+        if idx >= Self::MAX_POOL {
+            return None;
+        }
         self.chunk.constants.push(val);
-        idx as u16
+        Some(idx as u16)
+    }
+
+    /// Add a constant to the pool, return its index.
+    ///
+    /// # Panics
+    /// When the pool already holds [`ChunkBuilder::MAX_POOL`] entries. It used
+    /// to truncate the index instead, which silently aliased the new constant
+    /// onto an old one — a chunk that then read a value the program never wrote,
+    /// with no diagnostic anywhere. A panic is the lesser failure; a frontend
+    /// that would rather report it uses [`ChunkBuilder::try_add_constant`].
+    pub fn add_constant(&mut self, val: Value) -> u16 {
+        self.try_add_constant(val).unwrap_or_else(|| {
+            panic!(
+                "constant pool is full at {} entries: a u16 operand cannot address another",
+                Self::MAX_POOL
+            )
+        })
+    }
+
+    /// Intern a name, return its pool index — `None` when the pool is full and
+    /// the name is not already in it.
+    pub fn try_add_name(&mut self, name: &str) -> Option<u16> {
+        if let Some(&idx) = self.name_map.get(name) {
+            return Some(idx);
+        }
+        let idx = self.chunk.names.len();
+        if idx >= Self::MAX_POOL {
+            return None;
+        }
+        let idx = idx as u16;
+        self.chunk.names.push(name.to_string());
+        self.name_map.insert(name.to_string(), idx);
+        Some(idx)
     }
 
     /// Intern a name, return its pool index.
+    ///
+    /// # Panics
+    /// When the pool is full and the name is new, for the reason
+    /// [`ChunkBuilder::add_constant`] documents.
     pub fn add_name(&mut self, name: &str) -> u16 {
-        if let Some(&idx) = self.name_map.get(name) {
-            return idx;
-        }
-        let idx = self.chunk.names.len() as u16;
-        self.chunk.names.push(name.to_string());
-        self.name_map.insert(name.to_string(), idx);
-        idx
+        self.try_add_name(name).unwrap_or_else(|| {
+            panic!(
+                "name pool is full at {} entries: a u16 operand cannot address another",
+                Self::MAX_POOL
+            )
+        })
     }
 
     /// Current bytecode position (for jump targets).
@@ -308,6 +359,29 @@ mod tests {
         for i in 0..5u16 {
             assert_eq!(b.add_constant(Value::Int(i as i64)), i);
         }
+    }
+
+    /// A pool that cannot take another entry says so rather than aliasing.
+    ///
+    /// The index is a `u16`, and both adders used to hand back `len() as u16`:
+    /// the 65_537th constant returned index 0 and the chunk then read the first
+    /// constant in its place — a wrong value with no diagnostic. A generated
+    /// script reaches this; one of 55_440 lines did.
+    #[test]
+    fn a_full_pool_refuses_instead_of_aliasing() {
+        let mut b = ChunkBuilder::new();
+        for i in 0..ChunkBuilder::MAX_POOL {
+            assert_eq!(b.try_add_constant(Value::Int(i as i64)), Some(i as u16));
+        }
+        assert_eq!(b.try_add_constant(Value::Int(-1)), None);
+
+        let mut n = ChunkBuilder::new();
+        for i in 0..ChunkBuilder::MAX_POOL {
+            assert_eq!(n.try_add_name(&format!("v{i}")), Some(i as u16));
+        }
+        assert_eq!(n.try_add_name("one more"), None);
+        // A name already interned is still answerable when the pool is full.
+        assert_eq!(n.try_add_name("v0"), Some(0));
     }
 
     #[test]
