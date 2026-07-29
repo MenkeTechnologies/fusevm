@@ -346,6 +346,16 @@ pub struct UndefRead<'a> {
     pub index: u16,
     /// Whether the read was a frame slot rather than a global.
     pub from_slot: bool,
+    /// The op index of the read itself.
+    ///
+    /// A frontend usually wants *some* reads to refuse and others to tolerate
+    /// absence, and which is which is a property of the code, not of the
+    /// variable: Tcl's `$x` refuses where its `incr x` initialises the same `x`
+    /// to zero. Both compile to `GetVar`, so nothing about the value or the
+    /// name can separate them — the site can. A frontend that records which
+    /// sites it lowered as tolerant reads answers `Ok(Value::Undef)` for those
+    /// and `Err` for the rest, and neither read stops being a native op.
+    pub ip: usize,
 }
 
 /// Host callback for a read of a variable that was never assigned.
@@ -1708,6 +1718,7 @@ impl VM {
                         name,
                         index: *idx,
                         from_slot: false,
+                        ip,
                     }) {
                         Ok(v) => self.push(v),
                         Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
@@ -1736,6 +1747,7 @@ impl VM {
                         name: None,
                         index: *slot,
                         from_slot: true,
+                        ip,
                     }) {
                         Ok(v) => self.push(v),
                         Err(e) => return ExecFlow::Ret(VMResult::Error(e)),

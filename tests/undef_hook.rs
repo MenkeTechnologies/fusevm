@@ -16,7 +16,10 @@
 //!    addressed by index and the chunk carries no name for it;
 //! 4. `Ok(v)` substitutes a value and `Ok(Value::Undef)` is exactly the default
 //!    reading, so a host can refuse some reads and not others;
-//! 5. **the JIT cannot bypass it.** A loop that reads an unset global must raise
+//! 5. a read carries its **op index**, so a frontend can make one site refuse
+//!    and another tolerate absence — Tcl's `$x` errors where its `incr x`
+//!    initialises the same variable, and both are `GetVar`;
+//! 6. **the JIT cannot bypass it.** A loop that reads an unset global must raise
 //!    on every iteration count, including one well past the tracing threshold —
 //!    a check the interpreter makes and native code skips would be worse than no
 //!    check at all.
@@ -26,15 +29,15 @@ use std::sync::Arc;
 
 use fusevm::{Chunk, ChunkBuilder, Op, UndefRead, VMResult, Value, VM};
 
-/// Every read the hook saw, as `(name, from_slot)`.
-type Seen = Arc<std::sync::Mutex<Vec<(Option<String>, bool)>>>;
+/// Every read the hook saw, as `(name, from_slot, ip)`.
+type Seen = Arc<std::sync::Mutex<Vec<(Option<String>, bool, usize)>>>;
 
 fn recording_hook(seen: &Seen, answer: Result<Value, String>) -> fusevm::UndefHook {
     let seen = Arc::clone(seen);
     Arc::new(move |read: UndefRead<'_>| {
         seen.lock()
             .expect("seen lock")
-            .push((read.name.map(str::to_string), read.from_slot));
+            .push((read.name.map(str::to_string), read.from_slot, read.ip));
         answer.clone()
     })
 }
@@ -79,7 +82,7 @@ fn the_hook_receives_the_globals_interned_name() {
     assert_eq!(err, Err("can't read \"x\": no such variable".to_string()));
     assert_eq!(
         *seen.lock().expect("seen lock"),
-        vec![(Some("x".to_string()), false)],
+        vec![(Some("x".to_string()), false, 0)],
         "a global read carries its name and is not flagged as a slot"
     );
 }
@@ -117,7 +120,7 @@ fn a_slot_read_is_flagged_and_carries_no_name() {
     let _ = run(b.build(), Some(recording_hook(&seen, Ok(Value::Undef))));
     assert_eq!(
         *seen.lock().expect("seen lock"),
-        vec![(None, true)],
+        vec![(None, true, 0)],
         "a slot has no interned name; the host is told so rather than guessing"
     );
 }
@@ -186,5 +189,36 @@ fn a_hot_loop_cannot_read_an_unset_global_natively() {
         calls.load(Ordering::Relaxed),
         1,
         "the first read refuses and ends the run; none is answered natively"
+    );
+}
+
+/// Two reads of the same unset variable, one refused and one tolerated, told
+/// apart only by where they are. This is the shape a frontend needs for Tcl's
+/// `$x` (an error) and `incr x` (initialises to zero), which compile to the
+/// same op on the same name.
+#[test]
+fn a_frontend_can_refuse_one_read_site_and_tolerate_another() {
+    let mut b = ChunkBuilder::new();
+    let x = b.add_name("x");
+    let tolerant = b.emit(Op::GetVar(x), 1); // the `incr`-like read
+    b.emit(Op::Pop, 1);
+    b.emit(Op::GetVar(x), 1); // the `$x`-like read
+    let chunk = b.build();
+
+    let hook: fusevm::UndefHook = Arc::new(move |read: UndefRead<'_>| {
+        if read.ip == tolerant {
+            Ok(Value::Int(0))
+        } else {
+            Err(format!(
+                "can't read \"{}\": no such variable",
+                read.name.unwrap_or("?")
+            ))
+        }
+    });
+
+    assert_eq!(
+        run(chunk, Some(hook)),
+        Err("can't read \"x\": no such variable".to_string()),
+        "the tolerant site passed and the refusing one raised"
     );
 }
