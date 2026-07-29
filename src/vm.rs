@@ -139,6 +139,10 @@ pub struct VM {
     /// operand, or integer overflow). `None` — the default — keeps the
     /// coerce-and-wrap semantics zshrs/awkrs/stryke rely on. See [`NumericHook`].
     numeric_hook: Option<NumericHook>,
+    /// Host callback for a read of a variable that was never assigned. `None` —
+    /// the default — pushes `Value::Undef`, the shell/awk reading zshrs, awkrs
+    /// and stryke rely on. See [`UndefHook`].
+    undef_hook: Option<UndefHook>,
     /// The inclusive range the VM may keep as a native `Value::Int`. `None` (the
     /// default) is the whole `i64`. A Lisp with tagged fixnums has a narrower one
     /// — Emacs's is ±2^61 — and every result outside it is a bignum, so strict
@@ -328,6 +332,54 @@ pub enum NumOp {
 pub type NumericHook =
     std::sync::Arc<dyn Fn(NumOp, &Value, &Value) -> Result<Value, String> + Send + Sync>;
 
+/// The read that reached an unset variable, handed to an [`UndefHook`].
+///
+/// `name` is the chunk's interned name for a global and `None` for a frame slot:
+/// a slot is addressed by index and the chunk carries no name for it, so a
+/// frontend that needs one there must resolve it itself (or answer
+/// `Ok(Value::Undef)` to keep the default reading).
+#[derive(Debug, Clone, Copy)]
+pub struct UndefRead<'a> {
+    /// The variable's interned name, for a global.
+    pub name: Option<&'a str>,
+    /// The operand of the `GetVar` / `GetSlot` that read it.
+    pub index: u16,
+    /// Whether the read was a frame slot rather than a global.
+    pub from_slot: bool,
+}
+
+/// Host callback for a read of a variable that was never assigned.
+///
+/// fusevm's default is the shell/awk one: an unset variable reads as
+/// `Value::Undef`, which stringifies to the empty string and counts as zero.
+/// That is right for zshrs, awkrs and stryke, and wrong for a language that
+/// distinguishes absence from emptiness — Tcl answers `can't read "x": no such
+/// variable` and a Lisp signals `void-variable`.
+///
+/// Installing a hook with [`VM::set_undef_hook`] switches the VM to *strict
+/// undef* mode, where every `Op::GetVar` and `Op::GetSlot` that finds `Undef`
+/// asks the host instead of pushing it:
+///
+/// - `Err` raises a VM error carrying the message — the Tcl and Lisp answer;
+/// - `Ok(v)` pushes `v`, so a host can substitute a default, and
+///   `Ok(Value::Undef)` is exactly the default reading. That is what a frontend
+///   returns for the reads it does not want to refuse — a frame slot whose name
+///   it cannot resolve, for instance.
+///
+/// The mode is opt-in and off by default, so a VM without a hook behaves byte
+/// for byte as before.
+///
+/// **On the JIT.** A trace or block reads slots and globals out of a flat `i64`
+/// buffer, where `Undef` has no encoding: it would arrive as the integer `0`,
+/// and the hook would never see it. Both tiers already refuse to run when a
+/// value they would touch is not `Int`/`Float`/`Bool` — the slot gate is
+/// whole-frame, the global guard is per referenced index — and `Undef` is none
+/// of those, so a read the interpreter would refuse cannot reach native code
+/// instead. Strict-undef mode arms those gates in the same way an installed
+/// [`NumericHook`] arms them.
+pub type UndefHook =
+    std::sync::Arc<dyn for<'a> Fn(UndefRead<'a>) -> Result<Value, String> + Send + Sync>;
+
 /// Sink for VM stdout (`Op::Print` / `Op::PrintLn`).
 ///
 /// `None` — the default — writes to `std::io::stdout()`, byte-for-byte as
@@ -379,6 +431,7 @@ impl VM {
             output_sink: None,
             input_source: None,
             numeric_hook: None,
+            undef_hook: None,
             fixnum_range: None,
             #[cfg(feature = "jit")]
             slots_all_numeric: true,
@@ -440,6 +493,36 @@ impl VM {
             // Eligibility is cached per chunk hash and is policy-dependent.
             self.block_eligible_cached = None;
         }
+    }
+
+    /// Install an [`UndefHook`], switching the VM to strict-undef mode: a read
+    /// of a variable that was never assigned asks the host rather than pushing
+    /// `Value::Undef`.
+    ///
+    /// Off by default, so a VM without one is byte-for-byte unchanged. The mode
+    /// also arms the JIT's existing non-numeric gates — see [`UndefHook`] for
+    /// why a native tier cannot observe an `Undef` in the first place.
+    pub fn set_undef_hook(&mut self, hook: UndefHook) {
+        self.undef_hook = Some(hook);
+        #[cfg(feature = "jit")]
+        {
+            self.block_eligible_cached = None;
+        }
+    }
+
+    /// Whether an [`UndefHook`] is installed (strict-undef mode).
+    pub fn is_strict_undef(&self) -> bool {
+        self.undef_hook.is_some()
+    }
+
+    /// Whether a value a native tier would flatten must keep it out of that
+    /// tier: true in either strict mode. `refresh_slot_buffers` encodes a slot
+    /// as a bare `i64`, so a string, an object handle or an `Undef` reaches
+    /// compiled code as `0` — the silent coercion both hooks exist to refuse.
+    #[cfg(feature = "jit")]
+    #[inline]
+    fn strict_values(&self) -> bool {
+        self.numeric_hook.is_some() || self.undef_hook.is_some()
     }
 
     /// Install an [`OutputSink`] so `Op::Print`/`Op::PrintLn` route through
@@ -815,7 +898,7 @@ impl VM {
         // applies in `run`; the interpreter sees the real value instead. The
         // globals need no such gate: a non-numeric one is flagged per index and
         // the trace's entry guard refuses on the indices it actually reads.
-        if self.numeric_hook.is_some() && !self.slots_all_numeric {
+        if self.strict_values() && !self.slots_all_numeric {
             return anchor_ip;
         }
         let lookup = self.jit.trace_lookup(
@@ -909,8 +992,8 @@ impl VM {
                 .map(|(_, fallthrough)| fallthrough);
 
             self.refresh_slot_buffers();
-            // Same strict-numeric gate as `lookup_trace_for_backward`.
-            if self.numeric_hook.is_some() && !self.slots_all_numeric {
+            // Same gate as `lookup_trace_for_backward`.
+            if self.strict_values() && !self.slots_all_numeric {
                 return current;
             }
             let lookup = self.jit.trace_lookup(
@@ -1318,7 +1401,7 @@ impl VM {
                 // which is precisely the silent coercion the `NumericHook` exists
                 // to reject. Falling out of this block runs the chunk in the
                 // interpreter, where the hook sees the real value.
-                let strict_blocked = self.numeric_hook.is_some() && !self.slots_all_numeric;
+                let strict_blocked = self.strict_values() && !self.slots_all_numeric;
                 if !strict_blocked {
                     if let Some(result) = self.jit.try_run_block_typed_kinded(
                         &self.chunk,
@@ -1616,7 +1699,22 @@ impl VM {
             // ── Variables ──
             Op::GetVar(idx) => {
                 let val = self.get_var(*idx);
-                self.push(val);
+                if matches!(val, Value::Undef) && self.undef_hook.is_some() {
+                    // Cloned so the hook call does not hold a borrow of `self`
+                    // across the name lookup; an `Arc` clone is a refcount bump.
+                    let hook = self.undef_hook.clone().expect("checked above");
+                    let name = self.chunk.names.get(*idx as usize).map(String::as_str);
+                    match hook(UndefRead {
+                        name,
+                        index: *idx,
+                        from_slot: false,
+                    }) {
+                        Ok(v) => self.push(v),
+                        Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
+                    }
+                } else {
+                    self.push(val);
+                }
             }
             Op::SetVar(idx) => {
                 let val = self.pop();
@@ -1628,7 +1726,23 @@ impl VM {
             }
             Op::GetSlot(slot) => {
                 let val = self.get_slot(*slot);
-                self.push(val);
+                if matches!(val, Value::Undef) && self.undef_hook.is_some() {
+                    // A slot has no interned name — the chunk addresses it by
+                    // index — so the host gets `name: None` and decides. A
+                    // frontend that cannot name it answers `Ok(Value::Undef)`,
+                    // which is the default reading.
+                    let hook = self.undef_hook.clone().expect("checked above");
+                    match hook(UndefRead {
+                        name: None,
+                        index: *slot,
+                        from_slot: true,
+                    }) {
+                        Ok(v) => self.push(v),
+                        Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
+                    }
+                } else {
+                    self.push(val);
+                }
             }
             Op::SetSlot(slot) => {
                 let val = self.pop();

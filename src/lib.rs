@@ -111,4 +111,4 @@ pub fn floor_rem_i128(n: i128, k: i64) -> i64 {
 pub use rust_sugar::RustSugar;
 pub use sched::{SchedError, SchedReq, Scheduler, SelectCase};
 pub use value::Value;
-pub use vm::{Frame, NumOp, NumericHook, VMPool, VMResult, VM};
+pub use vm::{Frame, NumOp, NumericHook, UndefHook, UndefRead, VMPool, VMResult, VM};
