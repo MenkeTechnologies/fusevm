@@ -5585,7 +5585,7 @@ mod cranelift_jit_impl {
     /// Returns `Some(result_i64)` on success, `None` if ineligible OR not yet hot.
     ///
     /// The warmup threshold (whole-chunk invocations before compiling) is read
-    /// from the per-thread [`TraceJitConfig::block_threshold`] (default 10), so
+    /// from the per-thread [`TraceJitConfig::block_threshold`] (default 1), so
     /// callers can tune it for their workload via `JitCompiler::set_config`.
     /// Below the threshold this returns `None` and the caller falls back to the
     /// interpreter — avoiding compile cost for one-shot chunks.

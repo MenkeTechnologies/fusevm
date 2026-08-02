@@ -20,7 +20,7 @@
 
 ## `[PATENT PENDING]`
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 224 opcodes across 17 sections, 11 fused superinstructions, 29 first-class shell ops, 61 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 234 opcodes across 22 sections, 11 fused superinstructions, 29 first-class shell ops, 61 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -46,6 +46,7 @@ cargo add fusevm                  # interpreter only
 - [\[0x0A\] Benchmarks](#0x0a-benchmarks)
 - [\[0x0B\] WebAssembly / Web Worker](#0x0b-webassembly--web-worker)
 - [\[0x0C\] Cooperative Concurrency](#0x0c-cooperative-concurrency)
+- [\[0x0D\] Host Hooks & Chunk Introspection](#0x0d-host-hooks--chunk-introspection)
 - [\[0xFF\] License](#0xff-license)
 
 ---
@@ -75,7 +76,7 @@ tcl    ──► tcl    compiler ──┘                              │
                                                             ▼
                                    JitCompiler tiers (Cranelift 0.130)
                                    ├── Linear JIT (straight-line, instant)
-                                   ├── Block JIT (CFG, threshold 10)
+                                   ├── Block JIT (CFG, threshold 1)
                                    └── Tracing JIT (hot loop, threshold 50,
                                                    deopts on guard miss)
                                                │
@@ -86,7 +87,7 @@ tcl    ──► tcl    compiler ──┘                              │
 - **Fused superinstructions** — the compiler detects hot patterns and emits single ops instead of multi-op sequences
 - **Extension dispatch** — language-specific opcodes via `Extended(u16, u8)` with registered handler tables
 - **Stack + slots** — stack-based execution with slot-indexed fast paths for locals
-- **Three-tier Cranelift JIT** — Linear JIT (straight-line, compile-on-first-call), Block JIT (CFG-aware, threshold 10), Tracing JIT (records hot loop paths, threshold 50, deopts on type-guard miss)
+- **Three-tier Cranelift JIT** — Linear JIT (straight-line, compile-on-first-call), Block JIT (CFG-aware, threshold 1), Tracing JIT (records hot loop paths, threshold 50, deopts on type-guard miss)
 - **Zero-clone dispatch** — ops borrowed from chunk, in-place array/hash mutation, `Cow<str>` string coercion
 - **Lean foundational dependencies** — pure Rust, no unsafe in the core; runtime deps are durable, widely-vetted crates (`serde`, `tracing`, `glob`, `chrono`); Cranelift JIT and `libc` disk-cache are opt-in feature flags
 
@@ -192,17 +193,17 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-224 opcodes across 17 sections in `src/op.rs`:
+234 opcodes across 22 sections in `src/op.rs`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
-| Constants & Stack | 12 | `LoadInt`, `LoadFloat`, `Pop`, `Dup`, `Swap` |
+| Constants & Stack | 12 | `Nop`, `LoadInt`, `LoadFloat`, `Pop`, `Dup`, `Swap` |
 | Variables | 7 | `GetVar`, `SetVar`, `GetSlot`, `SetSlot`, `SlotArrayGet` |
 | Arrays & Hashes | 20 | `ArrayPush`, `HashGet`, `MakeArray`, `HashKeys` |
 | Arithmetic | 9 | `Add`, `Sub`, `Mul`, `Div`, `Pow` |
 | String | 3 | `Concat`, `StringRepeat`, `StringLen` |
 | Comparison | 14 | `NumEq`, `StrLt`, `Spaceship`, `StrCmp` |
-| Logical / Bitwise | 9 | `LogNot`, `LogAnd`, `BitAnd`, `Shl`, `Shr` |
+| Logical / Bitwise | 10 | `RubyTruthy`, `LogNot`, `LogAnd`, `BitAnd`, `Shl`, `Shr` |
 | Control Flow | 5 | `Jump`, `JumpIfFalse`, `JumpIfTrueKeep` |
 | Functions / Scope | 5 | `Call`, `Return`, `PushFrame`, `PopFrame` |
 | I/O | 3 | `Print`, `PrintLn`, `ReadLine` |
@@ -212,6 +213,8 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 | Builtins | 1 | `CallBuiltin(id, argc)` (140 IDs in `shell_builtins.rs`) |
 | Shell Ops | 29 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile`, `RegexMatch` |
 | AWK Ops | 61 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkDivJit`, `AwkModJit`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
+| Float / Int Math | 26 | `SqrtFloat`, `Atan2Float`, `Log2Float`, `RoundFloat`, `GcdInt`, `LcmInt`, `TimeInt` |
+| Cooperative Concurrency | 9 | `Go`, `ChanMake`, `ChanSend`, `ChanRecv`, `ChanClose`, `Select`, `CallDynamic`, `MulModFloor`, `MulAddModFloor` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
 ---
@@ -367,6 +370,19 @@ Tracing JIT is opt-in per VM (`vm.enable_tracing_jit()`). The recorder anchors a
 
 **Side-trace stitching (phase 9).** When a main trace's side-exit fires repeatedly at the same IP, the recorder rearms at that IP and records a *side trace*: the bytecode path from the side-exit forward to the loop's backward branch. `TraceRecorder` splits its anchor into `record_anchor_ip` (cache key — the side-exit IP) and `close_anchor_ip` (the enclosing loop's header where the closing branch lands). Side traces compile via `trace_install_with_kind` and don't loop in their own IR — both directions of the closing branch exit, returning either the close target (so the main trace runs the next iteration) or the loop's fallthrough IP (loop done). The VM's chained-dispatch path runs after each main-trace deopt: if a side trace is registered at the resume IP, dispatch it; otherwise bump the main trace's `side_exit_count` toward auto-blacklist. Chains are bounded by `MAX_TRACE_CHAIN` (4) per backward-branch hop. Phase 6's blacklist counter is reserved for cases where no side trace is helping — productive deopts don't penalize the main trace. Side traces use the same eligibility rules as main traces and don't recursively spawn further side traces from their own deopts (their side-exits still bump the main trace's blacklist counter).
 
+**Loops over globals (phase 10).** The tracing tier no longer bails when a loop
+body touches a global. A trace records the globals it referenced and promotes
+them to native registers for the duration of the loop, spilling back on exit or
+deopt. The entry guard is extended with a per-referenced-index check — whether
+each referenced global is still a number — rather than the whole-frame check
+used for slots, so an unrelated global changing type does not invalidate the
+trace. `TraceMetadata` carries a `global_kinds_at_anchor` fingerprint beside the
+existing slot fingerprint; it is `serde(default)`, so a trace persisted by a
+build that predates global support still deserializes (an empty vector says
+exactly what it means — that trace referenced no global). An imported trace
+re-checks the live global table before it runs rather than trusting the
+persisted kinds.
+
 **Persistent native-code disk cache (`jit-disk-cache`).** Enable with `cargo add fusevm --features jit-disk-cache` to cache compiled **native code** to disk, skipping Cranelift codegen across process restarts — a big win for workloads that re-launch the VM repeatedly (e.g. running a large test suite over and over). The cache covers **all three tiers** (linear, block, tracing) and is **on by default once the feature is enabled**, writing to `~/.cache/fusevm-jit`. Override the directory with the `FUSEVM_JIT_CACHE_DIR` env var or `JitCompiler::set_jit_cache_dir(Some(dir))`; disable at runtime with `FUSEVM_JIT_CACHE_DIR=off` or `set_jit_cache_dir(None)`.
 
 Cache files are tier-tagged (`.lin.` / `.blk.` / `.trc.`) and keyed by the chunk's op-hash (the tracing tier additionally keys on the record-anchor IP and verifies a content hash over the recorded ops, IPs, slot types, and constants, so divergent recorded paths never collide). Blobs store the native code plus a small relocation table re-patched on load; loading mmaps the code with W^X handling (`pthread_jit_write_protect_np` + icache invalidation on Apple Silicon, `mprotect` elsewhere). Writes publish via a unique temp file + atomic rename, so the cache is safe under many concurrent processes. The loader is **conservative**: any chunk whose code carries a relocation other than a known host-helper call falls back to the in-memory JIT, so an untested target degrades to "no caching" rather than miscompiling. The cache is **behavior-transparent** — it only eliminates Cranelift codegen time; tier selection, warmup thresholds, and results are identical to an uncached run. Benchmark (`cargo bench --features jit-disk-cache --bench jit_disk_cache`): a cached block load is ~35µs versus ~152µs for cold codegen.
@@ -468,6 +484,19 @@ path share identical codegen.
 | `aot::compile_object(&chunk, path)` | Emit a relocatable `.o` exporting `fusevm_aot_entry` plus the serialized chunk (`fusevm_aot_chunk_blob` / `…_len`). |
 | `aot::run_chunk_native(&chunk, register)` | Compile in-process via Cranelift and run it — validates codegen end to end. |
 | `aot::fusevm_aot_run_embedded()` | Runtime entry for a linked binary: rebuilds the VM from the embedded chunk, calls the frontend's `fusevm_aot_register_builtins`, runs the native entry, and maps the result to an exit code. |
+| `aot::compile_program_object(…)` | **Per-chunk native lowering.** Lowers a whole program — the top-level chunk *and* every named sub-chunk — into one object, so each callable gets its own native symbol instead of only the entry point. |
+| `aot::build_named(…)` | Emits one named native function for a single chunk. Generic over Cranelift's `Module`, so the in-memory and `ObjectModule` paths share codegen. The building block `compile_program_object` calls per chunk. |
+
+**`Chunk::native_id`** (`u32`) tags a chunk with the native function lowered
+for it, which is how a call site reaches a sibling chunk's compiled body
+instead of falling back to the interpreter.
+
+**Seeded param slots.** `Chunk::aot_seeded_slots` declares how many leading
+frame slots (`0..aot_seeded_slots`) the *caller* fills before the run. The
+native driver's entry guard treats exactly those as definitely-assigned
+integer slots, so a chunk invoked with pre-filled parameters is still
+natively lowerable — without the declaration those slots read as
+possibly-undefined and the whole chunk would deopt to threaded dispatch.
 
 Link the emitted object against a frontend runtime (which provides
 `fusevm_aot_register_builtins`) to produce the standalone binary. On macOS the
@@ -750,6 +779,52 @@ The model is single-threaded and cooperative — goroutines yield only at channe
 operations and completion — which is faithful for channel-driven programs
 without the data races an OS-thread model would introduce over a thread-local
 heap. Frontends that never emit these ops are wholly unaffected.
+
+---
+
+## [0x0D] HOST HOOKS & CHUNK INTROSPECTION
+
+The VM hands a frontend three decision points it cannot express in bytecode:
+what an unset read means, where an arithmetic op came from, and what a frame
+slot is called. All three are opt-in — a frontend that installs nothing keeps
+the previous behaviour byte for byte.
+
+| API | Purpose |
+|---|---|
+| `VM::set_undef_hook(hook)` | **Strict-undef mode.** A read of an unset variable asks the host instead of yielding `Undef`. The hook takes an `UndefRead` and answers `Ok(Value)` to substitute a value or `Err(String)` to raise. |
+| `VM::is_strict_undef()` | Whether an undef hook is installed. |
+| `VM::set_sited_numeric_hook(hook)` | Like a `NumericHook`, but the callback receives a `NumericCall` carrying the *site* of the arithmetic. Wins over a plain `NumericHook` when both are set; either puts the VM in strict numeric mode. |
+| `VM::frame_slot_names()` | The current frame's slot names. |
+| `VM::slot_names_at(up)` | The same, `up` frames out from the current one. |
+| `ChunkBuilder::set_sub_slot_names(entry_ip, names)` | Name a sub-chunk's frame slots at build time. |
+| `Chunk::sub_slot_names_at(entry_ip)` | Read them back. |
+
+`UndefRead` identifies the read precisely enough that a frontend can refuse
+one and allow another: `name` (the interned name for a global, `None` for a
+frame slot — a slot is addressed by index and carries no name), `index`,
+`from_slot`, plus the owning chunk, because an `ip` alone does not identify a
+site once a frontend compiles nested scripts (an `eval`, a lambda) that hold
+more than one chunk.
+
+Because a frame slot carries no name in the bytecode, the slot-name APIs are
+what let a strict-undef frontend report `x is not defined` rather than
+`slot 3 is not defined`.
+
+### A full pool refuses instead of aliasing
+
+The constant and name pools are `u16`-indexed. `add_constant` / `add_name`
+cannot report exhaustion, so a frontend that overflows a pool would silently
+get an index that aliases an existing entry — a wrong-constant bug at run time
+with no diagnostic. The fallible forms return `None` instead:
+
+```rust
+let Some(idx) = b.try_add_constant(Value::str("hello")) else {
+    return Err("constant pool exhausted".into());
+};
+```
+
+`try_add_name` behaves the same for the name pool. Prefer both in any frontend
+whose input size is not bounded at compile time.
 
 ---
 
