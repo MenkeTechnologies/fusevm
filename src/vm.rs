@@ -1823,6 +1823,7 @@ impl VM {
                             | Op::ChanMake
                             | Op::ChanSend
                             | Op::ChanRecv
+                            | Op::ChanRecvOk
                             | Op::ChanClose
                             | Op::Select(_, _)
                             | Op::CallDynamic(_) => rec.aborted = true,
@@ -3809,6 +3810,11 @@ impl VM {
             Op::ChanRecv => {
                 let ch = self.pop().to_int();
                 self.sched = Some(crate::sched::SchedReq::Recv { ch });
+                self.halted = true;
+            }
+            Op::ChanRecvOk => {
+                let ch = self.pop().to_int();
+                self.sched = Some(crate::sched::SchedReq::RecvOk { ch });
                 self.halted = true;
             }
             Op::ChanClose => {

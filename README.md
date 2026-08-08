@@ -20,7 +20,7 @@
 
 ## `[PATENT PENDING]`
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 234 opcodes across 22 sections, 11 fused superinstructions, 29 first-class shell ops, 61 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 235 opcodes across 22 sections, 11 fused superinstructions, 29 first-class shell ops, 61 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -193,7 +193,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-234 opcodes across 22 sections in `src/op.rs`:
+235 opcodes across 22 sections in `src/op.rs`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -214,7 +214,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 | Shell Ops | 29 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile`, `RegexMatch` |
 | AWK Ops | 61 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkDivJit`, `AwkModJit`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
 | Float / Int Math | 26 | `SqrtFloat`, `Atan2Float`, `Log2Float`, `RoundFloat`, `GcdInt`, `LcmInt`, `TimeInt` |
-| Cooperative Concurrency | 9 | `Go`, `ChanMake`, `ChanSend`, `ChanRecv`, `ChanClose`, `Select`, `CallDynamic`, `MulModFloor`, `MulAddModFloor` |
+| Cooperative Concurrency | 10 | `Go`, `ChanMake`, `ChanSend`, `ChanRecv`, `ChanRecvOk`, `ChanClose`, `Select`, `CallDynamic`, `MulModFloor`, `MulAddModFloor` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
 ---
@@ -756,6 +756,7 @@ after `run()`" pattern as `Op::AwkSignal`:
 | `ChanMake` | allocate a channel (capacity popped); pushes its id |
 | `ChanSend` | send the popped value on the popped channel (may block) |
 | `ChanRecv` | receive from the popped channel, pushing the value (may block) |
+| `ChanRecvOk` | two-value receive: pushes `[value, ok]`, `ok` on top (`0` = closed and drained) |
 | `ChanClose` | close the popped channel |
 
 The scheduler owns the channel table and a run queue, reads each request via
@@ -765,6 +766,14 @@ rewind, no re-execution). Channels follow CSP semantics: a buffered channel hold
 up to `cap` values; an unbuffered channel hands a value straight from a blocked
 sender to a blocked receiver. When every goroutine is blocked, the scheduler
 reports a deadlock (`all goroutines are asleep`).
+
+A receive on a closed, drained channel yields the frontend's zero value
+(`Scheduler::with_recv_zero`), which `ChanRecv` alone cannot distinguish from a
+zero a sender really sent. `ChanRecvOk` is the two-value form that can: it pushes
+`[value, ok]` with `ok` on top — `1` for a real value, `0` once the channel is
+closed and drained — which is what `for v := range ch` and `v, ok := <-ch` need
+to terminate. Blocking is identical; a parked `ChanRecvOk` is delivered `ok = 1`
+when a sender wakes it and `ok = 0` when a `close` does.
 
 ```rust
 use fusevm::{Scheduler, VM};

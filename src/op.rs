@@ -638,6 +638,9 @@ pub enum Op {
     /// Send the popped value on the popped channel (may block).
     ChanSend,
     /// Receive from the popped channel, pushing the received value (may block).
+    /// A closed, drained channel yields the frontend's zero value, which is
+    /// indistinguishable from a zero a sender actually sent — see
+    /// [`Op::ChanRecvOk`] for the form that reports which one happened.
     ChanRecv,
     /// Close the popped channel.
     ChanClose,
@@ -693,6 +696,26 @@ pub enum Op {
     ///
     /// Additive; frontends that never emit it are unaffected.
     MulAddModFloor,
+
+    /// Two-value receive: like [`Op::ChanRecv`], but pushes `[value, ok]` with
+    /// `ok` on top — `1` when a value really was received, `0` when the channel
+    /// is closed and drained (and `value` is therefore the zero value).
+    ///
+    /// This is the only receive that can terminate `for v := range ch`, and the
+    /// same op serves Go's `v, ok := <-ch`. [`Op::ChanRecv`] cannot: it yields
+    /// the element-type zero for both "a sender sent 0" and "closed and
+    /// drained", so a `range` built on it either loops forever or — as it did —
+    /// yields nothing.
+    ///
+    /// Blocking behaves identically to `ChanRecv`; when the receive is woken the
+    /// scheduler delivers the same pair (`ok = 1` from a sender, `ok = 0` from a
+    /// `close`).
+    ///
+    /// Declared last, after [`Op::MulAddModFloor`]: [`crate::Chunk`] is
+    /// bincode-serialized into ahead-of-time objects, where a variant's index is
+    /// its identity, so a new op is appended rather than grouped with the other
+    /// channel ops. Additive; frontends that never emit it are unaffected.
+    ChanRecvOk,
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -1069,6 +1092,7 @@ impl Hash for Op {
             | Op::ChanMake
             | Op::ChanSend
             | Op::ChanRecv
+            | Op::ChanRecvOk
             | Op::ChanClose => {}
         }
     }

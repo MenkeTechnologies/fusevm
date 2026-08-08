@@ -41,6 +41,15 @@ pub enum SchedReq {
     Send { ch: i64, val: Value },
     /// `<-ch` — receive from channel `ch`, pushing the value (may block).
     Recv { ch: i64 },
+    /// `v, ok := <-ch` — receive from channel `ch`, pushing `[value, ok]` with
+    /// `ok` on top (`1` = a real value was received, `0` = the channel is closed
+    /// and drained, so `value` is the zero value). May block; a receive that
+    /// blocks is delivered the same pair when it is woken.
+    ///
+    /// The distinction [`SchedReq::Recv`] cannot express: a plain receive yields
+    /// the element-type zero for both "a sender sent 0" and "closed and
+    /// drained", which makes `for v := range ch` unimplementable on it.
+    RecvOk { ch: i64 },
     /// `close(ch)` — close channel `ch`.
     Close { ch: i64 },
     /// A `select` over channel operations: pick a ready case (else the default,
@@ -89,7 +98,10 @@ struct Channel {
     buf: VecDeque<Value>,
     closed: bool,
     send_q: VecDeque<(usize, Value)>,
-    recv_q: VecDeque<usize>,
+    /// Goroutines blocked receiving, each with the flag "wants the `ok` result
+    /// too" (a [`SchedReq::RecvOk`] receive). A plain [`SchedReq::Recv`] parks
+    /// with `false` and is delivered the bare value, exactly as before.
+    recv_q: VecDeque<(usize, bool)>,
 }
 
 impl Channel {
@@ -237,12 +249,23 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                 }
             }
             SchedReq::Recv { ch } => {
-                if let Some(v) = self.try_recv(ch)? {
+                if let Some((v, _ok)) = self.try_recv(ch)? {
                     self.vms[gid].stack.push(v);
                     self.ready.push_back(gid);
                     self.recheck_selects()?;
                 } else {
-                    self.chan_mut(ch)?.recv_q.push_back(gid);
+                    self.chan_mut(ch)?.recv_q.push_back((gid, false));
+                    self.blocked.insert(gid);
+                }
+            }
+            SchedReq::RecvOk { ch } => {
+                if let Some((v, ok)) = self.try_recv(ch)? {
+                    self.vms[gid].stack.push(v);
+                    self.vms[gid].stack.push(Value::Int(ok as i64));
+                    self.ready.push_back(gid);
+                    self.recheck_selects()?;
+                } else {
+                    self.chan_mut(ch)?.recv_q.push_back((gid, true));
                     self.blocked.insert(gid);
                 }
             }
@@ -261,10 +284,15 @@ impl<F: FnMut() -> VM> Scheduler<F> {
             SchedReq::Close { ch } => {
                 let c = self.chan_mut(ch)?;
                 c.closed = true;
-                // Wake every blocked receiver with the zero value.
-                let woken: Vec<usize> = c.recv_q.drain(..).collect();
-                for r in woken {
+                // Wake every blocked receiver with the zero value — and, for a
+                // `RecvOk` receiver, `ok = 0`: it blocked on an empty channel,
+                // so the close is what freed it and there is no value.
+                let woken: Vec<(usize, bool)> = c.recv_q.drain(..).collect();
+                for (r, wants_ok) in woken {
                     self.vms[r].stack.push(self.recv_zero.clone());
+                    if wants_ok {
+                        self.vms[r].stack.push(Value::Int(0));
+                    }
                     self.wake(r);
                 }
                 self.ready.push_back(gid);
@@ -283,10 +311,14 @@ impl<F: FnMut() -> VM> Scheduler<F> {
         self.wake(gid);
     }
 
-    /// Attempt a receive on `ch` without blocking: `Some(value)` if it completed
-    /// (performing the receive and waking any blocked sender), `None` if it would
-    /// block.
-    fn try_recv(&mut self, ch: i64) -> Result<Option<Value>, SchedError> {
+    /// Attempt a receive on `ch` without blocking: `Some((value, ok))` if it
+    /// completed (performing the receive and waking any blocked sender), `None`
+    /// if it would block.
+    ///
+    /// `ok` is `false` only for the closed-and-drained case, where `value` is the
+    /// zero value rather than anything a sender produced. Callers serving a plain
+    /// [`SchedReq::Recv`] discard it and behave exactly as before.
+    fn try_recv(&mut self, ch: i64) -> Result<Option<(Value, bool)>, SchedError> {
         enum O {
             V(Value),
             Wake(usize, Value),
@@ -311,12 +343,12 @@ impl<F: FnMut() -> VM> Scheduler<F> {
             }
         };
         Ok(match o {
-            O::V(v) => Some(v),
+            O::V(v) => Some((v, true)),
             O::Wake(s, v) => {
                 self.wake(s);
-                Some(v)
+                Some((v, true))
             }
-            O::Zero => Some(self.recv_zero.clone()),
+            O::Zero => Some((self.recv_zero.clone(), false)),
             O::No => None,
         })
     }
@@ -326,7 +358,7 @@ impl<F: FnMut() -> VM> Scheduler<F> {
     /// closed channel.
     fn try_send(&mut self, ch: i64, val: &Value) -> Result<bool, SchedError> {
         enum O {
-            Deliver(usize),
+            Deliver(usize, bool),
             Buffered,
             No,
         }
@@ -337,8 +369,8 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                     "panic: send on closed channel".to_string(),
                 ));
             }
-            if let Some(r) = c.recv_q.pop_front() {
-                O::Deliver(r)
+            if let Some((r, wants_ok)) = c.recv_q.pop_front() {
+                O::Deliver(r, wants_ok)
             } else if c.buf.len() < c.cap {
                 c.buf.push_back(val.clone());
                 O::Buffered
@@ -347,8 +379,12 @@ impl<F: FnMut() -> VM> Scheduler<F> {
             }
         };
         Ok(match o {
-            O::Deliver(r) => {
+            O::Deliver(r, wants_ok) => {
                 self.vms[r].stack.push(val.clone());
+                if wants_ok {
+                    // A real value crossed the channel, so `ok` is true.
+                    self.vms[r].stack.push(Value::Int(1));
+                }
                 self.wake(r);
                 true
             }
@@ -362,7 +398,10 @@ impl<F: FnMut() -> VM> Scheduler<F> {
     fn try_select(&mut self, cases: &[SelectCase]) -> Result<Option<(usize, Value)>, SchedError> {
         for (i, c) in cases.iter().enumerate() {
             if c.recv {
-                if let Some(v) = self.try_recv(c.ch)? {
+                // `select` delivers `[value, case_index]`; the closed flag has no
+                // slot in that shape, so it is discarded here (unchanged
+                // behaviour — a `case v, ok := <-ch` would need its own op).
+                if let Some((v, _ok)) = self.try_recv(c.ch)? {
                     return Ok(Some((i, v)));
                 }
             } else if self.try_send(c.ch, &c.val)? {
@@ -564,6 +603,289 @@ mod tests {
         b.emit(Op::SetVar(idx), 1); // index (default sentinel = 1)
         b.emit(Op::Pop, 1); // drop the recv value
         assert_eq!(run(b.build(), "idx"), Ok(Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn repro_closed_drained_recv_is_indistinguishable_from_a_received_zero() {
+        // ch := make(chan int, 2); ch <- 10; ch <- 20; close(ch)
+        // <-ch, <-ch drain 10 and 20; the third receive yields the zero value.
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let out = b.add_name("out");
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::ChanMake, 1);
+        b.emit(Op::SetVar(ch), 1);
+        for v in [10, 20] {
+            b.emit(Op::GetVar(ch), 1);
+            b.emit(Op::LoadInt(v), 1);
+            b.emit(Op::ChanSend, 1);
+        }
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanClose, 1);
+        for _ in 0..2 {
+            b.emit(Op::GetVar(ch), 1);
+            b.emit(Op::ChanRecv, 1);
+            b.emit(Op::Pop, 1);
+        }
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanRecv, 1);
+        b.emit(Op::SetVar(out), 1);
+        let drained = run(b.build(), "out");
+
+        // An OPEN channel carrying a legitimate 0 yields the same thing.
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let out = b.add_name("out");
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::ChanMake, 1);
+        b.emit(Op::SetVar(ch), 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::ChanSend, 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanRecv, 1);
+        b.emit(Op::SetVar(out), 1);
+        let real_zero = run(b.build(), "out");
+
+        assert_eq!(drained, Ok(Some(Value::Int(0))));
+        assert_eq!(real_zero, Ok(Some(Value::Int(0))));
+        assert_eq!(
+            drained, real_zero,
+            "Op::ChanRecv cannot report closed-and-drained; use Op::ChanRecvOk"
+        );
+    }
+
+    /// Emit `ch := make(chan int, cap)` into `b`, binding it to name `ch`.
+    fn make_chan(b: &mut ChunkBuilder, ch: u16, cap: i64) {
+        b.emit(Op::LoadInt(cap), 1);
+        b.emit(Op::ChanMake, 1);
+        b.emit(Op::SetVar(ch), 1);
+    }
+
+    /// Emit `v, ok := <-ch`, binding the pair to names `v` and `ok`. Pinning the
+    /// pop order here is the point: `Op::ChanRecvOk` pushes the value first and
+    /// `ok` on top, so `ok` is stored first.
+    fn recv_ok(b: &mut ChunkBuilder, ch: u16, v: u16, ok: u16) {
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanRecvOk, 1);
+        b.emit(Op::SetVar(ok), 1);
+        b.emit(Op::SetVar(v), 1);
+    }
+
+    #[test]
+    fn recv_ok_reports_true_for_a_buffered_value_and_false_once_drained() {
+        // ch := make(chan int, 2); ch <- 10; ch <- 20; close(ch)
+        // Three two-value receives: (10,1), (20,1), (0,0).
+        // Encoded as one global per field so the drain ORDER is pinned, not just
+        // the final state.
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let (v0, k0) = (b.add_name("v0"), b.add_name("k0"));
+        let (v1, k1) = (b.add_name("v1"), b.add_name("k1"));
+        let (v2, k2) = (b.add_name("v2"), b.add_name("k2"));
+        make_chan(&mut b, ch, 2);
+        for v in [10, 20] {
+            b.emit(Op::GetVar(ch), 1);
+            b.emit(Op::LoadInt(v), 1);
+            b.emit(Op::ChanSend, 1);
+        }
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanClose, 1);
+        recv_ok(&mut b, ch, v0, k0);
+        recv_ok(&mut b, ch, v1, k1);
+        recv_ok(&mut b, ch, v2, k2);
+        let chunk = b.build();
+
+        for (name, want) in [
+            ("v0", 10),
+            ("k0", 1),
+            ("v1", 20),
+            ("k1", 1),
+            ("v2", 0),
+            ("k2", 0),
+        ] {
+            assert_eq!(
+                run(chunk.clone(), name),
+                Ok(Some(Value::Int(want))),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn recv_ok_on_a_channel_closed_with_no_values_is_false() {
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let (v, k) = (b.add_name("v"), b.add_name("k"));
+        make_chan(&mut b, ch, 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanClose, 1);
+        recv_ok(&mut b, ch, v, k);
+        let chunk = b.build();
+        assert_eq!(run(chunk.clone(), "v"), Ok(Some(Value::Int(0))));
+        assert_eq!(run(chunk, "k"), Ok(Some(Value::Int(0))));
+    }
+
+    #[test]
+    fn recv_ok_of_a_real_zero_from_an_open_channel_is_true() {
+        // The case that rules out making `recv_zero` a sentinel: 0 is a
+        // legitimate value on a `chan int`, and must read as received.
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let (v, k) = (b.add_name("v"), b.add_name("k"));
+        make_chan(&mut b, ch, 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::ChanSend, 1);
+        recv_ok(&mut b, ch, v, k);
+        let chunk = b.build();
+        assert_eq!(run(chunk.clone(), "v"), Ok(Some(Value::Int(0))));
+        assert_eq!(run(chunk, "k"), Ok(Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn recv_ok_on_an_open_empty_channel_blocks() {
+        // Nobody ever sends or closes: the two-value receive must park like a
+        // plain one, not fall through with `ok = 0`.
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let (v, k) = (b.add_name("v"), b.add_name("k"));
+        make_chan(&mut b, ch, 1);
+        recv_ok(&mut b, ch, v, k);
+        assert_eq!(run(b.build(), "v"), Err(SchedError::Deadlock));
+    }
+
+    #[test]
+    fn a_blocked_recv_ok_is_woken_true_by_a_sender_and_false_by_a_close() {
+        // main blocks on an unbuffered two-value receive; the goroutine sends 5
+        // (→ ok = 1), then main blocks again and the goroutine closes (→ ok = 0).
+        let mut b = ChunkBuilder::new();
+        let sender = b.add_name("sender");
+        let ch = b.add_name("ch");
+        let (v0, k0) = (b.add_name("v0"), b.add_name("k0"));
+        let (v1, k1) = (b.add_name("v1"), b.add_name("k1"));
+        make_chan(&mut b, ch, 0);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::Go(sender, 1), 1);
+        recv_ok(&mut b, ch, v0, k0);
+        recv_ok(&mut b, ch, v1, k1);
+        let skip = b.emit(Op::Jump(0), 1);
+
+        let entry = b.current_pos();
+        b.add_sub_entry(sender, entry);
+        b.emit(Op::SetSlot(0), 2);
+        b.emit(Op::GetSlot(0), 2);
+        b.emit(Op::LoadInt(5), 2);
+        b.emit(Op::ChanSend, 2);
+        b.emit(Op::GetSlot(0), 2);
+        b.emit(Op::ChanClose, 2);
+        b.emit(Op::LoadUndef, 2);
+        b.emit(Op::ReturnValue, 2);
+        b.patch_jump(skip, b.current_pos());
+        let chunk = b.build();
+
+        for (name, want) in [("v0", 5), ("k0", 1), ("v1", 0), ("k1", 0)] {
+            assert_eq!(
+                run(chunk.clone(), name),
+                Ok(Some(Value::Int(want))),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn range_over_a_closed_channel_yields_every_value_then_stops() {
+        // The defect this op exists for:
+        //   sum, n := 0, 0
+        //   for v := range ch { sum += v; n++ }
+        // over a buffered channel holding 1, 2, 3 that is then closed. `range`
+        // lowers to `for { v, ok := <-ch; if !ok { break }; ... }`.
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let (v, k) = (b.add_name("v"), b.add_name("k"));
+        let sum = b.add_name("sum");
+        let n = b.add_name("n");
+        make_chan(&mut b, ch, 3);
+        for x in 1..=3 {
+            b.emit(Op::GetVar(ch), 1);
+            b.emit(Op::LoadInt(x), 1);
+            b.emit(Op::ChanSend, 1);
+        }
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanClose, 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetVar(sum), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetVar(n), 1);
+
+        let top = b.current_pos();
+        recv_ok(&mut b, ch, v, k);
+        b.emit(Op::GetVar(k), 1);
+        let exit = b.emit(Op::JumpIfFalse(0), 1);
+        b.emit(Op::GetVar(sum), 1);
+        b.emit(Op::GetVar(v), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetVar(sum), 1);
+        b.emit(Op::GetVar(n), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetVar(n), 1);
+        let back = b.emit(Op::Jump(0), 1);
+        b.patch_jump(back, top);
+        b.patch_jump(exit, b.current_pos());
+        let chunk = b.build();
+
+        assert_eq!(run(chunk.clone(), "n"), Ok(Some(Value::Int(3))));
+        assert_eq!(run(chunk, "sum"), Ok(Some(Value::Int(6))));
+    }
+
+    #[test]
+    fn recv_ok_leaves_plain_recv_alone_on_the_same_channel() {
+        // Mixing the two receives on one channel: the plain form must still push
+        // exactly one value (no stray `ok` on the stack desyncing the caller).
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let (v, k) = (b.add_name("v"), b.add_name("k"));
+        let plain = b.add_name("plain");
+        make_chan(&mut b, ch, 2);
+        for x in [7, 9] {
+            b.emit(Op::GetVar(ch), 1);
+            b.emit(Op::LoadInt(x), 1);
+            b.emit(Op::ChanSend, 1);
+        }
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanRecv, 1);
+        b.emit(Op::SetVar(plain), 1);
+        recv_ok(&mut b, ch, v, k);
+        let chunk = b.build();
+        assert_eq!(run(chunk.clone(), "plain"), Ok(Some(Value::Int(7))));
+        assert_eq!(run(chunk.clone(), "v"), Ok(Some(Value::Int(9))));
+        assert_eq!(run(chunk, "k"), Ok(Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn recv_ok_uses_the_frontends_recv_zero_when_drained() {
+        // A non-integer element type: the drained value is the configured zero,
+        // and `ok` is what tells the frontend it is not real data.
+        let mut b = ChunkBuilder::new();
+        let ch = b.add_name("ch");
+        let (v, k) = (b.add_name("v"), b.add_name("k"));
+        make_chan(&mut b, ch, 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanClose, 1);
+        recv_ok(&mut b, ch, v, k);
+        let chunk = b.build();
+        let fc = chunk.clone();
+        let got = Scheduler::new(move || VM::new(fc.clone()))
+            .with_recv_zero(Value::str(""))
+            .run_capturing(VM::new(chunk.clone()), "v");
+        assert_eq!(got, Ok(Some(Value::str(""))));
+
+        let fc = chunk.clone();
+        let got = Scheduler::new(move || VM::new(fc.clone()))
+            .with_recv_zero(Value::str(""))
+            .run_capturing(VM::new(chunk), "k");
+        assert_eq!(got, Ok(Some(Value::Int(0))));
     }
 
     #[test]

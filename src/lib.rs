@@ -67,7 +67,7 @@ pub mod op;
 pub mod rust_sugar;
 /// Cooperative goroutine scheduler + channels. A green-thread layer over the
 /// single-VM dispatch loop: frontends emit `Op::Go`/`ChanMake`/`ChanSend`/
-/// `ChanRecv`/`ChanClose` and drive them with [`sched::Scheduler`].
+/// `ChanRecv`/`ChanRecvOk`/`ChanClose` and drive them with [`sched::Scheduler`].
 pub mod sched;
 pub mod shell_builtins;
 /// Portable wall-clock reads (`chrono`-backed) so the VM's clock ops work on
