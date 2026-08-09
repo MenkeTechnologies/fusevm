@@ -1755,11 +1755,15 @@ impl VM {
                             }
                             Op::CallBuiltin(_, _) => rec.aborted = true,
                             // Most AWK ops are host calls (like CallBuiltin) and
-                            // can't appear in a compiled trace — abort. Pure ops
-                            // with native CLIF codegen in `emit_data_op`
-                            // (e.g. AwkInt → trunc) are omitted here so they can
-                            // be recorded and compiled.
-                            Op::AwkFieldGet
+                            // can't appear in a compiled trace — abort. Only ops
+                            // whose native CLIF codegen in `emit_data_op` is
+                            // *host-independent* may be omitted from this list.
+                            // `Op::AwkInt` used to be omitted and must not be:
+                            // it dispatches to `AwkHost::int`, whose result
+                            // variant differs per host, so a recorded trace
+                            // answered something the interpreter never would.
+                            Op::AwkInt
+                            | Op::AwkFieldGet
                             | Op::AwkFieldSet
                             | Op::AwkNf
                             | Op::AwkSetRecord

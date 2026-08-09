@@ -517,8 +517,7 @@ fn new_slot_ops_block_jit_matches_interp() {
     assert_eq!(native, interp, "block jit must match interpreter");
 }
 
-/// awkrs lowers an `int(x)` builtin call to the native `Op::AwkInt` (Cranelift
-/// `trunc`). This verifies the end-to-end goal: a numeric chunk containing
+/// This verifies the end-to-end goal: a numeric chunk containing
 /// `AwkDivJit` — the op a front-end's always-float `/` lowers to (e.g.
 /// strykelang `$x / $y`) — now block-JIT-compiles AND persists a `blk` native
 /// blob to the on-disk cache. Previously div/mod chunks skipped persistence
@@ -1107,30 +1106,35 @@ fn disk_cache_trunc_int_block_persists() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `AwkInt` — exactly the shape awkrs's `fusevm_bridge` emits for `x=int(x+c)`
-/// per record — block-JIT-compiles AND persists a `blk` native blob to the
-/// on-disk cache, so the JIT result is reused across process restarts.
+/// The per-record shape a frontend emits for `{ x = int(x + c) }`, using the
+/// *pure* `Op::TruncFloat`, block-JIT-compiles AND persists a `blk` native blob
+/// to the on-disk cache, so the JIT result is reused across process restarts.
+///
+/// This test used to build the chunk with `Op::AwkInt` and read slot 0 back as
+/// the integer `1`. Both halves of that were wrong and are now asserted the
+/// other way round at the end of this test:
+///   * `Op::AwkInt` is host-dispatched (`AwkHost::int`), so no native tier may
+///     lower it — a persisted blob would answer something the interpreter
+///     never would, and the disk cache would carry that across restarts.
+///   * the slot holds an f64, so declaring it `SlotKind::Int` and reading back
+///     `1` was the block tier truncating the value away.
 #[test]
-fn disk_cache_awk_int_block_persists() {
-    use fusevm::TraceJitConfig;
+fn disk_cache_awk_record_shape_trunc_chunk_persists_but_awk_int_never_does() {
+    use fusevm::{SlotKind, TraceJitConfig};
     let _g = serial();
     let dir = fresh_dir("awkint");
 
-    // Mirror awkrs's per-record chunk for `{ x = int(x + 1.9) }` with x = slot 0:
-    //   PushFrame; LoadFloat(seed); SetSlot(0);          (slot-init preamble)
-    //   GetSlot(0); LoadFloat(1.9); Add; AwkInt; Dup; SetSlot(0); Pop
-    let chunk = build(&[
-        (Op::PushFrame, 1),
-        (Op::LoadFloat(0.0), 1),
-        (Op::SetSlot(0), 1),
+    // GetSlot(0); LoadFloat(1.9); Add; TruncFloat; Dup; SetSlot(0); Pop
+    let ops: &[(Op, u32)] = &[
         (Op::GetSlot(0), 1),
         (Op::LoadFloat(1.9), 1),
         (Op::Add, 1),
-        (Op::AwkInt, 1),
+        (Op::TruncFloat, 1),
         (Op::Dup, 1),
         (Op::SetSlot(0), 1),
         (Op::Pop, 1),
-    ]);
+    ];
+    let chunk = build(ops);
 
     let jit = JitCompiler::new();
     jit.set_jit_cache_dir(Some(dir.clone()));
@@ -1140,17 +1144,47 @@ fn disk_cache_awk_int_block_persists() {
         ..TraceJitConfig::defaults()
     });
 
+    let kinds = [SlotKind::Float];
     let mut slots = vec![0i64; 1];
     assert_eq!(
-        jit.try_run_block(&chunk, &mut slots),
+        jit.try_run_block_kinded(&chunk, &mut slots, &kinds),
         None,
         "below threshold"
     );
     let _native = jit
-        .try_run_block(&chunk, &mut slots)
-        .expect("AwkInt chunk must block-JIT compile");
-    // int(0 + 1.9) = 1, written back to slot 0.
-    assert_eq!(slots[0], 1, "slot 0 should be int(1.9) == 1");
+        .try_run_block_kinded(&chunk, &mut slots, &kinds)
+        .expect("TruncFloat chunk must block-JIT compile");
+    // trunc(0.0 + 1.9) = 1.0, written back to slot 0 as an f64 bit pattern.
+    assert_eq!(
+        f64::from_bits(slots[0] as u64),
+        1.0,
+        "slot 0 should hold f64 1.0 == trunc(1.9)"
+    );
+
+    // The same chunk with the host-dispatched op must NOT compile, so nothing
+    // of it can reach the on-disk cache.
+    let awk_ops: Vec<(Op, u32)> = ops
+        .iter()
+        .map(|(o, l)| {
+            (
+                if matches!(o, Op::TruncFloat) {
+                    Op::AwkInt
+                } else {
+                    o.clone()
+                },
+                *l,
+            )
+        })
+        .collect();
+    let awk_chunk = build(&awk_ops);
+    let mut s2 = vec![0i64; 1];
+    for _ in 0..4 {
+        assert_eq!(
+            jit.try_run_block_kinded(&awk_chunk, &mut s2, &kinds),
+            None,
+            "an AwkInt chunk is host-dispatched and must never compile or persist"
+        );
+    }
 
     jit.set_jit_cache_dir(None);
 
@@ -1168,7 +1202,7 @@ fn disk_cache_awk_int_block_persists() {
     assert_eq!(
         blk.len(),
         1,
-        "expected one persisted blk.fjit for the AwkInt chunk, found {:?}",
+        "expected exactly one persisted blk.fjit — the TruncFloat chunk only, found {:?}",
         std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -1182,20 +1216,25 @@ fn disk_cache_awk_int_block_persists() {
 /// whose accumulator slot holds an f64 BIT PATTERN (SlotKind::Float), seeded as
 /// data before the run. The block JIT must bitcast the slot through f64 so the
 /// arithmetic is real floating-point — not integer-add on the bit pattern.
-/// This pins the f64-slot block-JIT fix that makes awkrs `x = int(x + c)` loops
-/// compile-and-cache correctly under AWKRS_FUSEVM=1.
+/// This pins the f64-slot block-JIT fix that makes a frontend's
+/// `x = trunc(x + c)` loops compile-and-cache correctly.
+///
+/// Built with the pure `Op::TruncFloat`. It used `Op::AwkInt`, which is
+/// host-dispatched (`AwkHost::int`) and therefore no longer lowered by any
+/// native tier — persisting a blob for it would carry a non-host answer across
+/// process restarts.
 #[test]
-fn disk_cache_awk_int_float_slot_block_persists() {
+fn disk_cache_trunc_float_slot_block_persists() {
     use fusevm::{SlotKind, TraceJitConfig};
     let _g = serial();
     let dir = fresh_dir("awkint_float");
 
-    // Stable chunk: GetSlot(0); LoadFloat(1.9); Add; AwkInt; Dup; SetSlot(0); Pop
+    // Stable chunk: GetSlot(0); LoadFloat(1.9); Add; TruncFloat; Dup; SetSlot(0); Pop
     let chunk = build(&[
         (Op::GetSlot(0), 1),
         (Op::LoadFloat(1.9), 1),
         (Op::Add, 1),
-        (Op::AwkInt, 1),
+        (Op::TruncFloat, 1),
         (Op::Dup, 1),
         (Op::SetSlot(0), 1),
         (Op::Pop, 1),
@@ -1219,21 +1258,21 @@ fn disk_cache_awk_int_float_slot_block_persists() {
     );
     let _native = jit
         .try_run_block_kinded(&chunk, &mut slots, &kinds)
-        .expect("AwkInt float-slot chunk must block-JIT compile");
-    // int(0.0 + 1.9) = 1.0; slot 0 now holds the f64 bit pattern of 1.0.
+        .expect("TruncFloat float-slot chunk must block-JIT compile");
+    // trunc(0.0 + 1.9) = 1.0; slot 0 now holds the f64 bit pattern of 1.0.
     assert_eq!(
         f64::from_bits(slots[0] as u64),
         1.0,
-        "slot 0 should hold f64 1.0 == int(1.9)"
+        "slot 0 should hold f64 1.0 == trunc(1.9)"
     );
 
     // Run again to prove the accumulation is real f64 arithmetic, not int-add
-    // on bit patterns: int(1.0 + 1.9) = int(2.9) = 2.0.
+    // on bit patterns: trunc(1.0 + 1.9) = trunc(2.9) = 2.0.
     let _ = jit.try_run_block_kinded(&chunk, &mut slots, &kinds);
     assert_eq!(
         f64::from_bits(slots[0] as u64),
         2.0,
-        "second pass must be real f64 arithmetic: int(2.9) == 2"
+        "second pass must be real f64 arithmetic: trunc(2.9) == 2"
     );
 
     jit.set_jit_cache_dir(None);
@@ -1251,7 +1290,7 @@ fn disk_cache_awk_int_float_slot_block_persists() {
     assert_eq!(
         blk.len(),
         1,
-        "expected one persisted blk.fjit for the float-slot AwkInt chunk"
+        "expected one persisted blk.fjit for the float-slot TruncFloat chunk"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

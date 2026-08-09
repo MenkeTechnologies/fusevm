@@ -2,7 +2,7 @@
 
 #![cfg(feature = "jit")]
 
-use fusevm::{ChunkBuilder, JitCompiler, Op};
+use fusevm::{ChunkBuilder, JitCompiler, Op, VMResult, Value, VM};
 
 #[test]
 fn block_jit_awk_sin_float_slot_matches_libm() {
@@ -582,9 +582,27 @@ fn block_threshold_is_configurable() {
     assert_eq!(jit.try_run_block(&chunk2, &mut slots2), None);
 }
 
+/// `Op::AwkInt` is host-dispatched (`VM::run` -> `AwkHost::int`), so no tier
+/// but the interpreter can know what it evaluates to. This test used to assert
+/// `is_block_eligible(&chunk)` — i.e. it pinned the block tier's right to
+/// lower it — and only checked the two operands where every candidate answer
+/// happens to agree. On the pre-change library the same chunk measured:
+///
+/// ```text
+///   is_block_eligible          = true
+///   interpreter (default host) = Int(3)     slots=[Int(3), Int(-2)]
+///   interpreter (f64 host)     = Float(3.0) slots=[Float(3.0), Float(-2.0)]
+///   block try_run_block_eager  = Some(3)    slots=[3, -2]
+///   aot                        = Int(3)
+/// ```
+///
+/// The block tier answered `3` for a chunk whose value under a registered host
+/// is `Float(3.0)` — a divergence the old assertions could not see. The chunk
+/// and both value expectations are kept; the eligibility assertion is inverted
+/// and the two host readings are now checked directly.
 #[test]
-fn block_jit_awk_int_truncates_float() {
-    // slot0 = int(3.7) → 3.0 ; slot1 = int(-2.9) → -2.0 ; return slot0
+fn block_jit_declines_awk_int_because_it_is_host_dispatched() {
+    // slot0 = int(3.7) ; slot1 = int(-2.9) ; return slot0
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
     b.emit(Op::LoadFloat(3.7), 1);
@@ -598,15 +616,41 @@ fn block_jit_awk_int_truncates_float() {
 
     let jit = JitCompiler::new();
     assert!(
-        jit.is_block_eligible(&chunk),
-        "AwkInt must be block-eligible"
+        !jit.is_block_eligible(&chunk),
+        "AwkInt is host-dispatched; no native lowering is right for every AwkHost"
+    );
+    let mut slots = vec![0i64; 4];
+    assert_eq!(
+        jit.try_run_block_eager(&chunk, &mut slots),
+        None,
+        "declining hands the chunk to the interpreter, the only host-aware tier"
     );
 
-    let mut slots = vec![0i64; 4];
-    let result = jit.try_run_block_eager(&chunk, &mut slots).unwrap();
-    // int() yields an integral value; the block JIT returns it as a plain i64.
-    assert_eq!(result, 3, "int(3.7) == 3");
-    assert_eq!(slots[1], -2, "int(-2.9) == -2 (toward zero)");
+    // The interpreter's answers — the ones the op is actually specified to
+    // have. Truncation toward zero, exactly as before.
+    let mut vm = VM::new(chunk.clone());
+    assert!(
+        matches!(vm.run(), VMResult::Ok(Value::Int(3))),
+        "int(3.7) == 3"
+    );
+    let s = &vm.frames.last().unwrap().slots;
+    assert_eq!(s[0], Value::Int(3), "int(3.7) == 3");
+    assert_eq!(s[1], Value::Int(-2), "int(-2.9) == -2 (toward zero)");
+
+    // And with a host that models awk numbers as f64, the same chunk is a
+    // Float throughout. This is the reading the native lowering destroyed.
+    struct FloatIntHost;
+    impl fusevm::AwkHost for FloatIntHost {
+        fn int(&mut self, x: &Value) -> Value {
+            Value::Float(x.to_float().trunc())
+        }
+    }
+    let mut vm = VM::new(chunk);
+    vm.set_awk_host(Box::new(FloatIntHost));
+    assert!(matches!(vm.run(), VMResult::Ok(Value::Float(f)) if f == 3.0));
+    let s = &vm.frames.last().unwrap().slots;
+    assert_eq!(s[0], Value::Float(3.0));
+    assert_eq!(s[1], Value::Float(-2.0));
 }
 
 #[test]
@@ -655,6 +699,7 @@ fn block_jit_awk_mkbool_returns_one_or_zero() {
 
 #[test]
 fn block_jit_awk_int_in_loop_matches_scalar() {
+    use fusevm::{BlockNum, SlotKind};
     // s = 0; for (i = 0; i < 10; i++) s += int(i + 0.9); → s = 0+1+..+9 = 45
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -682,11 +727,62 @@ fn block_jit_awk_int_in_loop_matches_scalar() {
     let chunk = b.build();
 
     let jit = JitCompiler::new();
-    assert!(jit.is_block_eligible(&chunk));
-
+    // An `Op::AwkInt` anywhere in the chunk makes the whole chunk ineligible,
+    // because the op is host-dispatched. On the pre-change library this chunk
+    // measured `is_block_eligible = true` and `try_run_block_eager = Some(45)`
+    // — an i64 — where the interpreter (under either host) and the AOT tier
+    // both answered `Float(45.0)`. The `45` the old assertion pinned came out
+    // of `try_run_block_eager`'s documented float→i64 truncation, so it could
+    // not distinguish the two.
+    assert!(!jit.is_block_eligible(&chunk));
     let mut slots = vec![0i64; 4];
-    let result = jit.try_run_block_eager(&chunk, &mut slots).unwrap();
-    assert_eq!(result, 45);
+    assert_eq!(jit.try_run_block_eager(&chunk, &mut slots), None);
+
+    // The value the loop actually computes, on the tier that owns the op.
+    let mut vm = VM::new(chunk.clone());
+    assert!(matches!(vm.run(), VMResult::Ok(Value::Float(f)) if f == 45.0));
+
+    // Replacing the host-dispatched `int()` with the pure `Op::TruncFloat` —
+    // the op a frontend should emit when it wants awk's `int()` in native code
+    // — restores block-JIT eligibility with no host in the picture.
+    let mut b = ChunkBuilder::new();
+    for op in chunk.ops.iter() {
+        b.emit(
+            if matches!(op, Op::AwkInt) {
+                Op::TruncFloat
+            } else {
+                op.clone()
+            },
+            1,
+        );
+    }
+    let pure = b.build();
+    assert!(
+        jit.is_block_eligible(&pure),
+        "Op::TruncFloat is host-free and must stay block-eligible"
+    );
+    // The slots hold f64s, so the caller must say so — `try_run_block_eager`
+    // (every slot `Int`) now declines rather than truncating them, which is
+    // the second half of this fix.
+    let kinds = [
+        SlotKind::Float,
+        SlotKind::Float,
+        SlotKind::Float,
+        SlotKind::Float,
+    ];
+    let mut slots = vec![0i64; 4];
+    assert_eq!(
+        jit.try_run_block_eager(&pure, &mut slots),
+        None,
+        "float slots declared as Int must decline, not silently truncate"
+    );
+    let mut slots = vec![0.0f64.to_bits() as i64; 4];
+    match jit.try_run_block_eager_typed_kinded(&pure, &mut slots, &kinds) {
+        Some(BlockNum::Float(v)) => assert_eq!(v, 45.0),
+        other => panic!("expected Float(45.0), got {other:?}"),
+    }
+    let mut vm = VM::new(pure);
+    assert!(matches!(vm.run(), VMResult::Ok(Value::Float(f)) if f == 45.0));
 }
 
 // ── Block JIT tests for AwkSqrtJit / AwkLogJit / AwkLshiftJit / AwkRshiftJit /

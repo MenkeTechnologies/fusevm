@@ -1162,35 +1162,18 @@ mod cranelift_jit_impl {
             Op::TimeInt => {
                 stack.push(Cell::Dyn);
             }
-            // awk int(x): truncate toward zero. An integer operand is already
-            // integral, so the op is the identity and stays native.
+            // awk int(x): never lowered natively. See the `Op::AwkInt` doc in
+            // `src/op.rs` — the op is *host-dispatched* (`VM::run` sends it to
+            // `AwkHost::int`), and the two `AwkHost` impls in the fleet
+            // disagree on the result **variant**, so no fixed lowering is
+            // right for every host. Declining hands the op to the interpreter,
+            // which is the only tier that can see the registered host.
             //
-            // A *float* operand declines. `Op::AwkInt` is host-dispatched —
-            // `dispatch_awk` hands it to `AwkHost::int`, whose default
-            // (`awk_host::awk_int`) narrows the truncated value to
-            // `Value::Int` when it fits an `i64` and only falls back to
-            // `Value::Float` when it does not. An f64 register cannot express
-            // that narrowing, so lowering `int(2.5)` natively answered
-            // `Float(2.0)` where the interpreter and the AOT tier both answer
-            // `Int(2)`. Nor can the linear tier know what a *registered* host
-            // does — a frontend is free to override `int()` — so the only
-            // answer that is right for every host is the interpreter's.
-            // The integer case is only the identity while the operand round-trips
-            // through the `f64` that `awk_int` truncates in: at `2^53 + 1` the
-            // host answers `Int(9007199254740992)` and native code, which never
-            // leaves the integer register, answers `Int(9007199254740993)`. A
-            // runtime integer (`Cell::Dyn`) could be either, so it declines too.
-            Op::AwkInt => {
-                let a = pop_num(stack)?;
-                stack.push(match a {
-                    Cell::Const(n)
-                        if crate::awk_host::awk_int(&FuseValue::Int(n)) == FuseValue::Int(n) =>
-                    {
-                        Cell::Const(n)
-                    }
-                    _ => return None,
-                });
-            }
+            // The previous exception here — accept an integer constant that is
+            // already its own `awk_int` — was still wrong: it is correct only
+            // for the *default* host. Under awkrs's host (`Float` always) it
+            // answered `Int(2)` where the interpreter answered `Float(2.0)`.
+            Op::AwkInt => return None,
             // awk mkbool(x): `1.0` if `x` is truthy (numeric != 0, including
             // NaN and infinities), else `0.0`. Pure compare + select, no libcall.
             Op::AwkMkbool => {
@@ -2552,17 +2535,6 @@ mod cranelift_jit_impl {
                     JitTy::Float => stack.push((bcx.ins().fneg(a), JitTy::Float)),
                 }
             }
-            // awk int(x): truncate toward zero. Integer operand is already
-            // integral (identity); float uses Cranelift's `trunc`
-            // (roundToIntegralTowardZero), preserving NaN/inf — matching awkrs
-            // `Value::Num(as_number().trunc())`.
-            Op::AwkInt => {
-                let (a, ty) = stack.pop()?;
-                match ty {
-                    JitTy::Int => stack.push((a, JitTy::Int)),
-                    JitTy::Float => stack.push((bcx.ins().trunc(a), JitTy::Float)),
-                }
-            }
             // awk mkbool(x): returns 1.0 if x is truthy (non-zero), else 0.0.
             // `FloatCC::NotEqual` is the unordered NaN-aware comparison: NaN
             // != 0.0 → true, so NaN maps to 1.0 (awk truthy semantics — gawk
@@ -2622,15 +2594,25 @@ mod cranelift_jit_impl {
                 }
                 stack.push((acc, JitTy::Int));
             }
+            // The interpreter is `Value::Int(v.to_int().wrapping_add(1))`
+            // (src/vm.rs, `Op::Inc`), and `Value::to_int` on a float is Rust's
+            // `f as i64`, which *saturates* (NaN -> 0, ±huge -> i64::MIN/MAX).
+            // So the float operand must go through `fcvt_to_sint_sat`.
+            //
+            // `scalar_store_i64` — used here before — is `fcvt_to_sint`, which
+            // **traps**. A trap in JIT-compiled code is an illegal instruction,
+            // so `Inc(1e30)` killed the process with SIGILL where the
+            // interpreter returned `Int(i64::MIN)` and the AOT tier declined
+            // the operand outright (`aot.rs`, `deopt_unless!(...is_intlike())`).
+            // Nothing guarded it on the default path: `is_block_eligible_op`
+            // rejects `Inc`/`Dec` only under `strict_numeric()`.
             Op::Inc => {
-                let (a, ty) = stack.pop()?;
-                let a = scalar_store_i64(bcx, a, ty);
+                let a = pop_as_i64_sat(bcx, stack)?;
                 let one = bcx.ins().iconst(types::I64, 1);
                 stack.push((bcx.ins().iadd(a, one), JitTy::Int));
             }
             Op::Dec => {
-                let (a, ty) = stack.pop()?;
-                let a = scalar_store_i64(bcx, a, ty);
+                let a = pop_as_i64_sat(bcx, stack)?;
                 let one = bcx.ins().iconst(types::I64, 1);
                 stack.push((bcx.ins().isub(a, one), JitTy::Int));
             }
@@ -2806,10 +2788,16 @@ mod cranelift_jit_impl {
                     JitTy::Int,
                 ));
             }
+            // Memory-backed slots are raw `i64` with no kind channel, so a
+            // float value cannot survive the store — see the register-promoted
+            // `Op::SetSlot` in `build_block_function` for the measured damage.
+            // Decline rather than truncate.
             Op::SetSlot(slot) => {
                 let base = slot_base?;
                 let (v, ty) = stack.pop()?;
-                let v = scalar_store_i64(bcx, v, ty);
+                if matches!(ty, JitTy::Float) {
+                    return None;
+                }
                 bcx.ins()
                     .store(MemFlags::trusted(), v, base, (*slot as i32) * 8);
             }
@@ -4565,7 +4553,12 @@ mod cranelift_jit_impl {
                 | Op::AccumSumLoop(_, _, _)
                 | Op::PushFrame
                 | Op::PopFrame
-                | Op::AwkInt
+                // `Op::AwkInt` is deliberately absent: it is host-dispatched
+                // (see its doc in `src/op.rs`) and no native lowering can be
+                // right for every `AwkHost`. Admitting it made the block tier
+                // answer `Float(3.0)` for `int(3.7)` where the interpreter and
+                // the AOT tier both answer `Int(3)`, and made the *same* VM
+                // flip its answer once the block cache warmed.
                 | Op::AwkMkbool
                 | Op::AwkSin
                 | Op::AwkCos
@@ -5142,7 +5135,23 @@ mod cranelift_jit_impl {
                                     f,
                                 )
                             } else {
-                                scalar_store_i64(&mut bcx, v, ty)
+                                // Int-kinded slot, float value: there is no
+                                // i64 encoding for it. `scalar_store_i64` —
+                                // used here before — truncated through the
+                                // *trapping* `fcvt_to_sint`, so `x = 3.5` into
+                                // a slot that entered the chunk holding an Int
+                                // read back as `Int(3)` once the block cache
+                                // warmed (the interpreter answers `Float(3.5)`
+                                // every time), and `x = 1e30` killed the
+                                // process with SIGILL. The slot kinds are the
+                                // caller's *entry* snapshot, so a chunk that
+                                // assigns a float to an integer slot is
+                                // ordinary code, not an abuse of the API.
+                                // Decline and let the interpreter run it.
+                                if matches!(ty, JitTy::Float) {
+                                    return None;
+                                }
+                                v
                             };
                             bcx.def_var(var, v_i);
                         }

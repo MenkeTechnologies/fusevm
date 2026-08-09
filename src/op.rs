@@ -402,7 +402,44 @@ pub enum Op {
     AwkToLower,
     /// `toupper(s)` — stack `[s]`.
     AwkToUpper,
-    /// `int(x)` — truncate toward zero. Stack `[x]`. Host-independent.
+    /// `int(x)` — truncate toward zero. Stack `[x]`.
+    ///
+    /// **Host-dispatched, and therefore never lowered to native code.** The
+    /// interpreter routes this op to [`AwkHost::int`], an overridable trait
+    /// method, and the implementations in use do not agree on the result
+    /// *variant*:
+    ///
+    /// | impl | `int(3.7)` | `int(2)` |
+    /// |---|---|---|
+    /// | [`awk_host::awk_int`] (default) | `Int(3)` | `Int(2)` |
+    /// | a frontend that models awk numbers as `f64` | `Float(3.0)` | `Float(2.0)` |
+    ///
+    /// A Cranelift lowering sees neither — it has no access to the VM, let
+    /// alone to the host installed on it — so any fixed lowering is a silent
+    /// wrong answer for some host. The kind-preserving `trunc` that the block
+    /// and tracing tiers used to emit was wrong against *both*: it answered
+    /// `Float(3.0)` where the default host answers `Int(3)`, and `Int(2)`
+    /// where an `f64` host answers `Float(2.0)`. Because the block tier warms
+    /// up, the same `VM` running the same `Chunk` changed its answer between
+    /// the first and second call.
+    ///
+    /// Past `2^53` there was a second, independent error: [`awk_host::awk_int`]
+    /// truncates *through an `f64`*, so it answers `Int(9007199254740992)` for
+    /// `int(2^53 + 1)`, while native code that never leaves an integer register
+    /// answered `Int(9007199254740993)`.
+    ///
+    /// A frontend that wants awk's `int()` to run in native code should emit
+    /// [`Op::TruncFloat`] instead, whose contract is *pure* — `Float(trunc(x))`
+    /// for every operand, no host consulted, identical in all four tiers.
+    ///
+    /// The general rule this records: an op that reaches [`AwkHost`] may be
+    /// lowered natively only if every conforming host produces exactly the
+    /// value the lowering does. `Op::AwkSin`/`AwkCos`/`AwkExp` qualify (pure
+    /// `f64`, same variant everywhere); `Op::AwkInt` does not.
+    ///
+    /// [`AwkHost`]: crate::awk_host::AwkHost
+    /// [`AwkHost::int`]: crate::awk_host::AwkHost::int
+    /// [`awk_host::awk_int`]: crate::awk_host::awk_int
     AwkInt,
     /// `sqrt(x)` — square root. Stack `[x]`. Host-independent.
     AwkSqrt,
