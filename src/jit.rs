@@ -1970,6 +1970,24 @@ mod cranelift_jit_impl {
         bcx.ins().fcvt_to_sint(types::I64, v)
     }
 
+    /// Pop two operands and bring them to a common type, widening an `Int` to
+    /// `f64` when the other side is a `Float`.
+    ///
+    /// Strict numeric mode declines the mixed cases. `fcvt_from_sint` is exact
+    /// only while the integer is one an `f64` can hold; past `2^53` it rounds,
+    /// and the compiled op would then answer about a neighbouring value with no
+    /// way for the [`crate::NumericHook`] to intervene — `3**34 ==
+    /// (3**34).to_f` is `false`, and `true` once the integer has been rounded.
+    /// The interpreter's `cmp_int_fast` / `arith_int_fast` hand exactly these
+    /// operands to the host, so declining here (the same remedy `Div`/`Mod`/
+    /// `Pow` already get in `is_block_eligible_op_at`) is what routes them
+    /// there.
+    ///
+    /// The check is on the compile-time *kinds*, not on a runtime value, so
+    /// only a chunk that genuinely mixes integer and float operands loses its
+    /// native code. All-int and all-float chunks — and every chunk under the
+    /// coercing awk/shell policy, where the rounding is the defined semantics —
+    /// compile exactly as before.
     fn pop_pair_promote(
         bcx: &mut FunctionBuilder,
         stack: &mut Vec<(Value, JitTy)>,
@@ -1979,8 +1997,18 @@ mod cranelift_jit_impl {
         Some(match (ta, tb) {
             (JitTy::Int, JitTy::Int) => (a, b, JitTy::Int),
             (JitTy::Float, JitTy::Float) => (a, b, JitTy::Float),
-            (JitTy::Int, JitTy::Float) => (i64_to_f64(bcx, a), b, JitTy::Float),
-            (JitTy::Float, JitTy::Int) => (a, i64_to_f64(bcx, b), JitTy::Float),
+            (JitTy::Int, JitTy::Float) => {
+                if super::strict_numeric() {
+                    return None;
+                }
+                (i64_to_f64(bcx, a), b, JitTy::Float)
+            }
+            (JitTy::Float, JitTy::Int) => {
+                if super::strict_numeric() {
+                    return None;
+                }
+                (a, i64_to_f64(bcx, b), JitTy::Float)
+            }
         })
     }
 

@@ -347,9 +347,15 @@ pub enum NumOp {
 /// - integer `Add`/`Sub`/`Mul`/`Neg` that overflows `i64` — the host returns the
 ///   exact result (elisp: a bignum), rather than the wrapped one.
 ///
-/// `Err` raises a VM error carrying the message. Mixed int/float and
-/// float/float arithmetic never delegates: it is exact in `f64` and stays on
-/// the fast path.
+/// - mixed `Int`/`Float` arithmetic or comparison where the integer is outside
+///   the range an `f64` holds exactly (`|x| > 2^53`) — converting it would
+///   round, so the host is handed the operands rather than an answer computed
+///   on a neighbouring value. `3**34 == (3**34).to_f` is `false`, and `true`
+///   if the integer is rounded into an `f64` first.
+///
+/// `Err` raises a VM error carrying the message. `Float`/`Float` never
+/// delegates, and neither does mixed `Int`/`Float` while the integer is
+/// exactly representable: both are exact in `f64` and stay on the fast path.
 pub type NumericHook =
     std::sync::Arc<dyn Fn(NumOp, &Value, &Value) -> Result<Value, String> + Send + Sync>;
 
@@ -497,6 +503,34 @@ pub type InputSource = Box<dyn FnMut() -> Option<String> + Send>;
 #[inline(always)]
 fn is_native_num(v: &Value) -> bool {
     matches!(v, Value::Int(_) | Value::Float(_))
+}
+
+/// Whether converting `v` to `f64` would lose information.
+///
+/// The native arithmetic and comparison arms compute mixed `Int`/`Float`
+/// operands in `f64`. That is exact only while the integer is one an `f64` can
+/// hold: every integer up to `2^53` is representable, and past it `f64` keeps
+/// every second value, then every fourth, and so on. `3**34` is
+/// 16_677_181_699_666_569 and its `f64` image is 16_677_181_699_666_568 — so
+/// `3**34 == (3**34).to_f` answers `true` natively and `false` exactly.
+///
+/// Under the coercing (awk/shell) policy that rounding *is* the semantics and
+/// this is never consulted. Under strict numeric mode it decides whether the
+/// operands go to the [`NumericHook`] instead, because the host is the only
+/// party that can represent the integer exactly.
+///
+/// The bound is deliberately conservative rather than exact. Some integers past
+/// `2^53` are representable too (powers of two, say), but the obvious test for
+/// that — round-tripping `x as f64 as i64` — is unsound at the top of the
+/// range: `i64::MAX as f64` is `2^63`, and the cast back saturates to
+/// `i64::MAX`, reporting an inexact value as exact. Delegating a little more
+/// often than strictly necessary costs a host call and still answers
+/// correctly; delegating less often is the silent wrong answer.
+///
+/// `unsigned_abs` rather than `abs`: `i64::MIN.abs()` overflows.
+#[inline(always)]
+fn f64_would_round(v: &Value) -> bool {
+    matches!(v, Value::Int(x) if x.unsigned_abs() > (1u64 << 53))
 }
 
 impl VM {
@@ -1449,12 +1483,22 @@ impl VM {
                     Err(e) => return Some(e),
                 },
             },
-            // Mixed int/float and float/float are exact in f64 under either
-            // policy — never delegate.
-            (a, b, _) if is_native_num(a) && is_native_num(b) => {
+            // Mixed int/float and float/float, strict: float/float is exact in
+            // f64 by construction, and int/float is exact while the integer is
+            // one an f64 can hold. Past 2^53 the conversion rounds, and a sum
+            // computed on a rounded operand is as silently wrong as a
+            // comparison answered on one — so those go to the host below.
+            (a, b, true)
+                if is_native_num(a)
+                    && is_native_num(b)
+                    && !f64_would_round(a)
+                    && !f64_would_round(b) =>
+            {
                 Value::Float(float_op(a.to_float(), b.to_float()))
             }
-            // A non-number. Coerce (awk/shell) or delegate (strict).
+            // Coercing policy: everything else computes in f64, including a
+            // non-number (`"a"` becomes `0.0`) and an integer f64 must round.
+            // That rounding is the defined awk/shell semantics, not a defect.
             (a, b, false) => Value::Float(float_op(a.to_float(), b.to_float())),
             (a, b, true) => match self.call_numeric(op, a, b, ip) {
                 Ok(v) => v,
@@ -1488,7 +1532,16 @@ impl VM {
         let a = &self.stack[len - 2];
         let result = match (a, b, strict) {
             (Value::Int(x), Value::Int(y), _) => Value::Bool(int_cmp(*x, *y)),
-            (a, b, _) if is_native_num(a) && is_native_num(b) => {
+            // Strict: same exactness condition as the arithmetic arm. An
+            // integer past 2^53 collapses onto a neighbouring f64, so the
+            // comparison would answer about that neighbour instead — `3**34 ==
+            // (3**34).to_f` is `true` natively and `false` exactly.
+            (a, b, true)
+                if is_native_num(a)
+                    && is_native_num(b)
+                    && !f64_would_round(a)
+                    && !f64_would_round(b) =>
+            {
                 Value::Bool(float_cmp(a.to_float(), b.to_float()))
             }
             (a, b, false) => Value::Bool(float_cmp(a.to_float(), b.to_float())),
