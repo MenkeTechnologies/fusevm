@@ -20,6 +20,21 @@ fn jit_expect_int(ops: &[(Op, u32)], expected: i64) {
     }
 }
 
+/// Assert the linear tier answers `Value::Bool`.
+///
+/// The six relational ops, `Op::LogNot`, and `Op::LoadTrue`/`Op::LoadFalse` all
+/// push a `Value::Bool` in the interpreter (`cmp_int_fast` / `Op::LogNot` in
+/// `src/vm.rs`) and in the AOT tier (`Kind::Bool` in `src/aot.rs`). These
+/// assertions used `jit_expect_int` against `Int(0|1)`, which only the linear
+/// tier ever produced — its return channel had no boolean kind, so it boxed the
+/// 0/1 in the integer register as `Value::Int`.
+fn jit_expect_bool(ops: &[(Op, u32)], expected: bool) {
+    match jit_run(ops) {
+        Some(Value::Bool(b)) => assert_eq!(b, expected, "expected {expected}, got {b}"),
+        other => panic!("expected Some(Bool({expected})), got {other:?}"),
+    }
+}
+
 fn jit_expect_float(ops: &[(Op, u32)], expected: f64) {
     match jit_run(ops) {
         Some(Value::Float(f)) => {
@@ -118,33 +133,33 @@ fn jit_chained_arithmetic() {
 
 #[test]
 fn jit_numeric_comparisons() {
-    jit_expect_int(
+    jit_expect_bool(
         &[(Op::LoadInt(1), 1), (Op::LoadInt(2), 1), (Op::NumLt, 1)],
-        1,
+        true,
     );
-    jit_expect_int(
+    jit_expect_bool(
         &[(Op::LoadInt(2), 1), (Op::LoadInt(1), 1), (Op::NumLt, 1)],
-        0,
+        false,
     );
-    jit_expect_int(
+    jit_expect_bool(
         &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumEq, 1)],
-        1,
+        true,
     );
-    jit_expect_int(
+    jit_expect_bool(
         &[(Op::LoadInt(5), 1), (Op::LoadInt(3), 1), (Op::NumGt, 1)],
-        1,
+        true,
     );
-    jit_expect_int(
+    jit_expect_bool(
         &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumLe, 1)],
-        1,
+        true,
     );
-    jit_expect_int(
+    jit_expect_bool(
         &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumGe, 1)],
-        1,
+        true,
     );
-    jit_expect_int(
+    jit_expect_bool(
         &[(Op::LoadInt(5), 1), (Op::LoadInt(5), 1), (Op::NumNe, 1)],
-        0,
+        false,
     );
 }
 
@@ -226,8 +241,10 @@ fn jit_swap() {
 
 #[test]
 fn jit_lognot() {
-    jit_expect_int(&[(Op::LoadInt(0), 1), (Op::LogNot, 1)], 1);
-    jit_expect_int(&[(Op::LoadInt(42), 1), (Op::LogNot, 1)], 0);
+    // `Bool`, not `Int(0|1)`: `Op::LogNot` is
+    // `Value::Bool(!val.is_truthy())` in the interpreter (`src/vm.rs`).
+    jit_expect_bool(&[(Op::LoadInt(0), 1), (Op::LogNot, 1)], true);
+    jit_expect_bool(&[(Op::LoadInt(42), 1), (Op::LogNot, 1)], false);
 }
 
 // ── Slot ops ──
@@ -339,8 +356,9 @@ fn jit_complex_expression() {
 
 #[test]
 fn jit_bool_constants() {
-    jit_expect_int(&[(Op::LoadTrue, 1)], 1);
-    jit_expect_int(&[(Op::LoadFalse, 1)], 0);
+    // `Op::LoadTrue` pushes `Value::Bool(true)`, not `Int(1)`.
+    jit_expect_bool(&[(Op::LoadTrue, 1)], true);
+    jit_expect_bool(&[(Op::LoadFalse, 1)], false);
 }
 
 #[test]
