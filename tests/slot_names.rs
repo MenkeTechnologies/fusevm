@@ -101,7 +101,10 @@ fn run_probed(chunk: fusevm::Chunk) -> (Vec<Probe>, VMResult) {
 #[test]
 fn a_running_frame_answers_by_name_at_every_level() {
     let (seen, out) = run_probed(recursive_chunk(true));
-    assert!(!matches!(out, VMResult::Error(_)), "the run itself: {out:?}");
+    assert!(
+        !matches!(out, VMResult::Error(_)),
+        "the run itself: {out:?}"
+    );
     assert!(!seen.is_empty(), "the probe never fired");
 
     let deepest = &seen[0];
