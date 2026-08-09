@@ -3743,7 +3743,14 @@ impl VM {
                     x = y;
                     y = t;
                 }
-                self.push(Value::Int(x as i64));
+                // Saturate, don't wrap. `gcd(0, i64::MIN)` is `2^63`, which is
+                // one past `i64::MAX`; `x as i64` would answer
+                // `Int(-9223372036854775808)` — a *negative* gcd, and a
+                // different answer from the one the JIT's
+                // `fusevm_jit_gcd_i64` gives (`i64::MAX`). `Op::LcmInt` below
+                // already saturates the same overflow; this is the same rule
+                // applied at the same place.
+                self.push(Value::Int(x.min(i64::MAX as u64) as i64));
             }
             Op::LcmInt => {
                 let b = self.pop().to_int().unsigned_abs();

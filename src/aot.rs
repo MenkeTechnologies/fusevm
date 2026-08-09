@@ -2759,6 +2759,15 @@ fn build_entry_native<M: Module>(
                     b.ins().jump(header, &[]);
                     b.switch_to_block(exit);
                     let g = b.use_var(xv);
+                    // Saturate the one magnitude an i64 cannot hold: `gcd(0,
+                    // i64::MIN)` is `2^63`, whose i64 bit pattern is negative.
+                    // The interpreter and the linear/block/trace JIT both
+                    // answer `i64::MAX` there, so the unsigned `g` is clamped
+                    // the same way — `g` with its sign bit set is exactly
+                    // "greater than i64::MAX as u64".
+                    let sat = b.ins().iconst(types::I64, i64::MAX);
+                    let too_big = b.ins().icmp_imm(IntCC::SignedLessThan, g, 0);
+                    let g = b.ins().select(too_big, sat, g);
                     b.def_var(ivars[ix], g);
                     kinds.push(Kind::Int);
                 }

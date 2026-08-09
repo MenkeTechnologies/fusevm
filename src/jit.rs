@@ -681,6 +681,12 @@ mod cranelift_jit_impl {
         #[allow(dead_code)]
         backing: LinearBacking,
         run: LinearRun,
+        /// The chunk's result is a `Value::Bool`, carried in the integer
+        /// return register as 0/1. Native code has no boolean ABI, so the
+        /// kind is recovered here from the abstract simulation rather than
+        /// from the returned bits — `Int(1)` and `Bool(true)` are the same
+        /// register value and different `Value`s.
+        ret_is_bool: bool,
     }
 
     impl CompiledLinear {
@@ -695,6 +701,7 @@ mod cranelift_jit_impl {
 
         pub(crate) fn result_to_value(&self, j: JitResult) -> FuseValue {
             match j {
+                JitResult::Int(n) if self.ret_is_bool => FuseValue::Bool(n != 0),
                 JitResult::Int(n) => FuseValue::Int(n),
                 JitResult::Float(f) => FuseValue::Float(f),
             }
@@ -703,12 +710,25 @@ mod cranelift_jit_impl {
 
     // ── Abstract stack simulation ──
 
+    /// A value's statically-known kind during linear-tier simulation.
+    ///
+    /// The three kinds mirror the three `Value` variants native code can
+    /// produce: `Const`/`Dyn` are `Value::Int`, `ConstF`/`DynF` are
+    /// `Value::Float`, and `ConstB`/`DynB` are `Value::Bool`. The boolean
+    /// kinds exist because the interpreter treats `Value::Bool` as a
+    /// *non-numeric* value: it is neither `Value::Int` on the way out (a
+    /// comparison answers `Bool(true)`, not `Int(1)`) nor an `Int` on the way
+    /// in (`true + 1` coerces through `to_float` and answers `Float(2.0)`,
+    /// because `is_native_num` is false for `Bool` — see `arith_int_fast` in
+    /// `vm.rs`). Folding a boolean into `Const(0|1)` got both wrong.
     #[derive(Clone, Copy, PartialEq, Debug)]
     pub(crate) enum Cell {
         Const(i64),
         ConstF(f64),
+        ConstB(bool),
         Dyn,
         DynF,
+        DynB,
     }
 
     impl Cell {
@@ -718,18 +738,46 @@ mod cranelift_jit_impl {
         fn either_float(a: Cell, b: Cell) -> bool {
             a.is_float() || b.is_float()
         }
+        pub(crate) fn is_bool(self) -> bool {
+            matches!(self, Cell::ConstB(_) | Cell::DynB)
+        }
+        /// The boolean cell for a folded 0/1, or the dynamic one.
+        fn bool_from(c: Cell) -> Cell {
+            match c {
+                Cell::Const(n) => Cell::ConstB(n != 0),
+                _ => Cell::DynB,
+            }
+        }
     }
 
     fn cell_to_jit_ty(c: Cell) -> JitTy {
         match c {
             Cell::ConstF(_) | Cell::DynF => JitTy::Float,
-            Cell::Const(_) | Cell::Dyn => JitTy::Int,
+            // A boolean rides the integer return register as 0/1; only the
+            // boxing at `result_to_value` differs.
+            Cell::Const(_) | Cell::Dyn | Cell::ConstB(_) | Cell::DynB => JitTy::Int,
         }
     }
 
+    /// Pop one operand for an op that consumes it *as a number*.
+    ///
+    /// A boolean operand declines the whole chunk. The interpreter routes
+    /// `Value::Bool` through the non-native-number arm of `arith_int_fast` /
+    /// `negate_strict`, which answers `Value::Float`; native code would answer
+    /// `Value::Int`, and the linear tier has no mid-chunk deopt to fall back
+    /// through (the same reason `Op::Div` declines a runtime divisor). Refusing
+    /// the chunk hands it to the interpreter, which is always right.
+    fn pop_num(stack: &mut Vec<Cell>) -> Option<Cell> {
+        match stack.pop()? {
+            c if c.is_bool() => None,
+            c => Some(c),
+        }
+    }
+
+    /// Two-operand form of [`pop_num`]; returns `(a, b)` in push order.
     fn pop2_strict(stack: &mut Vec<Cell>) -> Option<(Cell, Cell)> {
-        let b = stack.pop()?;
-        let a = stack.pop()?;
+        let b = pop_num(stack)?;
+        let a = pop_num(stack)?;
         Some((a, b))
     }
 
@@ -818,8 +866,12 @@ mod cranelift_jit_impl {
                     _ => return None,
                 }
             }
-            Op::LoadTrue => stack.push(Cell::Const(1)),
-            Op::LoadFalse => stack.push(Cell::Const(0)),
+            // `Value::Bool`, not `Int(1)`/`Int(0)`: the interpreter and the AOT
+            // tier both answer `Bool` here, and folding to an integer cell also
+            // made `true + 1` fold to `Int(2)` where every other tier answers
+            // `Float(2.0)`.
+            Op::LoadTrue => stack.push(Cell::ConstB(true)),
+            Op::LoadFalse => stack.push(Cell::ConstB(false)),
             Op::Add => {
                 let (a, b) = pop2_strict(stack)?;
                 stack.push(fold_arith(a, b, i64::wrapping_add, |x, y| x + y));
@@ -859,6 +911,8 @@ mod cranelift_jit_impl {
                 stack.push(match a {
                     Cell::Const(x) => Cell::ConstF(x as f64 / divisor),
                     Cell::ConstF(x) => Cell::ConstF(x / divisor),
+                    // `pop2_strict` already declined a boolean operand.
+                    Cell::ConstB(_) | Cell::DynB => return None,
                     Cell::Dyn | Cell::DynF => Cell::DynF,
                 });
             }
@@ -897,11 +951,13 @@ mod cranelift_jit_impl {
                 let base = match a {
                     Cell::Const(x) => Some(x as f64),
                     Cell::ConstF(x) => Some(x),
+                    Cell::ConstB(_) | Cell::DynB => return None,
                     Cell::Dyn | Cell::DynF => None,
                 };
                 let exp = match b {
                     Cell::Const(y) => Some(y as f64),
                     Cell::ConstF(y) => Some(y),
+                    Cell::ConstB(_) | Cell::DynB => return None,
                     Cell::Dyn | Cell::DynF => None,
                 };
                 stack.push(match (base, exp) {
@@ -910,10 +966,11 @@ mod cranelift_jit_impl {
                 });
             }
             Op::Negate => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 stack.push(match a {
                     Cell::Const(n) => Cell::Const(n.wrapping_neg()),
                     Cell::ConstF(f) => Cell::ConstF(-f),
+                    Cell::ConstB(_) | Cell::DynB => return None,
                     Cell::DynF => Cell::DynF,
                     Cell::Dyn => Cell::Dyn,
                 });
@@ -926,28 +983,28 @@ mod cranelift_jit_impl {
                 }
             }
             Op::SqrtFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.sqrt())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::SinFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.sin())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::CosFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.cos())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::ExpFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.exp())),
                     _ => stack.push(Cell::DynF),
@@ -961,21 +1018,21 @@ mod cranelift_jit_impl {
                 }
             }
             Op::LogFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.ln())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::AbsFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.abs())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::TruncInt => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 stack.push(match a {
                     Cell::Const(n) => Cell::Const(n),
                     Cell::ConstF(f) => Cell::Const(f as i64),
@@ -983,98 +1040,98 @@ mod cranelift_jit_impl {
                 });
             }
             Op::CeilFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.ceil())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::FloorFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.floor())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::TruncFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.trunc())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::RoundFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.round_ties_even())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::TanFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.tan())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::AsinFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.asin())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::AcosFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.acos())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::AtanFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.atan())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::SinhFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.sinh())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::CoshFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.cosh())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::TanhFloat => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.tanh())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::Log2Float => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.log2())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::Log10Float => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::ConstF(x) => stack.push(Cell::ConstF(x.log10())),
                     _ => stack.push(Cell::DynF),
                 }
             }
             Op::AbsInt => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 match a {
                     Cell::Const(n) => stack.push(Cell::Const(n.wrapping_abs())),
                     _ => stack.push(Cell::Dyn),
@@ -1085,13 +1142,13 @@ mod cranelift_jit_impl {
             // the abstract cell model is i64.
             Op::MulModFloor => {
                 let _ = pop2_strict(stack)?;
-                stack.pop()?;
+                pop_num(stack)?;
                 stack.push(Cell::Dyn);
             }
             Op::MulAddModFloor => {
                 let _ = pop2_strict(stack)?;
-                stack.pop()?;
-                stack.pop()?;
+                pop_num(stack)?;
+                pop_num(stack)?;
                 stack.push(Cell::Dyn);
             }
             Op::GcdInt => {
@@ -1106,21 +1163,38 @@ mod cranelift_jit_impl {
                 stack.push(Cell::Dyn);
             }
             // awk int(x): truncate toward zero. An integer operand is already
-            // integral (identity); a float is truncated. Matches awkrs
-            // `Value::Num(as_number().trunc())` (bignum path excluded upstream).
+            // integral, so the op is the identity and stays native.
+            //
+            // A *float* operand declines. `Op::AwkInt` is host-dispatched —
+            // `dispatch_awk` hands it to `AwkHost::int`, whose default
+            // (`awk_host::awk_int`) narrows the truncated value to
+            // `Value::Int` when it fits an `i64` and only falls back to
+            // `Value::Float` when it does not. An f64 register cannot express
+            // that narrowing, so lowering `int(2.5)` natively answered
+            // `Float(2.0)` where the interpreter and the AOT tier both answer
+            // `Int(2)`. Nor can the linear tier know what a *registered* host
+            // does — a frontend is free to override `int()` — so the only
+            // answer that is right for every host is the interpreter's.
+            // The integer case is only the identity while the operand round-trips
+            // through the `f64` that `awk_int` truncates in: at `2^53 + 1` the
+            // host answers `Int(9007199254740992)` and native code, which never
+            // leaves the integer register, answers `Int(9007199254740993)`. A
+            // runtime integer (`Cell::Dyn`) could be either, so it declines too.
             Op::AwkInt => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 stack.push(match a {
-                    Cell::Const(n) => Cell::Const(n),
-                    Cell::ConstF(f) => Cell::ConstF(f.trunc()),
-                    Cell::DynF => Cell::DynF,
-                    Cell::Dyn => Cell::Dyn,
+                    Cell::Const(n)
+                        if crate::awk_host::awk_int(&FuseValue::Int(n)) == FuseValue::Int(n) =>
+                    {
+                        Cell::Const(n)
+                    }
+                    _ => return None,
                 });
             }
             // awk mkbool(x): `1.0` if `x` is truthy (numeric != 0, including
             // NaN and infinities), else `0.0`. Pure compare + select, no libcall.
             Op::AwkMkbool => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 stack.push(match a {
                     Cell::Const(0) => Cell::ConstF(0.0),
                     Cell::Const(_) => Cell::ConstF(1.0),
@@ -1130,14 +1204,14 @@ mod cranelift_jit_impl {
                 });
             }
             Op::Inc => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 stack.push(match a {
                     Cell::Const(n) => Cell::Const(n.wrapping_add(1)),
                     _ => Cell::Dyn,
                 });
             }
             Op::Dec => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 stack.push(match a {
                     Cell::Const(n) => Cell::Const(n.wrapping_sub(1)),
                     _ => Cell::Dyn,
@@ -1152,14 +1226,14 @@ mod cranelift_jit_impl {
             }
             Op::Swap => {
                 let b = stack.pop()?;
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 stack.push(b);
                 stack.push(a);
             }
             Op::Rot => {
                 let c = stack.pop()?;
                 let b = stack.pop()?;
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 stack.push(b);
                 stack.push(c);
                 stack.push(a);
@@ -1172,7 +1246,16 @@ mod cranelift_jit_impl {
             | Op::NumGe
             | Op::Spaceship => {
                 let (a, b) = pop2_strict(stack)?;
-                stack.push(fold_cmp_cell(op, a, b));
+                let folded = fold_cmp_cell(op, a, b);
+                // `Op::Spaceship` answers `Int(-1|0|1)`; the six relational ops
+                // answer `Value::Bool` (`cmp_int_fast` in `vm.rs` pushes
+                // `Value::Bool` on every path). Both ride the same 0/1 integer
+                // register — only the boxing differs.
+                stack.push(if matches!(op, Op::Spaceship) {
+                    folded
+                } else {
+                    Cell::bool_from(folded)
+                });
             }
             Op::BitXor | Op::BitAnd | Op::BitOr | Op::Shl | Op::Shr => {
                 let (a, b) = pop2_strict(stack)?;
@@ -1192,7 +1275,7 @@ mod cranelift_jit_impl {
                 });
             }
             Op::BitNot => {
-                let a = stack.pop()?;
+                let a = pop_num(stack)?;
                 if a.is_float() {
                     return None;
                 }
@@ -1201,17 +1284,23 @@ mod cranelift_jit_impl {
                     _ => Cell::Dyn,
                 });
             }
+            // `Value::Bool(!is_truthy())` — a boolean result, and the one op
+            // that also *accepts* a boolean operand (negating a bool is still
+            // a bool, no numeric coercion involved).
             Op::LogNot => {
                 let a = stack.pop()?;
                 stack.push(match a {
-                    Cell::Const(n) => Cell::Const(if n != 0 { 0 } else { 1 }),
-                    Cell::ConstF(f) => Cell::Const(if f != 0.0 { 0 } else { 1 }),
-                    _ => Cell::Dyn,
+                    Cell::Const(n) => Cell::ConstB(n == 0),
+                    Cell::ConstF(f) => Cell::ConstB(f == 0.0),
+                    Cell::ConstB(b) => Cell::ConstB(!b),
+                    _ => Cell::DynB,
                 });
             }
             Op::GetSlot(_) => stack.push(Cell::Dyn),
+            // Slots are raw `i64`, so a boolean written to one would read back
+            // as `Value::Int` — the kind is lost across the store. Decline.
             Op::SetSlot(_) => {
-                stack.pop()?;
+                pop_num(stack)?;
             }
             Op::PreIncSlot(_) => stack.push(Cell::Dyn),
             Op::PreIncSlotVoid(_) => {}
@@ -2939,6 +3028,7 @@ mod cranelift_jit_impl {
         Some(CompiledLinear {
             backing: LinearBacking::Jit(module),
             run,
+            ret_is_bool: ret_cell.is_bool(),
         })
     }
 
@@ -3717,7 +3807,7 @@ mod cranelift_jit_impl {
         /// Map the blob's code into executable memory, apply relocations, and
         /// build a [`CompiledLinear`] that calls into it. `None` on any mapping,
         /// protection, or relocation-resolution failure.
-        pub(crate) fn load_native(blob: &NativeBlob) -> Option<CompiledLinear> {
+        pub(crate) fn load_native(blob: &NativeBlob, ret_is_bool: bool) -> Option<CompiledLinear> {
             if blob.kind != KIND_LINEAR {
                 return None;
             }
@@ -3741,6 +3831,7 @@ mod cranelift_jit_impl {
             Some(CompiledLinear {
                 backing: LinearBacking::Native(loaded),
                 run,
+                ret_is_bool,
             })
         }
 
@@ -4027,14 +4118,22 @@ mod cranelift_jit_impl {
         /// and persisting it first if absent. Returns `None` if the chunk cannot
         /// be natively cached (caller should fall back to the in-memory JIT).
         pub(crate) fn try_load_or_build(chunk: &Chunk, dir: &Path) -> Option<CompiledLinear> {
+            // The boolean-ness of the result is not in the blob: it is a
+            // property of the chunk, recovered by the same abstract simulation
+            // the in-memory path uses. Keeping it out of the file means the
+            // cache format is unchanged, and a blob can never disagree with
+            // the chunk it was keyed by.
+            let ret_is_bool = linear_result_cell(&chunk.ops, &chunk.constants)
+                .map(Cell::is_bool)
+                .unwrap_or(false);
             if let Some(blob) = read_blob(dir, "lin", chunk.op_hash, 0, 0) {
-                if let Some(compiled) = load_native(&blob) {
+                if let Some(compiled) = load_native(&blob, ret_is_bool) {
                     return Some(compiled);
                 }
             }
             let blob = compile_linear_native(chunk)?;
             write_blob(dir, "lin", chunk.op_hash, 0, &blob);
-            load_native(&blob)
+            load_native(&blob, ret_is_bool)
         }
 
         /// Block-tier equivalent of [`try_load_or_build`]. Keyed by `op_hash`.
