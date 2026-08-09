@@ -28,7 +28,7 @@ fn f(v: Value) -> f64 {
 
 fn arr(v: Value) -> Vec<Value> {
     match v {
-        Value::Array(a) => a,
+        Value::Array(a) => (*a).clone(),
         other => panic!("expected Array, got {:?}", other),
     }
 }

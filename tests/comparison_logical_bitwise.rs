@@ -219,7 +219,7 @@ fn streq_undef_equals_empty_string() {
 
 #[test]
 fn streq_array_space_joined() {
-    let arr = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let arr = Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
     assert!(b(two_val(arr, Value::str("1 2 3"), Op::StrEq)));
 }
 

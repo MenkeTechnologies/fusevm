@@ -539,7 +539,7 @@ fn exec_routes_unknown_command_through_host() {
 fn exec_flattens_array_args() {
     let mut b = ChunkBuilder::new();
     let cmd = b.add_constant(Value::str("myhostcmd"));
-    let arr = b.add_constant(Value::Array(vec![Value::str("a"), Value::str("b")]));
+    let arr = b.add_constant(Value::array(vec![Value::str("a"), Value::str("b")]));
     b.emit(Op::LoadConst(cmd), 1);
     b.emit(Op::LoadConst(arr), 1);
     b.emit(Op::Exec(2), 1);

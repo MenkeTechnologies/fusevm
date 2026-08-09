@@ -64,9 +64,9 @@ fn to_int_status_is_code() {
 
 #[test]
 fn to_int_array_is_length() {
-    assert_eq!(Value::Array(vec![]).to_int(), 0);
+    assert_eq!(Value::array(vec![]).to_int(), 0);
     assert_eq!(
-        Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]).to_int(),
+        Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]).to_int(),
         3
     );
 }
@@ -110,7 +110,7 @@ fn to_float_status_is_code() {
 #[test]
 fn to_float_undef_array_hash_are_zero() {
     assert_eq!(Value::Undef.to_float(), 0.0);
-    assert_eq!(Value::Array(vec![Value::Int(1)]).to_float(), 0.0);
+    assert_eq!(Value::array(vec![Value::Int(1)]).to_float(), 0.0);
     assert_eq!(Value::Hash(HashMap::new()).to_float(), 0.0);
 }
 
@@ -142,13 +142,13 @@ fn as_str_cow_undef_is_empty_string() {
 
 #[test]
 fn as_str_cow_array_joins_with_space() {
-    let v = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let v = Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
     assert_eq!(v.as_str_cow(), "1 2 3");
 }
 
 #[test]
 fn as_str_cow_empty_array_is_empty_string() {
-    let v = Value::Array(vec![]);
+    let v = Value::array(vec![]);
     assert_eq!(v.as_str_cow(), "");
 }
 
@@ -216,8 +216,8 @@ fn truthy_status_zero_only_is_true() {
 
 #[test]
 fn truthy_array_nonempty_true_empty_false() {
-    assert!(Value::Array(vec![Value::Int(0)]).is_truthy());
-    assert!(!Value::Array(vec![]).is_truthy());
+    assert!(Value::array(vec![Value::Int(0)]).is_truthy());
+    assert!(!Value::array(vec![]).is_truthy());
 }
 
 #[test]
@@ -252,8 +252,8 @@ fn len_string_is_byte_length() {
 
 #[test]
 fn len_array_is_element_count() {
-    assert_eq!(Value::Array(vec![]).len(), 0);
-    assert_eq!(Value::Array(vec![Value::Int(0); 5]).len(), 5);
+    assert_eq!(Value::array(vec![]).len(), 0);
+    assert_eq!(Value::array(vec![Value::Int(0); 5]).len(), 5);
 }
 
 #[test]
@@ -274,7 +274,7 @@ fn len_int_falls_back_to_decimal_length() {
 fn is_empty_consistent_with_len() {
     assert!(Value::str("").is_empty());
     assert!(!Value::str("x").is_empty());
-    assert!(Value::Array(vec![]).is_empty());
+    assert!(Value::array(vec![]).is_empty());
     assert!(Value::Hash(HashMap::new()).is_empty());
 }
 
@@ -308,8 +308,8 @@ fn hash_float_uses_to_bits_so_zero_and_negzero_differ() {
 fn hash_equal_arrays_produce_equal_hashes() {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    let a = Value::Array(vec![Value::Int(1), Value::Int(2)]);
-    let b = Value::Array(vec![Value::Int(1), Value::Int(2)]);
+    let a = Value::array(vec![Value::Int(1), Value::Int(2)]);
+    let b = Value::array(vec![Value::Int(1), Value::Int(2)]);
     let mut h1 = DefaultHasher::new();
     a.hash(&mut h1);
     let mut h2 = DefaultHasher::new();

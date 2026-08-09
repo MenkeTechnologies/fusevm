@@ -21,7 +21,7 @@ fn make_array_collects_n_values_from_stack() {
     b.emit(Op::MakeArray(3), 1);
     match run(b) {
         VMResult::Ok(Value::Array(v)) => {
-            assert_eq!(v, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+            assert_eq!(*v, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
         }
         other => panic!("got {:?}", other),
     }
@@ -178,7 +178,7 @@ fn hash_exists_true_then_false_after_delete() {
     b.emit(Op::MakeArray(2), 1);
     match run(b) {
         VMResult::Ok(Value::Array(v)) => {
-            assert_eq!(v, vec![Value::Bool(true), Value::Bool(false)]);
+            assert_eq!(*v, vec![Value::Bool(true), Value::Bool(false)]);
         }
         other => panic!("got {:?}", other),
     }
@@ -236,7 +236,7 @@ fn range_builds_inclusive_int_array() {
     match run(b) {
         VMResult::Ok(Value::Array(v)) => {
             assert_eq!(
-                v,
+                *v,
                 vec![Value::Int(2), Value::Int(3), Value::Int(4), Value::Int(5)]
             );
         }

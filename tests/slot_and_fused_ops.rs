@@ -394,7 +394,7 @@ fn push_int_range_loop_basic() {
     b.emit(Op::PushFrame, 1);
     b.emit(Op::LoadInt(0), 1);
     b.emit(Op::SetSlot(0), 1);
-    let empty = b.add_constant(Value::Array(vec![]));
+    let empty = b.add_constant(Value::array(vec![]));
     b.emit(Op::LoadConst(empty), 1);
     b.emit(Op::DeclareVar(0), 1);
     b.emit(Op::PushIntRangeLoop(0, 0, 5), 1);
@@ -415,7 +415,7 @@ fn push_int_range_loop_index_advances() {
     b.emit(Op::PushFrame, 1);
     b.emit(Op::LoadInt(0), 1);
     b.emit(Op::SetSlot(0), 1);
-    let empty = b.add_constant(Value::Array(vec![]));
+    let empty = b.add_constant(Value::array(vec![]));
     b.emit(Op::LoadConst(empty), 1);
     b.emit(Op::DeclareVar(0), 1);
     b.emit(Op::PushIntRangeLoop(0, 0, 3), 1);
@@ -445,7 +445,7 @@ fn push_int_range_loop_appends_to_existing() {
     b.emit(Op::PushFrame, 1);
     b.emit(Op::LoadInt(10), 1);
     b.emit(Op::SetSlot(0), 1);
-    let pre = b.add_constant(Value::Array(vec![Value::Int(7)]));
+    let pre = b.add_constant(Value::array(vec![Value::Int(7)]));
     b.emit(Op::LoadConst(pre), 1);
     b.emit(Op::DeclareVar(0), 1);
     b.emit(Op::PushIntRangeLoop(0, 0, 13), 1);

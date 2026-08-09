@@ -410,7 +410,7 @@ fn range_inclusive_produces_array() {
     let v = run_emit(vec![Op::LoadInt(1), Op::LoadInt(5), Op::Range]);
     assert_eq!(
         v,
-        Value::Array(vec![
+        Value::array(vec![
             Value::Int(1),
             Value::Int(2),
             Value::Int(3),
@@ -423,13 +423,13 @@ fn range_inclusive_produces_array() {
 #[test]
 fn range_empty_when_from_gt_to() {
     let v = run_emit(vec![Op::LoadInt(5), Op::LoadInt(1), Op::Range]);
-    assert_eq!(v, Value::Array(vec![]));
+    assert_eq!(v, Value::array(vec![]));
 }
 
 #[test]
 fn range_single_when_from_eq_to() {
     let v = run_emit(vec![Op::LoadInt(3), Op::LoadInt(3), Op::Range]);
-    assert_eq!(v, Value::Array(vec![Value::Int(3)]));
+    assert_eq!(v, Value::array(vec![Value::Int(3)]));
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn range_step_positive() {
     ]);
     assert_eq!(
         v,
-        Value::Array(vec![
+        Value::array(vec![
             Value::Int(0),
             Value::Int(3),
             Value::Int(6),
@@ -461,7 +461,7 @@ fn range_step_negative_descends() {
     ]);
     assert_eq!(
         v,
-        Value::Array(vec![
+        Value::array(vec![
             Value::Int(10),
             Value::Int(8),
             Value::Int(6),
@@ -480,7 +480,7 @@ fn range_step_zero_yields_empty() {
         Op::LoadInt(0),
         Op::RangeStep,
     ]);
-    assert_eq!(v, Value::Array(vec![]));
+    assert_eq!(v, Value::array(vec![]));
 }
 
 // ── MakeArray / MakeHash ───────────────────────────────────────────────
@@ -495,14 +495,14 @@ fn make_array_collects_n_values() {
     ]);
     assert_eq!(
         v,
-        Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
     );
 }
 
 #[test]
 fn make_array_zero_yields_empty() {
     let v = run_emit(vec![Op::MakeArray(0)]);
-    assert_eq!(v, Value::Array(vec![]));
+    assert_eq!(v, Value::array(vec![]));
 }
 
 #[test]

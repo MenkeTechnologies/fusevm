@@ -26,8 +26,25 @@ pub enum Value {
     Float(f64),
     /// Heap-allocated string (Arc for cheap clone in closures)
     Str(Arc<String>),
-    /// Ordered array of values
-    Array(Vec<Value>),
+    /// Ordered array of values.
+    ///
+    /// The payload is `Arc<Vec<Value>>` so cloning a `Value` — which the VM
+    /// does on every stack push, slot read, and global read — is a refcount
+    /// bump instead of a deep copy of the whole sequence. With a bare `Vec`
+    /// any per-element loop that re-loads the container (`seq[i]` lowered as
+    /// "load the collection, then index it") was O(n) per iteration and so
+    /// O(n²) overall.
+    ///
+    /// Semantics are unchanged: arrays are still **values**, not references.
+    /// Every mutation site goes through [`Value::array_mut`] /
+    /// `Arc::make_mut`, which copies when the buffer is shared, so a clone
+    /// taken before a mutation never observes that mutation. Copy-on-write is
+    /// observationally identical to the previous eager deep clone; it just
+    /// defers the copy to the writes, which are rare, from the reads, which
+    /// are the hot path.
+    ///
+    /// Construct with [`Value::array`] rather than the variant directly.
+    Array(Arc<Vec<Value>>),
     /// Key-value associative array
     Hash(HashMap<String, Value>),
     /// Exit status code (shell-specific but universal enough)
@@ -68,9 +85,43 @@ impl Value {
         Value::Bool(b)
     }
 
-    /// Construct an array `Value::Array(v)`.
+    /// Construct an array `Value::Array(v)`. The payload is wrapped in `Arc`
+    /// so subsequent clones of the `Value` are refcount bumps.
     pub fn array(v: Vec<Value>) -> Self {
-        Value::Array(v)
+        Value::Array(Arc::new(v))
+    }
+
+    /// Borrow the elements of a `Value::Array`, or `None` for any other
+    /// variant. Read-only; never copies.
+    pub fn as_array(&self) -> Option<&Vec<Value>> {
+        match self {
+            Value::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the elements of a `Value::Array`, copying the buffer
+    /// first if it is shared with another `Value` (copy-on-write). Returns
+    /// `None` for any other variant.
+    ///
+    /// This is the only sanctioned way to mutate an array in place. Going
+    /// around it — e.g. `Arc::get_mut` — would let a mutation become visible
+    /// through a clone taken earlier and break the value semantics every
+    /// frontend relies on.
+    pub fn array_mut(&mut self) -> Option<&mut Vec<Value>> {
+        match self {
+            Value::Array(a) => Some(Arc::make_mut(a)),
+            _ => None,
+        }
+    }
+
+    /// Take the elements of a `Value::Array` by value, avoiding the copy when
+    /// this is the only owner of the buffer. `None` for any other variant.
+    pub fn into_array(self) -> Option<Vec<Value>> {
+        match self {
+            Value::Array(a) => Some(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
+            _ => None,
+        }
     }
 
     /// Construct a hash `Value::Hash(m)`.
@@ -233,8 +284,8 @@ mod tests {
 
     #[test]
     fn truthiness_for_collections() {
-        assert!(!Value::Array(vec![]).is_truthy());
-        assert!(Value::Array(vec![Value::Undef]).is_truthy()); // non-empty array
+        assert!(!Value::array(vec![]).is_truthy());
+        assert!(Value::array(vec![Value::Undef]).is_truthy()); // non-empty array
         assert!(!Value::Hash(HashMap::new()).is_truthy());
     }
 
@@ -249,7 +300,7 @@ mod tests {
         assert_eq!(Value::Status(42).to_int(), 42);
         assert_eq!(Value::Status(-1).to_int(), -1);
         assert_eq!(Value::str("not a number").to_int(), 0);
-        assert_eq!(Value::Array(vec![Value::Int(1), Value::Int(2)]).to_int(), 2);
+        assert_eq!(Value::array(vec![Value::Int(1), Value::Int(2)]).to_int(), 2);
     }
 
     #[test]
@@ -282,14 +333,14 @@ mod tests {
 
     #[test]
     fn array_to_str_joins_with_space() {
-        let v = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let v = Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
         assert_eq!(v.to_str(), "1 2 3");
     }
 
     #[test]
     fn len_returns_correct_size_per_variant() {
         assert_eq!(Value::str("abc").len(), 3);
-        assert_eq!(Value::Array(vec![Value::Int(1); 5]).len(), 5);
+        assert_eq!(Value::array(vec![Value::Int(1); 5]).len(), 5);
         assert_eq!(Value::Hash(HashMap::new()).len(), 0);
         // Int falls through to to_str().len()
         assert_eq!(Value::Int(12345).len(), 5);
@@ -299,8 +350,8 @@ mod tests {
     fn is_empty_matches_len_zero() {
         assert!(Value::str("").is_empty());
         assert!(!Value::str("x").is_empty());
-        assert!(Value::Array(vec![]).is_empty());
-        assert!(!Value::Array(vec![Value::Int(0)]).is_empty());
+        assert!(Value::array(vec![]).is_empty());
+        assert!(!Value::array(vec![Value::Int(0)]).is_empty());
     }
 
     #[test]
@@ -369,8 +420,8 @@ mod tests {
 
     #[test]
     fn nested_array_to_str_recurses() {
-        let inner = Value::Array(vec![Value::Int(1), Value::Int(2)]);
-        let outer = Value::Array(vec![inner, Value::Int(3)]);
+        let inner = Value::array(vec![Value::Int(1), Value::Int(2)]);
+        let outer = Value::array(vec![inner, Value::Int(3)]);
         // Inner array stringifies to "1 2", then outer joins with space.
         assert_eq!(outer.to_str(), "1 2 3");
     }
@@ -390,7 +441,7 @@ mod tests {
     #[test]
     fn to_float_unhandled_variants_return_zero() {
         assert_eq!(Value::Undef.to_float(), 0.0);
-        assert_eq!(Value::Array(vec![Value::Int(1)]).to_float(), 0.0);
+        assert_eq!(Value::array(vec![Value::Int(1)]).to_float(), 0.0);
         assert_eq!(Value::Bool(false).to_float(), 0.0);
     }
 

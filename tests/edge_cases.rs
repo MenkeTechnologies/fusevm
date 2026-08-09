@@ -220,8 +220,8 @@ fn empty_string_is_falsy() {
 
 #[test]
 fn empty_array_is_falsy() {
-    assert!(!Value::Array(vec![]).is_truthy());
-    assert!(Value::Array(vec![Value::Int(0)]).is_truthy());
+    assert!(!Value::array(vec![]).is_truthy());
+    assert!(Value::array(vec![Value::Int(0)]).is_truthy());
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn string_to_int_parses_or_zero() {
 
 #[test]
 fn array_to_int_returns_length() {
-    let arr = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let arr = Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
     assert_eq!(arr.to_int(), 3);
 }
 

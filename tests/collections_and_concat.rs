@@ -318,7 +318,7 @@ fn hashkeys_returns_array_of_string_keys() {
     match v {
         Value::Array(items) => {
             assert_eq!(items.len(), 3);
-            let mut got: Vec<String> = items.into_iter().map(|v| v.to_str()).collect();
+            let mut got: Vec<String> = items.iter().map(|v| v.to_str()).collect();
             got.sort();
             assert_eq!(got, vec!["a", "b", "c"]);
         }
@@ -355,7 +355,7 @@ fn range_inclusive_ascending() {
     let v = run(b);
     match v {
         Value::Array(arr) => {
-            let vals: Vec<i64> = arr.into_iter().map(|v| v.to_int()).collect();
+            let vals: Vec<i64> = arr.iter().map(|v| v.to_int()).collect();
             assert_eq!(vals, vec![1, 2, 3, 4, 5]);
         }
         other => panic!("expected Array, got {:?}", other),
@@ -392,7 +392,7 @@ fn rangestep_positive_step() {
     let v = run(b);
     match v {
         Value::Array(arr) => {
-            let vals: Vec<i64> = arr.into_iter().map(|v| v.to_int()).collect();
+            let vals: Vec<i64> = arr.iter().map(|v| v.to_int()).collect();
             assert_eq!(vals, vec![0, 2, 4, 6, 8, 10]);
         }
         other => panic!("expected Array, got {:?}", other),
@@ -409,7 +409,7 @@ fn rangestep_negative_step_descends() {
     let v = run(b);
     match v {
         Value::Array(arr) => {
-            let vals: Vec<i64> = arr.into_iter().map(|v| v.to_int()).collect();
+            let vals: Vec<i64> = arr.iter().map(|v| v.to_int()).collect();
             assert_eq!(vals, vec![10, 7, 4, 1]);
         }
         other => panic!("expected Array, got {:?}", other),
@@ -437,7 +437,7 @@ fn rangestep_step_overshoots_endpoint() {
     let v = run(b);
     match v {
         Value::Array(arr) => {
-            let vals: Vec<i64> = arr.into_iter().map(|v| v.to_int()).collect();
+            let vals: Vec<i64> = arr.iter().map(|v| v.to_int()).collect();
             assert_eq!(vals, vec![0, 7]);
         }
         other => panic!("expected Array, got {:?}", other),
@@ -482,7 +482,7 @@ fn concat_with_undef_yields_empty_for_undef_side() {
 #[test]
 fn concat_array_renders_space_joined() {
     let mut b = ChunkBuilder::new();
-    let a = b.add_constant(Value::Array(vec![Value::Int(1), Value::Int(2)]));
+    let a = b.add_constant(Value::array(vec![Value::Int(1), Value::Int(2)]));
     b.emit(Op::LoadConst(a), 1);
     let suf = b.add_constant(Value::str("!"));
     b.emit(Op::LoadConst(suf), 1);

@@ -1966,24 +1966,35 @@ impl VM {
             }
             Op::SlotArrayGet(slot) => {
                 let index = self.pop().to_int() as usize;
-                let val = self.get_slot(*slot);
-                let result = if let Value::Array(ref arr) = val {
-                    arr.get(index).cloned().unwrap_or(Value::Undef)
-                } else {
-                    Value::Undef
-                };
+                // Borrow the slot in place. Pulling the whole `Value` out via
+                // `get_slot` just to read one element is what made indexed
+                // iteration over a frame-local array quadratic.
+                let result = self
+                    .frames
+                    .last()
+                    .and_then(|f| f.slots.get(*slot as usize))
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.get(index))
+                    .cloned()
+                    .unwrap_or(Value::Undef);
                 self.push(result);
             }
             Op::SlotArraySet(slot) => {
                 let index = self.pop().to_int() as usize;
                 let val = self.pop();
-                let arr_val = self.get_slot(*slot);
-                if let Value::Array(mut arr) = arr_val {
+                // Mutate the slot's array in place. Reading it out and writing
+                // it back would leave the buffer shared at the moment of the
+                // write, forcing a copy-on-write copy on every single store.
+                if let Some(arr) = self
+                    .frames
+                    .last_mut()
+                    .and_then(|f| f.slots.get_mut(*slot as usize))
+                    .and_then(|v| v.array_mut())
+                {
                     if index >= arr.len() {
                         arr.resize(index + 1, Value::Undef);
                     }
                     arr[index] = val;
-                    self.set_slot(*slot, Value::Array(arr));
                 }
             }
 
@@ -2545,7 +2556,7 @@ impl VM {
                 self.set_var(*idx, val);
             }
             Op::DeclareArray(idx) => {
-                self.set_var(*idx, Value::Array(Vec::new()));
+                self.set_var(*idx, Value::array(Vec::new()));
             }
             Op::ArrayGet(arr_idx) => {
                 let index = self.pop().to_int() as usize;
@@ -2568,7 +2579,7 @@ impl VM {
                 if idx >= self.globals.len() {
                     self.globals.resize(idx + 1, Value::Undef);
                 }
-                if let Value::Array(ref mut vec) = self.globals[idx] {
+                if let Some(vec) = self.globals[idx].array_mut() {
                     if index >= vec.len() {
                         vec.resize(index + 1, Value::Undef);
                     }
@@ -2581,14 +2592,14 @@ impl VM {
                 if idx >= self.globals.len() {
                     self.globals.resize(idx + 1, Value::Undef);
                 }
-                if let Value::Array(ref mut vec) = self.globals[idx] {
+                if let Some(vec) = self.globals[idx].array_mut() {
                     vec.push(val);
                 }
             }
             Op::ArrayPop(arr_idx) => {
                 let idx = *arr_idx as usize;
                 let val = if idx < self.globals.len() {
-                    if let Value::Array(ref mut vec) = self.globals[idx] {
+                    if let Some(vec) = self.globals[idx].array_mut() {
                         vec.pop().unwrap_or(Value::Undef)
                     } else {
                         Value::Undef
@@ -2601,7 +2612,7 @@ impl VM {
             Op::ArrayShift(arr_idx) => {
                 let idx = *arr_idx as usize;
                 let val = if idx < self.globals.len() {
-                    if let Value::Array(ref mut vec) = self.globals[idx] {
+                    if let Some(vec) = self.globals[idx].array_mut() {
                         if vec.is_empty() {
                             Value::Undef
                         } else {
@@ -2632,7 +2643,7 @@ impl VM {
                 let n = *n;
                 let start = self.stack.len().saturating_sub(n as usize);
                 let elements: Vec<Value> = self.stack.drain(start..).collect();
-                self.push(Value::Array(elements));
+                self.push(Value::array(elements));
             }
 
             // ── Hashes ──
@@ -2716,7 +2727,7 @@ impl VM {
                 } else {
                     Vec::new()
                 };
-                self.push(Value::Array(arr));
+                self.push(Value::array(arr));
             }
             Op::HashValues(hash_idx) => {
                 let idx = *hash_idx as usize;
@@ -2731,7 +2742,7 @@ impl VM {
                 } else {
                     Vec::new()
                 };
-                self.push(Value::Array(arr));
+                self.push(Value::array(arr));
             }
             Op::MakeHash(n) => {
                 let n = *n;
@@ -2754,7 +2765,7 @@ impl VM {
                 let cap = (to - from + 1).max(0) as usize;
                 let mut arr = Vec::with_capacity(cap);
                 arr.extend((from..=to).map(Value::Int));
-                self.push(Value::Array(arr));
+                self.push(Value::array(arr));
             }
             Op::RangeStep => {
                 let step = self.pop().to_int();
@@ -2781,7 +2792,7 @@ impl VM {
                         i += step;
                     }
                 }
-                self.push(Value::Array(arr));
+                self.push(Value::array(arr));
             }
 
             // ── Shell ops ──
@@ -2881,9 +2892,7 @@ impl VM {
                     .stack
                     .drain(start..)
                     .flat_map(|v| match v {
-                        Value::Array(items) => {
-                            items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
-                        }
+                        Value::Array(items) => items.iter().map(|i| i.to_str()).collect::<Vec<_>>(),
                         other => vec![other.to_str()],
                     })
                     .collect();
@@ -2965,9 +2974,7 @@ impl VM {
                     .stack
                     .drain(start..)
                     .flat_map(|v| match v {
-                        Value::Array(items) => {
-                            items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
-                        }
+                        Value::Array(items) => items.iter().map(|i| i.to_str()).collect::<Vec<_>>(),
                         other => vec![other.to_str()],
                     })
                     .collect();
@@ -3121,7 +3128,7 @@ impl VM {
                         .collect()
                 };
                 let arr: Vec<Value> = matches.into_iter().map(Value::str).collect();
-                self.push(Value::Array(arr));
+                self.push(Value::array(arr));
             }
             Op::TrapSet(idx) => {
                 // stack: [signal_name]
@@ -3156,7 +3163,7 @@ impl VM {
                     vec![s]
                 };
                 let arr: Vec<Value> = result.into_iter().map(Value::str).collect();
-                self.push(Value::Array(arr));
+                self.push(Value::array(arr));
             }
             Op::WordSplit => {
                 let s = self.pop().to_str();
@@ -3166,7 +3173,7 @@ impl VM {
                     s.split_whitespace().map(|w| w.to_string()).collect()
                 };
                 let arr: Vec<Value> = result.into_iter().map(Value::str).collect();
-                self.push(Value::Array(arr));
+                self.push(Value::array(arr));
             }
             Op::ExpandParam(modifier) => {
                 // Stack layout per modifier:
@@ -3247,9 +3254,7 @@ impl VM {
                     .stack
                     .drain(start..)
                     .flat_map(|v| match v {
-                        Value::Array(items) => {
-                            items.into_iter().map(|i| i.to_str()).collect::<Vec<_>>()
-                        }
+                        Value::Array(items) => items.iter().map(|i| i.to_str()).collect::<Vec<_>>(),
                         other => vec![other.to_str()],
                     })
                     .collect();
@@ -3344,18 +3349,24 @@ impl VM {
             Op::PushIntRangeLoop(arr_idx, i_slot, limit) => {
                 let mut i = self.get_slot(*i_slot).to_int();
                 let lim = *limit as i64;
-                let arr = self.get_var(*arr_idx);
-                let mut vec = if let Value::Array(v) = arr {
-                    v
-                } else {
-                    Vec::new()
-                };
+                let idx = *arr_idx as usize;
+                if idx >= self.globals.len() {
+                    self.globals.resize(idx + 1, Value::Undef);
+                }
+                // A non-array (or never-declared) global starts a fresh array,
+                // matching the previous read-modify-write. Appending in place
+                // keeps the buffer unshared so no copy-on-write copy fires.
+                if self.globals[idx].as_array().is_none() {
+                    self.globals[idx] = Value::array(Vec::new());
+                }
+                let vec = self.globals[idx]
+                    .array_mut()
+                    .expect("globals[idx] was just made an array");
                 vec.reserve((lim - i).max(0) as usize);
                 while i < lim {
                     vec.push(Value::Int(i));
                     i += 1;
                 }
-                self.set_var(*arr_idx, Value::Array(vec));
                 self.set_slot(*i_slot, Value::Int(i));
             }
 

@@ -271,7 +271,7 @@ fn as_str_cow_returns_owned_for_status() {
 
 #[test]
 fn as_str_cow_array_joins_with_spaces() {
-    let v = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let v = Value::array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
     assert_eq!(v.as_str_cow(), "1 2 3");
 }
 
@@ -303,7 +303,7 @@ fn len_str_returns_byte_length() {
 
 #[test]
 fn len_array_returns_element_count() {
-    assert_eq!(Value::Array(vec![Value::Int(1); 5]).len(), 5);
+    assert_eq!(Value::array(vec![Value::Int(1); 5]).len(), 5);
 }
 
 #[test]
@@ -329,7 +329,7 @@ fn len_undef_is_zero() {
 #[test]
 fn is_empty_for_empty_str_and_empty_collections() {
     assert!(Value::str("").is_empty());
-    assert!(Value::Array(vec![]).is_empty());
+    assert!(Value::array(vec![]).is_empty());
     assert!(Value::Hash(HashMap::new()).is_empty());
 }
 
@@ -371,9 +371,9 @@ fn hash_float_uses_to_bits_so_neg_zero_not_equal_to_pos_zero() {
 
 #[test]
 fn hash_array_recursively_hashes_elements() {
-    let a = Value::Array(vec![Value::Int(1), Value::Int(2)]);
-    let b = Value::Array(vec![Value::Int(1), Value::Int(2)]);
-    let c = Value::Array(vec![Value::Int(1), Value::Int(3)]);
+    let a = Value::array(vec![Value::Int(1), Value::Int(2)]);
+    let b = Value::array(vec![Value::Int(1), Value::Int(2)]);
+    let c = Value::array(vec![Value::Int(1), Value::Int(3)]);
     assert_eq!(hash_of(&a), hash_of(&b));
     assert_ne!(hash_of(&a), hash_of(&c));
 }

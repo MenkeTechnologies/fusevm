@@ -517,7 +517,7 @@ runtime.
 | `Float(f64)` | Inline | 8 bytes |
 | `Bool(bool)` | Inline | 1 byte |
 | `Str(Arc<String>)` | Heap | pointer |
-| `Array(Vec<Value>)` | Heap, in-place mutation | 3 words |
+| `Array(Arc<Vec<Value>>)` | Heap, shared buffer + copy-on-write | pointer |
 | `Hash(HashMap<String, Value>)` | Heap, in-place mutation | 7 words |
 | `Status(i32)` | Inline | 4 bytes |
 | `Ref(Box<Value>)` | Heap | pointer |
@@ -525,7 +525,17 @@ runtime.
 
 String coercion returns `Cow<str>` via `as_str_cow()` — borrows the inner `Arc<String>` for `Str` variants, avoiding allocation on string comparisons, concatenation, hash key lookup, and I/O.
 
-Array and hash mutations (`ArrayPush`, `ArrayPop`, `ArrayShift`, `ArraySet`, `HashSet`, `HashDelete`) operate in-place on globals — no clone-modify-writeback cycle. Read-only access (`ArrayGet`, `ArrayLen`, `HashGet`, `HashExists`, `HashKeys`, `HashValues`) borrows directly from the globals vector.
+### Arrays are shared on read, copied on write
+
+`Array` holds an `Arc<Vec<Value>>`, so cloning a `Value` — which happens on every stack push, slot read, and global read — is a refcount bump, not a copy of the sequence. Arrays remain **values**, not references: every mutation goes through `Value::array_mut` (`Arc::make_mut`), which copies the buffer first when another `Value` still holds it, so a copy taken before a write never observes that write.
+
+Construct arrays with `Value::array(vec)`; read with `as_array()`, mutate with `array_mut()`, and take ownership with `into_array()` (which skips the copy when it is the sole owner).
+
+This is what keeps per-element iteration linear. A frontend that lowers `seq[i]` as "load the collection, then index it" used to pay one full copy of the sequence per iteration — O(n) per step, O(n²) overall. Measured on a 16,000-element indexed read loop, the interpreter went from 1.5330 s to 0.0016 s, and the growth from ~4x per doubling to ~2x.
+
+The serde encoding is unaffected: serde's `rc` feature encodes `Arc<T>` exactly as `T`, so the bincode/JSON bytes for a `Value` — and therefore for a `Chunk` in a frontend's on-disk bytecode cache — are unchanged. `tests/array_hash_ops.rs` pins those bytes.
+
+Array and hash mutations (`ArrayPush`, `ArrayPop`, `ArrayShift`, `ArraySet`, `SlotArraySet`, `HashSet`, `HashDelete`) operate in place — no clone-modify-writeback cycle. Read-only access (`ArrayGet`, `SlotArrayGet`, `ArrayLen`, `HashGet`, `HashExists`, `HashKeys`, `HashValues`) borrows directly from the globals vector or the frame's slots.
 
 ---
 
