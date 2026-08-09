@@ -471,25 +471,89 @@ fn strict_mode_div_and_pow_delegate_only_non_numbers() {
     );
 }
 
-/// The hook is for integer overflow and non-numbers only: mixed int/float and
-/// float/float arithmetic is exact in `f64` and must stay on the fast path, even
-/// with a hook installed and the JIT warm. A hook that panics proves it is never
-/// consulted for float operands.
+/// Arithmetic that is *exact* in `f64` must stay on the fast path, even with a
+/// hook installed and the JIT warm. A hook that panics proves it is never
+/// consulted.
+///
+/// "Exact" is the load-bearing word, and it is narrower than "has a float
+/// operand". Float/float is exact by construction, and int/float is exact only
+/// while the integer is one an `f64` can hold — `|x| <= 2^53`. Past that the
+/// conversion rounds and the native answer is about a neighbouring value, which
+/// is what `strict_mode_delegates_arithmetic_f64_cannot_represent` below pins.
+///
+/// This test previously used `Value::Int(i64::MAX)` as the "mixed path" operand
+/// and asserted the result was `i64::MAX as f64 + 2.0`. That is the worst case
+/// rather than a safe one: `i64::MAX as f64` is `2^63`, one more than
+/// `i64::MAX`, so the assertion pinned an answer computed on a value the
+/// program never had. The operands here are exact ones, so the intent — no
+/// delegation, warm JIT, native answer — is now tested with an example that
+/// actually satisfies its own premise.
 #[test]
 fn strict_mode_never_delegates_exact_float_arithmetic() {
     let hook: fusevm::NumericHook =
-        Arc::new(|op, a, b| panic!("float arithmetic delegated: {op:?} {a:?} {b:?}"));
+        Arc::new(|op, a, b| panic!("exact float arithmetic delegated: {op:?} {a:?} {b:?}"));
 
+    // The largest integer f64 holds exactly, so the mixed path is lossless.
+    let exact_int = 1i64 << 53;
     for i in 1..=25 {
-        // i64::MAX as a float can't overflow f64, and one operand is a float, so
-        // this is the mixed path — never the checked-int path.
+        let v = run(
+            binop_chunk(Value::Int(exact_int), Value::Float(2.0), Op::Add),
+            Some(hook.clone()),
+        )
+        .expect("mixed float add stays native");
+        assert_eq!(v, Value::Float(exact_int as f64 + 2.0), "run {i}");
+    }
+
+    // Float/float never rounds an operand, at any magnitude.
+    for i in 1..=25 {
+        let v = run(
+            binop_chunk(Value::Float(1e300), Value::Float(2.0), Op::Add),
+            Some(hook.clone()),
+        )
+        .expect("float/float add stays native");
+        assert_eq!(v, Value::Float(1e300 + 2.0), "run {i}");
+    }
+}
+
+/// The other direction: arithmetic an `f64` *cannot* represent must reach the
+/// host, on every run and not merely before the JIT warms up.
+///
+/// `i64::MAX` is the case the test above used to assert natively. Converting it
+/// to `f64` yields `2^63` — a different integer — so a sum computed from that
+/// conversion answers about a value the program never held. Only the host can
+/// represent the operand exactly, so only the host can decide.
+///
+/// The loop runs past the block-JIT warmup threshold deliberately: the native
+/// tiers lower a mixed int/float pair with `fcvt_from_sint`, which rounds the
+/// same way, so a tier that compiled this op would answer natively from the
+/// second run on while the first run still reached the host.
+#[test]
+fn strict_mode_delegates_arithmetic_f64_cannot_represent() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let hook: fusevm::NumericHook = Arc::new(move |_op, _a, _b| {
+        c.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::str("BIGNUM".to_string()))
+    });
+
+    let runs = 25;
+    for i in 1..=runs {
         let v = run(
             binop_chunk(Value::Int(i64::MAX), Value::Float(2.0), Op::Add),
             Some(hook.clone()),
         )
-        .expect("mixed float add stays native");
-        assert_eq!(v, Value::Float(i64::MAX as f64 + 2.0), "run {i}");
+        .expect("delegated op returns the host value");
+        assert_eq!(
+            v,
+            Value::str("BIGNUM".to_string()),
+            "run {i}: answered without the host"
+        );
     }
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        runs,
+        "the host must be consulted on every run, not only before the JIT warmed"
+    );
 }
 
 /// Build a strict-mode accumulator loop, the shape a compiled frontend emits for
