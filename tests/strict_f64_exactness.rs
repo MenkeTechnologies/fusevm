@@ -358,3 +358,197 @@ fn without_a_hook_the_answer_is_the_f64_one_it_always_was() {
         "the coercing policy must keep computing in f64"
     );
 }
+// ── 6. the AOT tier must not answer past the interpreter either ─────────────
+//
+// The closed-world compiler has the same promotion point as the block JIT
+// (`load_f64` → `fcvt_from_sint`) and it is reached on a different path, so the
+// interpreter and JIT fixes do not cover it. It also cannot consult
+// `jit::strict_numeric()`: `run_chunk_native` calls `build_entry` *before*
+// `VM::new`, so no hook is installed at codegen time. The build-time channel is
+// `Chunk::int_overflow_deopt`, the frontend's declaration that a `NumericHook`
+// is installed — these pin that AOT honours it, and that a chunk without it
+// (awk/shell) keeps every bit of its native code.
+
+#[cfg(feature = "aot")]
+mod aot_tier {
+    use super::*;
+
+    /// `<a> <b> <op>` as constants, with the numeric policy declared by `strict`.
+    fn const_chunk(op: Op, a: Value, b: Value, strict: bool) -> fusevm::Chunk {
+        let mut c = ChunkBuilder::new();
+        c.set_int_overflow_deopt(strict);
+        for v in [&a, &b] {
+            match v {
+                Value::Int(i) => c.emit(Op::LoadInt(*i), 1),
+                Value::Float(f) => c.emit(Op::LoadFloat(*f), 1),
+                other => panic!("unsupported operand {other:?}"),
+            };
+        }
+        c.emit(op, 1);
+        c.build()
+    }
+
+    /// `<a> <b> <cmp>` with the Bool *consumed* by a branch, so the chunk's
+    /// result is an `Int` and it stays on the native path. A comparison left as
+    /// the program result falls back to threaded wholesale (a non-numeric final
+    /// result), which runs the interpreter and would hide the defect.
+    fn cmp_branch_chunk(op: Op, a: Value, b: Value, strict: bool) -> fusevm::Chunk {
+        let mut c = ChunkBuilder::new();
+        c.set_int_overflow_deopt(strict);
+        for v in [&a, &b] {
+            match v {
+                Value::Int(i) => c.emit(Op::LoadInt(*i), 1),
+                Value::Float(f) => c.emit(Op::LoadFloat(*f), 1),
+                other => panic!("unsupported operand {other:?}"),
+            };
+        }
+        c.emit(op, 1);
+        let j = c.emit(Op::JumpIfFalse(0), 1);
+        c.emit(Op::LoadInt(TRUE_BRANCH), 1);
+        let e = c.emit(Op::Jump(0), 1);
+        let lfalse = c.current_pos();
+        c.emit(Op::LoadInt(FALSE_BRANCH), 1);
+        let end = c.current_pos();
+        c.patch_jump(j, lfalse);
+        c.patch_jump(e, end);
+        c.build()
+    }
+
+    const TRUE_BRANCH: i64 = 111;
+    const FALSE_BRANCH: i64 = 222;
+
+    /// AOT-compile and run `chunk` against the exact host; return the result and
+    /// everything the host was handed.
+    fn run_aot(chunk: &fusevm::Chunk) -> (Value, Vec<(NumOp, Value, Value)>) {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let hook = exact_host(&log);
+        let out = fusevm::aot::run_chunk_native(chunk, move |vm: &mut VM| {
+            vm.set_numeric_hook(hook);
+        })
+        .expect("aot compile+run");
+        let v = match out {
+            VMResult::Ok(v) => v,
+            VMResult::Halted => Value::Undef,
+            VMResult::Error(e) => panic!("vm error: {e}"),
+        };
+        let seen = log.lock().expect("log").clone();
+        (v, seen)
+    }
+
+    /// The same chunk run by the plain interpreter — the answer AOT must match.
+    fn run_interp(chunk: &fusevm::Chunk) -> Value {
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let mut vm = VM::new(chunk.clone());
+        vm.set_numeric_hook(exact_host(&log));
+        match vm.run() {
+            VMResult::Ok(v) => v,
+            VMResult::Halted => vm.stack.last().cloned().unwrap_or(Value::Undef),
+            VMResult::Error(e) => panic!("vm error: {e}"),
+        }
+    }
+
+    #[test]
+    fn aot_arithmetic_cannot_outvote_the_host() {
+        // Measured before the fix: `host_calls=0` and
+        // `Float(1.667718169966657e16)` — native code computed the sum from a
+        // rounded operand and the host never saw it.
+        for (op, label) in [(Op::Add, "Add"), (Op::Sub, "Sub"), (Op::Mul, "Mul")] {
+            let chunk = const_chunk(op.clone(), Value::Int(P34), Value::Float(2.0), true);
+            let (out, seen) = run_aot(&chunk);
+            assert_eq!(
+                seen.len(),
+                1,
+                "{label}: AOT must hand a rounding mixed pair to the host, got {seen:?} \
+                 with result {out:?}"
+            );
+            assert_eq!(
+                out,
+                Value::str("HOST"),
+                "{label}: the native tier answered instead of the host"
+            );
+            assert_eq!(
+                out,
+                run_interp(&chunk),
+                "{label}: AOT diverged from the interpreter"
+            );
+        }
+    }
+
+    #[test]
+    fn aot_comparison_cannot_outvote_the_host() {
+        // `P34 == P34_F` is `false` exactly and `true` once the integer is
+        // rounded, so the branch taken is the whole observation. Measured
+        // before the fix: `NumEq` → `Int(111)`, the *true* branch.
+        for (op, label, exact) in [
+            (Op::NumEq, "NumEq", FALSE_BRANCH),
+            (Op::NumNe, "NumNe", TRUE_BRANCH),
+            (Op::NumLt, "NumLt", FALSE_BRANCH),
+            (Op::NumGt, "NumGt", TRUE_BRANCH),
+            (Op::NumLe, "NumLe", FALSE_BRANCH),
+            (Op::NumGe, "NumGe", TRUE_BRANCH),
+        ] {
+            let chunk = cmp_branch_chunk(op.clone(), Value::Int(P34), Value::Float(P34_F), true);
+            let (out, seen) = run_aot(&chunk);
+            assert_eq!(
+                seen.len(),
+                1,
+                "{label}: AOT must delegate a rounding comparison, got {seen:?}"
+            );
+            assert_eq!(
+                out,
+                Value::Int(exact),
+                "{label}: AOT took the branch the *rounded* comparison chooses"
+            );
+            assert_eq!(
+                out,
+                run_interp(&chunk),
+                "{label}: AOT diverged from the interpreter"
+            );
+        }
+    }
+
+    #[test]
+    fn aot_keeps_native_code_for_pairs_that_do_not_round() {
+        // The decline is on compile-time kinds, so everything exact still
+        // compiles: two ints, two floats, and a mixed pair inside 2^53.
+        for (a, b, want) in [
+            (Value::Int(2), Value::Int(3), Value::Int(5)),
+            (Value::Float(1.5), Value::Float(2.5), Value::Float(4.0)),
+            (Value::Int(3), Value::Float(2.5), Value::Float(5.5)),
+        ] {
+            let chunk = const_chunk(Op::Add, a.clone(), b.clone(), true);
+            let (out, seen) = run_aot(&chunk);
+            assert!(
+                seen.is_empty(),
+                "{a:?}+{b:?} is exact in f64 and must stay native, but delegated {seen:?}"
+            );
+            assert_eq!(out, want, "{a:?}+{b:?}");
+        }
+    }
+
+    #[test]
+    fn aot_coercing_policy_is_untouched() {
+        // No `int_overflow_deopt` ⇒ awk/shell, where computing in f64 *is* the
+        // semantics. Same native code, same answer, no host call — this is the
+        // other direction of the gate, and it must not move.
+        let chunk = const_chunk(Op::Add, Value::Int(P34), Value::Float(2.0), false);
+        let (out, seen) = run_aot(&chunk);
+        assert!(
+            seen.is_empty(),
+            "the coercing policy must never delegate: {seen:?}"
+        );
+        assert_eq!(out, Value::Float(P34 as f64 + 2.0));
+
+        let chunk = cmp_branch_chunk(Op::NumEq, Value::Int(P34), Value::Float(P34_F), false);
+        let (out, seen) = run_aot(&chunk);
+        assert!(
+            seen.is_empty(),
+            "the coercing policy must never delegate: {seen:?}"
+        );
+        assert_eq!(
+            out,
+            Value::Int(TRUE_BRANCH),
+            "in f64 these *are* the same number; awk must keep answering so"
+        );
+    }
+}

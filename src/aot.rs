@@ -39,7 +39,9 @@
 //! block per leader with the operand stack held in frontend `Variable`s (an
 //! `i64` and an `f64` variable per position; the plan's `Kind`s say which is
 //! live). This covers integer **and float** arithmetic/comparisons — including
-//! `int→float` promotion mirroring the interpreter — modulo (`Mod`: integer
+//! `int→float` promotion mirroring the interpreter (except where that
+//! promotion would round an integer past `2^53` and the frontend installs a
+//! numeric hook — see [`native_rounds_operand`]) — modulo (`Mod`: integer
 //! `srem` guarding the divisors that would trap, or an `fmod` libcall for
 //! floats) and power (`Pow`/`PowFloat` via a `powf` libcall), the math
 //! intrinsics (`AbsFloat`/`SqrtFloat`/`Ceil`/`Floor`/`Trunc`/`RoundFloat` as
@@ -649,6 +651,48 @@ impl Kind {
     }
 }
 
+/// Whether lowering this operand pair through [`load_f64`] would convert an
+/// integer-carried operand to `f64` — and so round it, once it is past `2^53`.
+///
+/// True exactly when the pair takes the float path (one side promotes) *and*
+/// some side is not already a `Float`, since that side reaches
+/// `fcvt_from_sint`. `Int`/`Int` never takes the float path, and `Float`/
+/// `Float` converts nothing, so both are exact and keep their native code.
+///
+/// Under the coercing (awk/shell) policy that rounding **is** the semantics and
+/// this is never consulted — it is read only behind [`Chunk::int_overflow_deopt`],
+/// the frontend's declaration that a [`crate::NumericHook`] is installed and
+/// must not be bypassed by native codegen. See [`native_rounds_operand`].
+fn promotion_rounds_int(a: Kind, b: Kind) -> bool {
+    (a.promotes_float() || b.promotes_float()) && (a != Kind::Float || b != Kind::Float)
+}
+
+/// Whether `chunk`'s numeric policy forbids lowering this operand pair
+/// natively, because doing so would answer from a rounded `f64`.
+///
+/// The interpreter's `arith_int_fast` / `cmp_int_fast` hand exactly these
+/// operands to the [`crate::NumericHook`] — the host is the only party that can
+/// represent the integer exactly. `3**34` is 16_677_181_699_666_569 and its
+/// `f64` image is 16_677_181_699_666_568, so `3**34 == (3**34).to_f` is `false`
+/// exactly and `true` once the integer has been rounded. Native code that
+/// answered here would silently outvote the host, with no runtime opportunity
+/// for it to intervene.
+///
+/// The decision is on the compile-time [`Kind`]s, not on a runtime value (the
+/// same choice the block JIT's `pop_pair_promote` makes), so only a chunk that
+/// genuinely mixes integer and float operands loses its native code. Deopting
+/// is not a wrong answer, only a slower one: the resumed interpreter runs the
+/// op through the hook.
+///
+/// Gated on [`Chunk::int_overflow_deopt`] because that flag is the only
+/// build-time channel the closed-world compiler has for the numeric policy —
+/// unlike the block JIT, AOT codegen runs before any `VM` exists (see
+/// [`run_chunk_native`], which calls `build_entry` before `VM::new`), so the
+/// thread-local `jit::strict_numeric()` is unset and unusable here.
+fn native_rounds_operand(chunk: &Chunk, a: Kind, b: Kind) -> bool {
+    chunk.int_overflow_deopt && promotion_rounds_int(a, b)
+}
+
 /// Record that the slot/global keyed by `key` holds kind `k` (its single kind
 /// for the whole chunk, since its register has one type). Returns `false` on a
 /// mixed-kind conflict (e.g. a slot stored both Int and Float), which
@@ -1223,6 +1267,9 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 let b = st.pop()?;
                 let a = st.pop()?;
                 deopt_unless!(a.is_numeric() && b.is_numeric());
+                // A mixed pair under a numeric hook rounds the integer operand;
+                // the interpreter delegates it, so native code must not answer.
+                deopt_unless!(!native_rounds_operand(chunk, a, b));
                 let r = if a.promotes_float() || b.promotes_float() {
                     Kind::Float
                 } else {
@@ -1238,6 +1285,9 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 let b = st.pop()?;
                 let a = st.pop()?;
                 deopt_unless!(a.is_numeric() && b.is_numeric());
+                // `Op::Mod` routes through the same `arith_int_fast` as
+                // `Add`/`Sub`/`Mul`, so it delegates on the same condition.
+                deopt_unless!(!native_rounds_operand(chunk, a, b));
                 let r = if a.promotes_float() || b.promotes_float() {
                     Kind::Float
                 } else {
@@ -1418,6 +1468,9 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 let b = st.pop()?;
                 let a = st.pop()?;
                 deopt_unless!(a.is_numeric() && b.is_numeric());
+                // Comparison answers about the *rounded* operand otherwise —
+                // `cmp_int_fast` hands exactly this pair to the host.
+                deopt_unless!(!native_rounds_operand(chunk, a, b));
                 st.push(Kind::Bool);
                 succs.push((ip + 1, st, inits));
             }
@@ -3515,7 +3568,10 @@ fn build_entry_native<M: Module>(
 }
 
 /// Read operand-stack position `idx` as an `f64`, promoting an integer with
-/// `int→float` conversion exactly as the interpreter's `to_float` would. Never
+/// `int→float` conversion the way the interpreter's `to_float` does — which is
+/// exact only while the integer is one an `f64` can hold. Past `2^53` it
+/// rounds, so under a numeric hook the mixed pairs never reach here at all:
+/// [`native_rounds_operand`] has already made the op a deopt point. Never
 /// called on a `Bool` (analysis rejects booleans feeding arithmetic).
 fn load_f64(
     b: &mut FunctionBuilder,
