@@ -430,11 +430,29 @@ where the interpreter answers `0`.
 with `block_threshold` at `u32::MAX` (interpreter) and `0` (native) and
 requires the two results to match.
 
-One representation difference is deliberate and remains: the block tier's
-return channel is numeric (`BlockNum`), so a chunk whose final value is a
-predicate comes back as `Int(0|1)` where the interpreter leaves `Bool`. Every
-coercion (`to_int`, `to_str`, `is_truthy`) agrees, so this is visible only to
-a frontend that pattern-matches the variant of a whole chunk's result.
+`Value::Bool` is the other kind native code cannot hold, and each tier answers
+it differently by design:
+
+- **Linear** returns a `Value`, so it reproduces the interpreter exactly: the
+  boolean rides the integer return register as 0/1 and is boxed back to
+  `Bool` from the abstract simulation's result kind. A chunk that *consumes* a
+  boolean numerically declines instead, because `Value::Bool` is not a native
+  number — `arith_int_fast` routes it through `to_float`, so `true + 1` is
+  `Float(2.0)`, not `Int(2)`, and native code has no way to produce that from
+  an integer register.
+- **AOT** carries `Kind::Bool` through its own lattice and boxes the same way.
+- **Block** returns a *numeric* channel by API contract (`i64` / `BlockNum`),
+  not a `Value`, so a predicate result reaches the caller as `0|1` and the
+  frontend owns the boxing. This is a property of the entry point, not a
+  disagreement about the value: the difference is not invisible either
+  (`Bool(false).to_str()` is `""` where `Int(0).to_str()` is `"0"`, and
+  arithmetic on a `Bool` coerces to float), which is exactly why the two tiers
+  that *do* return a `Value` box it as `Bool`.
+
+`tests/tier_matrix_diff.rs` pins all of it: every native-lowerable op crossed
+with the operand edges — `0`, `-1`, `i64::MIN`, `2^53+1`, `-0.0`, booleans —
+run through the interpreter, the linear JIT, and the AOT compiler, compared on
+the `Value` variant and on raw float bits.
 
 ---
 
@@ -619,7 +637,15 @@ The block JIT compiles the full CFG to native code via Cranelift. All mutable st
 
 **Float slots (`SlotKind::Float`).** Slots are promoted to Cranelift `i64` variables holding raw bits. When a slot's kind is `Float`, the `i64` *is* the `f64` bit pattern: `GetSlot` bitcasts `I64 → F64` (and integer operands are converted with `fcvt_from_sint` before float arithmetic), `SetSlot` bitcasts `F64 → I64`. Pass slot kinds via `try_run_block_kinded` / `try_run_block_eager_kinded`; the kind vector is folded into the native-code cache key (TLS and the on-disk `*.blk.fjit` blob) so float-specialized code is never reused for an integer slot or vice-versa. The default `try_run_block` / `try_run_block_eager` (no kinds) treat every slot as `Int` — unchanged behavior for integer consumers. This is what lets `awkrs` block-JIT-compile `f64` AWK numeric chunks (e.g. `x = int(x + c)`, lowered through `Op::AwkInt`) and persist them to the shared on-disk cache. Integer-only fused superinstructions (`PreIncSlot`, `AccumSumLoop`, `SlotIncLtIntJumpBack`, …) bail to the interpreter on a `Float` slot rather than miscompute it.
 
-**AWK math ops in the JIT.** `Op::AwkInt` compiles natively to a Cranelift `trunc`. The transcendentals `Op::AwkSin` / `AwkCos` / `AwkExp` / `AwkAtan2` compile to Cranelift libcalls into small `extern "C"` Rust helpers (`fusevm_jit_sin_f64`, …) that canonicalize a NaN result to `+nan` to match gawk/awkrs. These follow the same `None`-guarded import pattern as the existing `pow`/`fmod`/`lognot` libcalls — the helper imports are declared only when the op appears in the chunk (`MathIds::declare`), so chunks without them compile to byte-identical native code. For the on-disk cache the helper relocations are keyed by stable host-helper ids (`H_SIN_F64`…`H_ATAN2_F64`), carried in the per-function `[Option<FuncId>; 8]` helper table and re-resolved on load via `host_addr` (cache `SCHEMA_VERSION` 16). The gawk bitwise builtins `Op::AwkAnd` / `AwkOr` / `AwkXor` (variadic, ≥2 args) also compile natively: each operand is converted to `i64` with a **saturating** `fcvt_to_sint_sat` (matching awkrs's `num_to_u64`, which truncates and saturates NaN→0 / ±inf→i64 bounds rather than trapping), folded with Cranelift `band`/`bor`/`bxor`, and pushed back as an integer. No libcall and no host needed — pure integer arithmetic — so they are admitted to `is_block_eligible_op` directly.
+**AWK math ops in the JIT.** `Op::AwkInt` compiles natively to a Cranelift
+`trunc` in the block and tracing tiers, whose return channel is numeric and
+whose consumer (`awkrs`) models every AWK number as an `f64`. The **linear**
+tier declines it instead for anything but an integer constant that is already
+its own `awk_int`: that tier hands a `Value` straight back, and the
+host-dispatched interpreter path (`AwkHost::int`, default
+`awk_host::awk_int`) narrows the truncated result to `Value::Int` when it fits
+an `i64` — so `int(2.5)` is `Int(2)`, not `Float(2.0)` — and past `2^53` its
+`f64` round-trip returns a *different* integer than the native identity would. The transcendentals `Op::AwkSin` / `AwkCos` / `AwkExp` / `AwkAtan2` compile to Cranelift libcalls into small `extern "C"` Rust helpers (`fusevm_jit_sin_f64`, …) that canonicalize a NaN result to `+nan` to match gawk/awkrs. These follow the same `None`-guarded import pattern as the existing `pow`/`fmod`/`lognot` libcalls — the helper imports are declared only when the op appears in the chunk (`MathIds::declare`), so chunks without them compile to byte-identical native code. For the on-disk cache the helper relocations are keyed by stable host-helper ids (`H_SIN_F64`…`H_ATAN2_F64`), carried in the per-function `[Option<FuncId>; 8]` helper table and re-resolved on load via `host_addr` (cache `SCHEMA_VERSION` 16). The gawk bitwise builtins `Op::AwkAnd` / `AwkOr` / `AwkXor` (variadic, ≥2 args) also compile natively: each operand is converted to `i64` with a **saturating** `fcvt_to_sint_sat` (matching awkrs's `num_to_u64`, which truncates and saturates NaN→0 / ±inf→i64 bounds rather than trapping), folded with Cranelift `band`/`bor`/`bxor`, and pushed back as an integer. No libcall and no host needed — pure integer arithmetic — so they are admitted to `is_block_eligible_op` directly.
 
 **Trapping div/mod in the JIT (guarded early-exit).** `Op::AwkDivJit` / `AwkModJit` are the block-JIT-eligible counterparts of the interpreter-only `AwkDiv`/`AwkMod`. Float `fdiv`/`fmod` do not hardware-trap (they yield `inf`/`NaN`), so a JIT-compiled awk division must check the divisor explicitly: the codegen pops divisor then dividend, emits `fcmp eq divisor, 0.0`, and branches — the trap block calls the `fusevm_jit_awk_div_trap(code)` libcall (`code` = `1` for div, `2` for mod) into a thread-local channel and `return`s a sentinel, while the continuation block computes `fdiv` (div) or the `fmod` libcall (mod). After the compiled block returns, the VM's block-dispatch path calls `take_awk_div_trap()` and, if a code was set, raises the same fatal `"division by zero attempted"` / `…in \`%'` error the interpreter raises — *before* writing slots back. Because the trap libcall is not a registered host-helper id, these chunks skip on-disk persistence (in-process JIT only) and add nothing to the cache schema; frontends that never emit them (zshrs/stryke) are byte-identical.
 
