@@ -68,9 +68,14 @@ fn jit_inc_dec() {
 
 #[test]
 fn jit_pow() {
-    jit_expect_int(
+    // `Float(1024.0)`, not `Int(1024)`: `Op::Pow` is always-float in the
+    // interpreter (`Value::Float(a.to_float().powf(b.to_float()))`) — see the
+    // `jit_pow_float_zero_result_kind_preserved` case below, which already
+    // states the same rule. This assertion used to read `Int`, pinning an
+    // integer answer only the native tiers ever produced.
+    jit_expect_float(
         &[(Op::LoadInt(2), 1), (Op::LoadInt(10), 1), (Op::Pow, 1)],
-        1024,
+        1024.0,
     );
 }
 

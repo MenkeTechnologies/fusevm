@@ -964,3 +964,176 @@ fn block_jit_sub_neg_zero_float_kind_preserved() {
         BlockNum::Int(n) => panic!("float kind collapsed to Int({n})"),
     }
 }
+
+// ── Interpreter/native tier agreement ─────────────────────────────────────
+//
+// The interpreter is the specification: it is what runs before a chunk goes
+// hot, so any op the native tiers lower differently produces an answer that
+// depends on JIT warmup state. These pin the three defects a two-tier
+// differential sweep (every arithmetic/comparison/conversion op against zero,
+// negative zero, NaN, +/-inf, i64::MIN and i64::MAX) turned up:
+//
+//   1. `Op::Div` lowered as integer `sdiv` — `1 / 2` answered `Int(0)` where
+//      the interpreter answers `Float(0.5)` — and by zero it TRAPPED, killing
+//      the process, where the interpreter answers `Undef`.
+//   2. `Op::Pow` lowered as an integer power — `2 ** -1` answered `Int(0)`
+//      where the interpreter answers `Float(0.5)`.
+//   3. `Op::LogNot` on a float panicked Cranelift's aarch64 backend at compile
+//      time ("not implemented").
+
+/// Run `ops` with the block tier forced off, then forced on, and require the
+/// two to agree exactly — value AND numeric type.
+fn assert_tiers_agree(label: &str, ops: &[Op]) {
+    use fusevm::{TraceJitConfig, VMResult, VM};
+
+    let run = |threshold: u32| -> VMResult {
+        let jit = JitCompiler::new();
+        let mut cfg = TraceJitConfig::defaults();
+        cfg.block_threshold = threshold;
+        jit.set_config(cfg);
+        let mut b = ChunkBuilder::new();
+        for op in ops {
+            b.emit(op.clone(), 1);
+        }
+        let mut vm = VM::new(b.build());
+        vm.enable_tracing_jit();
+        vm.run()
+    };
+
+    // u32::MAX never reaches the threshold, so the interpreter owns the run;
+    // 0 compiles on the very first call.
+    let interp = run(u32::MAX);
+    let native = run(0);
+    let (a, b) = match (&interp, &native) {
+        (VMResult::Ok(a), VMResult::Ok(b)) => (a, b),
+        (a, b) => panic!("{label}: unexpected results interp={a:?} block={b:?}"),
+    };
+    if same_value(a, b) {
+        return;
+    }
+    panic!("{label}: interpreter and block tier disagree (interp={a:?} block={b:?})");
+}
+
+/// Whether two results are the same answer.
+///
+/// Exact equality, plus exactly two documented equivalences — no others, so a
+/// real value difference can never slip through:
+///
+///  * Two NaNs. `f64::NAN != f64::NAN`, but both tiers producing NaN IS
+///    agreement.
+///  * `Bool(b)` against `Int(0|1)`. The block tier's return channel is numeric
+///    (`BlockNum`), so a chunk whose last value is a predicate comes back as
+///    the integer the interpreter's `Bool` coerces to. This is a
+///    representation difference at the chunk boundary only — the coercions
+///    (`to_int`, `to_str`, `is_truthy`) all agree — and it applies to every
+///    comparison op, not just the ones under test here.
+fn same_value(a: &fusevm::Value, b: &fusevm::Value) -> bool {
+    use fusevm::Value;
+    match (a, b) {
+        (Value::Float(x), Value::Float(y)) if x.is_nan() && y.is_nan() => true,
+        (Value::Bool(x), Value::Int(y)) | (Value::Int(y), Value::Bool(x)) => i64::from(*x) == *y,
+        _ => a == b,
+    }
+}
+
+/// Run `ops` in the interpreter and return the produced value.
+fn interp_value(ops: &[Op]) -> fusevm::Value {
+    use fusevm::{VMResult, VM};
+    let mut b = ChunkBuilder::new();
+    for op in ops {
+        b.emit(op.clone(), 1);
+    }
+    match VM::new(b.build()).run() {
+        VMResult::Ok(v) => v,
+        other => panic!("expected a value, got {other:?}"),
+    }
+}
+
+#[test]
+fn div_agrees_across_tiers() {
+    use fusevm::Value;
+    // Inexact integer division is a FLOAT — an `sdiv` lowering answers 0 here.
+    assert_tiers_agree("1 / 2", &[Op::LoadInt(1), Op::LoadInt(2), Op::Div]);
+    assert_tiers_agree("7 / 2", &[Op::LoadInt(7), Op::LoadInt(2), Op::Div]);
+    assert_tiers_agree("-7 / 2", &[Op::LoadInt(-7), Op::LoadInt(2), Op::Div]);
+    // Exact division is still a float, not an int.
+    assert_tiers_agree("20 / 5", &[Op::LoadInt(20), Op::LoadInt(5), Op::Div]);
+    // The i64 division overflow case, which `sdiv` traps on.
+    assert_tiers_agree(
+        "i64::MIN / -1",
+        &[Op::LoadInt(i64::MIN), Op::LoadInt(-1), Op::Div],
+    );
+    // Zero divisors: the interpreter answers Undef and native code has no
+    // Undef, so these must run interpreted rather than trap or answer inf.
+    assert_tiers_agree("1 / 0", &[Op::LoadInt(1), Op::LoadInt(0), Op::Div]);
+    assert_tiers_agree("0 / 0", &[Op::LoadInt(0), Op::LoadInt(0), Op::Div]);
+    assert_tiers_agree("1 / 0.0", &[Op::LoadInt(1), Op::LoadFloat(0.0), Op::Div]);
+    // -0.0 is zero for this op: the interpreter tests `b.to_float() == 0.0`.
+    assert_tiers_agree("1 / -0.0", &[Op::LoadInt(1), Op::LoadFloat(-0.0), Op::Div]);
+
+    // And pin the actual contract, so "they agree" can't become "they agree on
+    // the wrong answer".
+    assert_eq!(
+        interp_value(&[Op::LoadInt(1), Op::LoadInt(2), Op::Div]),
+        Value::Float(0.5),
+        "Op::Div is always-float"
+    );
+    assert_eq!(
+        interp_value(&[Op::LoadInt(1), Op::LoadInt(0), Op::Div]),
+        Value::Undef,
+        "Op::Div by zero is Undef"
+    );
+}
+
+#[test]
+fn mod_agrees_across_tiers() {
+    // `srem` traps on a zero divisor and on i64::MIN % -1; the interpreter
+    // answers 0 for both.
+    assert_tiers_agree("1 % 0", &[Op::LoadInt(1), Op::LoadInt(0), Op::Mod]);
+    assert_tiers_agree("0 % 0", &[Op::LoadInt(0), Op::LoadInt(0), Op::Mod]);
+    assert_tiers_agree(
+        "i64::MIN % -1",
+        &[Op::LoadInt(i64::MIN), Op::LoadInt(-1), Op::Mod],
+    );
+    assert_tiers_agree("7 % 3", &[Op::LoadInt(7), Op::LoadInt(3), Op::Mod]);
+    assert_tiers_agree("7 % 2.5", &[Op::LoadInt(7), Op::LoadFloat(2.5), Op::Mod]);
+    assert_tiers_agree("7 % 0.0", &[Op::LoadInt(7), Op::LoadFloat(0.0), Op::Mod]);
+}
+
+#[test]
+fn mod_by_minus_one_does_not_panic_the_interpreter() {
+    use fusevm::Value;
+    // Rust's `%` panics on `i64::MIN % -1` — an overflow check that runs in
+    // release too — so this used to abort the whole VM. The answer is 0.
+    assert_eq!(
+        interp_value(&[Op::LoadInt(i64::MIN), Op::LoadInt(-1), Op::Mod]),
+        Value::Int(0)
+    );
+}
+
+#[test]
+fn pow_agrees_across_tiers() {
+    use fusevm::Value;
+    assert_tiers_agree("2 ** 10", &[Op::LoadInt(2), Op::LoadInt(10), Op::Pow]);
+    // A negative exponent is where an integer power silently answered 0.
+    assert_tiers_agree("2 ** -1", &[Op::LoadInt(2), Op::LoadInt(-1), Op::Pow]);
+    assert_tiers_agree("0 ** -1", &[Op::LoadInt(0), Op::LoadInt(-1), Op::Pow]);
+    assert_tiers_agree("2.5 ** 2", &[Op::LoadFloat(2.5), Op::LoadInt(2), Op::Pow]);
+
+    assert_eq!(
+        interp_value(&[Op::LoadInt(2), Op::LoadInt(10), Op::Pow]),
+        Value::Float(1024.0),
+        "Op::Pow is always-float"
+    );
+}
+
+#[test]
+fn lognot_on_a_float_compiles_and_agrees() {
+    // This used to panic Cranelift's aarch64 backend with "not implemented"
+    // while compiling, so the process died rather than answering anything.
+    assert_tiers_agree("!0.0", &[Op::LoadFloat(0.0), Op::LogNot]);
+    assert_tiers_agree("!-0.0", &[Op::LoadFloat(-0.0), Op::LogNot]);
+    assert_tiers_agree("!1.0", &[Op::LoadFloat(1.0), Op::LogNot]);
+    assert_tiers_agree("!nan", &[Op::LoadFloat(f64::NAN), Op::LogNot]);
+    assert_tiers_agree("!inf", &[Op::LoadFloat(f64::INFINITY), Op::LogNot]);
+}

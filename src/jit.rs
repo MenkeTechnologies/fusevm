@@ -832,22 +832,43 @@ mod cranelift_jit_impl {
                 let (a, b) = pop2_strict(stack)?;
                 stack.push(fold_arith(a, b, i64::wrapping_mul, |x, y| x * y));
             }
+            // `Op::Div` is **always float** in the interpreter and answers
+            // `Undef` when the divisor is zero (see `Op::Div` in `vm.rs`).
+            // Native code has neither an integer result nor an `Undef`, so:
+            //
+            //  * the result kind is `ConstF`/`DynF` unconditionally — an
+            //    integer `sdiv` would answer `Int(0)` for `1 / 2` where the
+            //    interpreter answers `Float(0.5)`, and
+            //  * a divisor that is not a provably nonzero constant makes the
+            //    chunk ineligible, because a zero divisor must produce `Undef`
+            //    and native code cannot. (The AOT tier keeps runtime divisors
+            //    by deopting to the interpreter on zero; the linear/block/trace
+            //    tiers have no mid-chunk deopt, so they decline instead.)
+            //
+            // `-0.0` counts as zero here: the interpreter tests
+            // `b.to_float() == 0.0`, which is true for `-0.0`.
             Op::Div => {
                 let (a, b) = pop2_strict(stack)?;
-                if Cell::either_float(a, b) {
-                    match (a, b) {
-                        (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x / y)),
-                        _ => stack.push(Cell::DynF),
-                    }
-                } else {
-                    match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) if y != 0 && x % y == 0 => {
-                            stack.push(Cell::Const(x / y));
-                        }
-                        _ => return None,
-                    }
-                }
+                let divisor = match b {
+                    Cell::Const(y) if y != 0 => y as f64,
+                    Cell::ConstF(y) if y != 0.0 => y,
+                    // Zero constant, or any runtime value we cannot prove
+                    // nonzero.
+                    _ => return None,
+                };
+                stack.push(match a {
+                    Cell::Const(x) => Cell::ConstF(x as f64 / divisor),
+                    Cell::ConstF(x) => Cell::ConstF(x / divisor),
+                    Cell::Dyn | Cell::DynF => Cell::DynF,
+                });
             }
+            // `Op::Mod` keeps the interpreter's int/float split, but its native
+            // `srem` traps where the interpreter does not: `y == 0` (the
+            // interpreter pushes `0`) and `srem(i64::MIN, -1)` (an overflow
+            // trap on x86-64). Both are ruled out by requiring a constant
+            // divisor with `|k| >= 2`, the same condition `safe_const_mod`
+            // documents — it just has to hold in every numeric mode, not only
+            // the strict one.
             Op::Mod => {
                 let (a, b) = pop2_strict(stack)?;
                 if Cell::either_float(a, b) {
@@ -857,8 +878,7 @@ mod cranelift_jit_impl {
                     }
                 } else {
                     match b {
-                        Cell::Const(0) => return None,
-                        Cell::Const(y) => stack.push(match a {
+                        Cell::Const(y) if y.saturating_abs() >= 2 => stack.push(match a {
                             Cell::Const(x) => Cell::Const(x % y),
                             _ => Cell::Dyn,
                         }),
@@ -866,24 +886,28 @@ mod cranelift_jit_impl {
                     }
                 }
             }
+            // `Op::Pow` is always-float in the interpreter — `Value::Float(a
+            // .powf(b))`, with no integer case — so the result kind here is
+            // always `ConstF`/`DynF`. An integer `wrapping_pow` answered
+            // `Int(0)` for `2 ** -1` (interpreter: `Float(0.5)`) and for
+            // `0 ** -1` (interpreter: `Float(inf)`). `powf` is total, so no
+            // operand makes the chunk ineligible.
             Op::Pow => {
                 let (a, b) = pop2_strict(stack)?;
-                if Cell::either_float(a, b) {
-                    match (a, b) {
-                        (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x.powf(y))),
-                        _ => stack.push(Cell::DynF),
-                    }
-                } else {
-                    match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) if (0..=63).contains(&y) => {
-                            stack.push(Cell::Const(x.wrapping_pow(y as u32)));
-                        }
-                        (Cell::Dyn, Cell::Const(y)) if (0..=63).contains(&y) => {
-                            stack.push(Cell::Dyn);
-                        }
-                        _ => return None,
-                    }
-                }
+                let base = match a {
+                    Cell::Const(x) => Some(x as f64),
+                    Cell::ConstF(x) => Some(x),
+                    Cell::Dyn | Cell::DynF => None,
+                };
+                let exp = match b {
+                    Cell::Const(y) => Some(y as f64),
+                    Cell::ConstF(y) => Some(y),
+                    Cell::Dyn | Cell::DynF => None,
+                };
+                stack.push(match (base, exp) {
+                    (Some(x), Some(y)) => Cell::ConstF(x.powf(y)),
+                    _ => Cell::DynF,
+                });
             }
             Op::Negate => {
                 let a = stack.pop()?;
@@ -2131,7 +2155,11 @@ mod cranelift_jit_impl {
         op: &Op,
         stack: &mut Vec<(Value, JitTy)>,
         slot_base: Option<Value>,
-        pow_i64_ref: Option<cranelift_codegen::ir::FuncRef>,
+        // Unused here since `Op::Pow` became always-float (the interpreter has
+        // no integer power), but kept in the signature: the same FuncRef tuple
+        // is threaded from four compilation drivers and is still imported for
+        // the AOT lowering.
+        _pow_i64_ref: Option<cranelift_codegen::ir::FuncRef>,
         pow_f64_ref: Option<cranelift_codegen::ir::FuncRef>,
         fmod_f64_ref: Option<cranelift_codegen::ir::FuncRef>,
         lognot_ref: Option<cranelift_codegen::ir::FuncRef>,
@@ -2218,12 +2246,14 @@ mod cranelift_jit_impl {
                     JitTy::Float => stack.push((bcx.ins().fmul(a, b), JitTy::Float)),
                 }
             }
+            // Always an f64 divide, never `sdiv`, and never with a divisor the
+            // simulator could not prove nonzero — see the `Op::Div` arm of
+            // `simulate_one_op`, which gates eligibility and must agree with
+            // this arm on the result kind.
             Op::Div => {
-                let (a, b, ty) = pop_pair_promote(bcx, stack)?;
-                match ty {
-                    JitTy::Int => stack.push((bcx.ins().sdiv(a, b), JitTy::Int)),
-                    JitTy::Float => stack.push((bcx.ins().fdiv(a, b), JitTy::Float)),
-                }
+                let b = pop_as_f64(bcx, stack)?;
+                let a = pop_as_f64(bcx, stack)?;
+                stack.push((bcx.ins().fdiv(a, b), JitTy::Float));
             }
             Op::Mod => {
                 let (a, b, ty) = pop_pair_promote(bcx, stack)?;
@@ -2236,20 +2266,20 @@ mod cranelift_jit_impl {
                     }
                 }
             }
+            // Always `powf`, never the integer `pow_i64`: the interpreter's
+            // `Op::Pow` is `Value::Float(a.to_float().powf(b.to_float()))` with
+            // no integer case at all, so an integer lowering answers `Int(0)`
+            // for `2 ** -1` where the interpreter answers `Float(0.5)`, and
+            // `Int(0)` for `0 ** -1` where the interpreter answers
+            // `Float(inf)`. `powf` is total, so unlike `Op::Div` this needs no
+            // eligibility gate. See the `Op::Pow` arm of `simulate_one_op`,
+            // which must agree with this one on the result kind.
             Op::Pow => {
-                let (a, b, ty) = pop_pair_promote(bcx, stack)?;
-                match ty {
-                    JitTy::Int => {
-                        let fr = pow_i64_ref?;
-                        let call = bcx.ins().call(fr, &[a, b]);
-                        stack.push((*bcx.inst_results(call).first()?, JitTy::Int));
-                    }
-                    JitTy::Float => {
-                        let fr = pow_f64_ref?;
-                        let call = bcx.ins().call(fr, &[a, b]);
-                        stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
-                    }
-                }
+                let b = pop_as_f64(bcx, stack)?;
+                let a = pop_as_f64(bcx, stack)?;
+                let fr = pow_f64_ref?;
+                let call = bcx.ins().call(fr, &[a, b]);
+                stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
             }
             Op::PowFloat => {
                 let b = pop_as_f64(bcx, stack)?;
@@ -2577,11 +2607,24 @@ mod cranelift_jit_impl {
                 let a_int = match ty {
                     JitTy::Int => a,
                     JitTy::Float => {
-                        let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
-                        let pred = bcx.ins().fcmp(FloatCC::OrderedNotEqual, a, z);
-                        let one = bcx.ins().iconst(types::I64, 1);
+                        // Test the f64 through its bit pattern instead of an
+                        // `fcmp`/`select` pair: the aarch64 backend has no
+                        // lowering for that shape and panics with "not
+                        // implemented" during codegen, so a chunk that merely
+                        // negated a float killed the process at compile time.
+                        //
+                        // Masking off the sign bit makes both `0.0` and `-0.0`
+                        // compare equal to zero, matching the interpreter's
+                        // `f != 0.0` (false for `-0.0`), while every NaN and
+                        // infinity keeps a nonzero magnitude and stays truthy.
+                        let bits = bcx.ins().bitcast(types::I64, MemFlags::new(), a);
+                        let mask = bcx
+                            .ins()
+                            .iconst(types::I64, 0x7fff_ffff_ffff_ffff_u64 as i64);
+                        let magnitude = bcx.ins().band(bits, mask);
                         let zero = bcx.ins().iconst(types::I64, 0);
-                        bcx.ins().select(pred, one, zero)
+                        let pred = bcx.ins().icmp(IntCC::NotEqual, magnitude, zero);
+                        bcx.ins().uextend(types::I64, pred)
                     }
                 };
                 let call = bcx.ins().call(fr, &[a_int]);
@@ -4248,17 +4291,50 @@ mod cranelift_jit_impl {
     }
 
     /// Whether the `Op::Mod` at `ip` divides by a compile-time constant the
-    /// native `srem` handles exactly as the interpreter would — the one strict
-    /// -mode modulo that is safe to compile (see `is_block_eligible_op_at`).
+    /// native lowering handles exactly as the interpreter would.
     ///
-    /// The divisor is the immediately preceding `LoadInt(k)`, and `|k| >= 2`
-    /// rules out both interpreter/native divergences: `k == 0` (the interpreter
-    /// pushes `0`, `srem` traps) and `|k| == 1` (whose `srem(i64::MIN, -1)` also
-    /// traps). For every other constant, `checked_rem` never fails, so the
-    /// interpreter never delegates to the `NumericHook` and native code and
-    /// interpreter agree bit for bit.
-    fn strict_safe_const_mod(ops: &[Op], ip: usize) -> bool {
-        ip > 0 && matches!(ops[ip - 1], Op::LoadInt(k) if k.saturating_abs() >= 2)
+    /// The divisor is the immediately preceding constant load:
+    ///
+    ///  * `LoadInt(k)` with `|k| >= 2` — this rules out both integer
+    ///    divergences: `k == 0` (the interpreter pushes `0` while `srem` traps)
+    ///    and `|k| == 1` (whose `srem(i64::MIN, -1)` overflow-traps on x86-64).
+    ///    For every other constant `checked_rem` never fails, so the interpreter
+    ///    never delegates to the `NumericHook` and the two agree bit for bit.
+    ///  * `LoadFloat(_)` — a float divisor takes the `fmod` path, which is
+    ///    total: it matches the interpreter's `a % b` for every operand,
+    ///    including zero, infinities and NaN, and never traps.
+    ///
+    /// This must hold in **every** numeric mode, not only the strict one. The
+    /// strict-mode carve-out in `is_block_eligible_op_at` is about `NumericHook`
+    /// delegation, which is a separate concern from these traps.
+    fn safe_const_mod(ops: &[Op], ip: usize) -> bool {
+        ip > 0
+            && match ops[ip - 1] {
+                Op::LoadInt(k) => k.saturating_abs() >= 2,
+                Op::LoadFloat(_) => true,
+                _ => false,
+            }
+    }
+
+    /// Whether the `Op::Div` at `ip` divides by a compile-time constant that is
+    /// provably nonzero.
+    ///
+    /// `Op::Div` answers `Undef` for a zero divisor (see `Op::Div` in `vm.rs`),
+    /// and the linear/block/trace tiers have no value to answer with — they
+    /// return a number, and there is no mid-chunk deopt to escape through. So a
+    /// divisor that is not a provably nonzero constant makes the chunk
+    /// ineligible and the interpreter runs it. (The AOT tier does have a deopt
+    /// and keeps runtime divisors; see the `Op::Div` note in `aot.rs`.)
+    ///
+    /// `-0.0` counts as zero: the interpreter's test is `b.to_float() == 0.0`,
+    /// which is true for `-0.0`.
+    fn safe_const_div(ops: &[Op], ip: usize) -> bool {
+        ip > 0
+            && match ops[ip - 1] {
+                Op::LoadInt(k) => k != 0,
+                Op::LoadFloat(f) => f != 0.0,
+                _ => false,
+            }
     }
 
     /// Per-op block-JIT eligibility. `ops`/`ip` give the op its context: the
@@ -4268,12 +4344,25 @@ mod cranelift_jit_impl {
         if let Op::Extended(id, _) = op {
             return super::global_extension_for(*id).is_some();
         }
+        // `Div`/`Mod` disagree with the interpreter unless the divisor is a
+        // constant the native lowering reproduces exactly. Unguarded, the block
+        // tier answered `Float(inf)` where the interpreter answers `Undef`, and
+        // integer `sdiv`/`srem` by zero killed the process with a hardware trap
+        // — a wrong answer or a crash decided purely by whether the chunk had
+        // gone hot yet. This gate is unconditional; the strict-numeric block
+        // below is a separate concern (`NumericHook` delegation).
+        if matches!(op, Op::Div) && !safe_const_div(ops, ip) {
+            return false;
+        }
+        if matches!(op, Op::Mod) && !safe_const_mod(ops, ip) {
+            return false;
+        }
         // Strict numeric mode: an integer op whose native lowering can produce a
         // value the interpreter would not have produced is not JIT-able here.
         // `Add`/`Sub`/`Mul`/`Negate` ARE compiled — with overflow checks (see
         // `emit_data_op`) — because they are the ops a strict frontend actually
         // emits on its hot path, and `Mod` by a constant `|k| >= 2` is compiled
-        // because it provably cannot diverge (`strict_safe_const_mod`). The rest
+        // because it provably cannot diverge (`safe_const_mod`). The rest
         // are declined rather than checked: they overflow in ways that need their
         // own guards (`i64::MIN / -1`, `wrapping_pow`, the fused int
         // superinstructions), and a strict frontend either implements them as
@@ -4294,7 +4383,7 @@ mod cranelift_jit_impl {
                     | Op::AccumSumLoop(_, _, _)
                     | Op::AddAssignSlotVoid(_, _)
             )
-            && !(matches!(op, Op::Mod) && strict_safe_const_mod(ops, ip))
+            && !(matches!(op, Op::Mod) && safe_const_mod(ops, ip))
         {
             return false;
         }

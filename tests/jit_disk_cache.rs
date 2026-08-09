@@ -90,8 +90,32 @@ fn disk_cache_pow_uses_host_reloc() {
     let dir = fresh_dir("pow");
     // 2 ** 10 = 1024 — Pow emits a call to a host helper, exercising the
     // Abs8 relocation patching path on load.
+    //
+    // The result is `Float`, not `Int`: `Op::Pow` is always-float in the
+    // interpreter (`Value::Float(a.to_float().powf(b.to_float()))`), with no
+    // integer case at all. This assertion previously read `Value::Int(1024)`,
+    // which pinned a native-only answer the interpreter never produces — the
+    // same tier disagreement that made `2 ** -1` answer `Int(0)` natively and
+    // `Float(0.5)` interpreted.
     let chunk = build(&[(Op::LoadInt(2), 1), (Op::LoadInt(10), 1), (Op::Pow, 1)]);
-    assert_eq!(run_with_cache(&chunk, &dir, &[]), Some(Value::Int(1024)));
+    let native = run_with_cache(&chunk, &dir, &[]);
+    assert_eq!(native, Some(Value::Float(1024.0)));
+    // Cross-check against the interpreter rather than trusting the literal
+    // alone, so this test can never again pin a tier-specific answer.
+    let interpreted = match VM::new(build(&[
+        (Op::LoadInt(2), 1),
+        (Op::LoadInt(10), 1),
+        (Op::Pow, 1),
+    ]))
+    .run()
+    {
+        VMResult::Ok(v) => Some(v),
+        other => panic!("interpreter did not produce a value: {other:?}"),
+    };
+    assert_eq!(
+        native, interpreted,
+        "the cached native Pow must answer exactly what the interpreter answers"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

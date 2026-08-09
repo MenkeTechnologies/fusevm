@@ -398,6 +398,44 @@ Cache files are tier-tagged (`.lin.` / `.blk.` / `.trc.`) and keyed by the chunk
 | `JitCompiler::clear_jit_cache()` | Delete every blob (repopulates lazily next run); returns files removed. |
 | `rm -rf ~/.cache/fusevm-jit` | Manual nuke. |
 
+The cached blob's fingerprint hashes the crate version, so a cache written by
+an older fusevm is never loaded by a newer one — a lowering fix can't be
+resurrected from a warm cache.
+
+### The interpreter is the specification
+
+A chunk can run interpreted or native depending only on how hot it has become,
+so **every tier must produce the same answer as the interpreter, including the
+numeric type**. Anything else is a wrong answer whose value depends on JIT
+warmup state — the same chunk giving different results on row 1 and row 2 of
+the same input.
+
+Two ops make this non-obvious, because they are float-only in the interpreter
+where a native lowering would "naturally" be integer:
+
+| Op | Contract | Notes |
+|---|---|---|
+| `Div` | **Always `Float`**, and `Undef` when the divisor is zero | `1 / 2` is `Float(0.5)`, never `Int(0)`. `-0.0` counts as a zero divisor (the test is `b.to_float() == 0.0`). |
+| `Pow` | **Always `Float`** | `2 ** -1` is `Float(0.5)`, never `Int(0)`. |
+
+Native code has no `Undef`, so the tiers handle the zero divisor differently
+by necessity: AOT emits `fdiv` and deopts to the interpreter on zero, while
+the linear/block/tracing tiers have no mid-chunk deopt and instead decline to
+compile a `Div` whose divisor is not a provably nonzero constant. `Mod` is
+declined the same way unless its divisor is a constant with `|k| >= 2` or a
+float, because native `srem` traps on a zero divisor and on `i64::MIN % -1`
+where the interpreter answers `0`.
+
+`tests/jit_block.rs` pins tier agreement for these directly: each case runs
+with `block_threshold` at `u32::MAX` (interpreter) and `0` (native) and
+requires the two results to match.
+
+One representation difference is deliberate and remains: the block tier's
+return channel is numeric (`BlockNum`), so a chunk whose final value is a
+predicate comes back as `Int(0|1)` where the interpreter leaves `Bool`. Every
+coercion (`to_int`, `to_str`, `is_truthy`) agrees, so this is visible only to
+a frontend that pattern-matches the variant of a whole chunk's result.
+
 ---
 
 ## [0x08] AHEAD-OF-TIME COMPILATION

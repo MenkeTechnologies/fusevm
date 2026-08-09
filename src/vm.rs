@@ -2061,7 +2061,13 @@ impl VM {
             Op::Mod => {
                 if let Some(e) = self.arith_int_fast(
                     NumOp::Mod,
-                    |x, y| if y != 0 { x % y } else { 0 },
+                    // `wrapping_rem`, not `%`: Rust's `%` panics on
+                    // `i64::MIN % -1` (an overflow check that runs in release
+                    // too, unlike the `+`/`-`/`*` ones), which would abort the
+                    // whole VM on a value a script can perfectly well produce.
+                    // The mathematical answer is 0, which is what
+                    // `wrapping_rem` gives.
+                    |x, y| if y != 0 { x.wrapping_rem(y) } else { 0 },
                     |x, y| if y != 0 { x.checked_rem(y) } else { Some(0) },
                     |a, b| a % b,
                     ip,
