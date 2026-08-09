@@ -53,9 +53,7 @@ type Log = Arc<Mutex<Vec<(NumOp, Value, Value)>>>;
 fn exact_host(log: &Log) -> fusevm::NumericHook {
     let log = Arc::clone(log);
     Arc::new(move |op, a: &Value, b: &Value| {
-        log.lock()
-            .expect("log")
-            .push((op, a.clone(), b.clone()));
+        log.lock().expect("log").push((op, a.clone(), b.clone()));
         use NumOp::*;
         // Exact Int-vs-Float ordering: compare in the integer domain by
         // splitting the float into its floor and its fractional part, so no
@@ -155,12 +153,7 @@ fn a_strict_host_decides_an_int_float_comparison_it_alone_can_answer() {
     // The measured case: `3**34 == (3**34).to_f` is false, and is true if the
     // integer is rounded into an f64 first.
     for tracing in [false, true] {
-        let (out, seen) = run_strict(
-            Value::Int(P34),
-            Value::Float(P34_F),
-            Op::NumEq,
-            tracing,
-        );
+        let (out, seen) = run_strict(Value::Int(P34), Value::Float(P34_F), Op::NumEq, tracing);
         assert_eq!(
             seen.len(),
             1,
@@ -236,7 +229,12 @@ fn the_shortcut_still_runs_while_the_integer_is_exact() {
     // 2^53 is the last integer f64 holds exactly along with all its
     // predecessors, so it and everything below stay on the fast path.
     let exact = (1i64 << 53) - 1;
-    let (out, seen) = run_strict(Value::Int(exact), Value::Float(exact as f64), Op::NumEq, false);
+    let (out, seen) = run_strict(
+        Value::Int(exact),
+        Value::Float(exact as f64),
+        Op::NumEq,
+        false,
+    );
     assert!(
         seen.is_empty(),
         "an exactly-representable integer must not cost a host call: {seen:?}"
@@ -328,12 +326,18 @@ fn warming_up_does_not_change_an_in_range_answer() {
     // native code. This pins that the fast path still exists: no host call at
     // all, before or after warmup.
     let (calls, distinct) = drive_jit(Op::Add, Value::Int(2), Value::Int(3), 30);
-    assert_eq!(calls, 0, "an int/int chunk must never delegate: {distinct:?}");
+    assert_eq!(
+        calls, 0,
+        "an int/int chunk must never delegate: {distinct:?}"
+    );
     assert_eq!(distinct, vec!["Int(5)".to_string()]);
 
     // Float/float likewise never rounds an operand and stays compiled.
     let (calls, distinct) = drive_jit(Op::Add, Value::Float(1.5), Value::Float(2.5), 30);
-    assert_eq!(calls, 0, "a float/float chunk must never delegate: {distinct:?}");
+    assert_eq!(
+        calls, 0,
+        "a float/float chunk must never delegate: {distinct:?}"
+    );
     assert_eq!(distinct, vec!["Float(4.0)".to_string()]);
 }
 
