@@ -547,6 +547,12 @@ fn describe_block(v: &Option<fusevm::BlockNum>) -> String {
 
 /// Declining is always correct — the caller falls back to the interpreter.
 /// Answering differently is not.
+///
+/// There is deliberately no `Bool`-answers-`Int` arm. The block tier has no
+/// boolean kind, so it must *decline* every chunk whose result is a
+/// `Value::Bool` rather than flatten it to `Int(0|1)` — see
+/// `bool_is_consumed_in_place` in `src/jit.rs`. Accepting `Bool(true)` against
+/// `BlockNum::Int(1)` here is what let that flattening go unnoticed.
 fn block_agrees(expected: &Option<Value>, got: &Option<fusevm::BlockNum>) -> bool {
     match (expected, got) {
         (_, None) => true,
@@ -554,7 +560,6 @@ fn block_agrees(expected: &Option<Value>, got: &Option<fusevm::BlockNum>) -> boo
         (Some(Value::Float(a)), Some(fusevm::BlockNum::Float(b))) => {
             a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
         }
-        (Some(Value::Bool(a)), Some(fusevm::BlockNum::Int(b))) => (*a as i64) == *b,
         _ => false,
     }
 }
@@ -906,25 +911,24 @@ fn float_assignment_to_an_int_slot_survives_block_warmup() {
     }
 }
 
-// ── Open: the block tier has no boolean kind ──
+// ── The block/tracing lattice has no boolean kind, so it must decline ──
 //
 // `JitTy` is Int-or-Float and `BlockNum` is Int-or-Float, so a `Value::Bool`
 // has nowhere to live. `VM::run` boxes `BlockNum::Int(n)` as `Value::Int(n)`,
-// so every boolean-valued block-eligible chunk changes variant on its second
-// call: `1 < 2` is `Bool(true)` cold and `Int(1)` warm, and `Bool(false)`
+// so every boolean-valued block-eligible chunk changed variant on its second
+// call: `1 < 2` was `Bool(true)` cold and `Int(1)` warm, and `Bool(false)`
 // stringifies as `""` where `Int(0)` stringifies as `"0"`. A `Bool` *operand*
-// is the same gap in the other direction — `true + 1` is `Float(2.0)` on the
-// interpreter (booleans coerce through `to_float`) and `Int(2)` in the block
-// tier.
+// was the same gap in the other direction — `true + 1` is `Float(2.0)` on the
+// interpreter (booleans coerce through `to_float`) and was `Int(2)` in the
+// block tier.
 //
-// The linear tier already solved this with a `Cell::Bool`, and the AOT tier
-// with a `Kind::Bool`; the block/tracing lattice has no equivalent, and adding
-// one touches every `JitTy` match plus the public `BlockNum`.
-//
-// This test asserts the CORRECT behaviour and is `#[ignore]`d because the
-// block tier does not provide it yet. Run it with `--ignored` to reproduce.
+// The linear tier solved this with a `Cell::ConstB`/`Cell::DynB`, and the AOT
+// tier with a `Kind::Bool`. Widening this lattice would touch every `JitTy`
+// match plus the public `BlockNum`, so instead the tier now *declines* any
+// chunk where a boolean outlives the op that produced it
+// (`bool_is_consumed_in_place` in `src/jit.rs`) and the interpreter runs it.
+// Declining is always a correct answer; flattening to `Int` was not.
 #[test]
-#[ignore = "block tier has no boolean kind; JitTy and BlockNum are Int-or-Float"]
 fn block_jit_preserves_boolean_result_kind() {
     let mut diffs = Vec::new();
     for (label, ops) in [
@@ -955,4 +959,209 @@ fn block_jit_preserves_boolean_result_kind() {
         }
     }
     assert_no_diffs("block boolean kind", diffs);
+}
+
+// ── Tracing tier ──
+//
+// The fourth compiler, and the one this file could not see at all until now:
+// every harness above drives `try_run_linear` / `try_run_block_*` /
+// `run_chunk_native`, and a trace anchors only on a **conditional backward
+// branch**. The whole corpus above is straight-line, so no chunk in it ever
+// closed a trace — the tracing tier was scoring agreement it had never been
+// asked a single question about.
+//
+// It was not agreeing. With the op under test inside a hot loop, 252 of the
+// 589 compiling combinations disagreed with the interpreter, and the failures
+// were not confined to the variant: a boolean stored into a float-kinded slot
+// came back as a *bit pattern*, so `0 + true` answered `Float(5e-324)` (the
+// bits of `1`) and `0 - true` answered `NaN` (the bits of `-1`) where the
+// interpreter answers `Float(1.0)` / `Float(-1.0)`.
+
+/// Wrap `a OP b` in a hot do-while loop so the op is recorded into a trace,
+/// and hand the computed value back through a slot.
+///
+/// ```text
+///   LoadInt(salt); Pop            // unique op_hash per case
+///   LoadInt(0); SetSlot(0)
+/// anchor:
+///   PreIncSlotVoid(0)             // loop counter
+///   <push a> <push b> OP SetSlot(1)
+///   GetSlot(0) LoadInt(200) NumLt JumpIfTrue(anchor)
+///   GetSlot(1)                    // the value under test
+/// ```
+fn trace_chunk_for(a: &Operand, b: Option<&Operand>, op: &Op, salt: i64) -> (Chunk, usize) {
+    let mut bd = ChunkBuilder::new();
+    bd.emit(Op::LoadInt(salt), 1);
+    bd.emit(Op::Pop, 1);
+    bd.emit(Op::LoadInt(0), 1);
+    bd.emit(Op::SetSlot(0), 1);
+    let anchor = bd.current_pos();
+    bd.emit(Op::PreIncSlotVoid(0), 1);
+    for o in &a.push {
+        bd.emit(o.clone(), 1);
+    }
+    if let Some(b) = b {
+        for o in &b.push {
+            bd.emit(o.clone(), 1);
+        }
+    }
+    bd.emit(op.clone(), 1);
+    bd.emit(Op::SetSlot(1), 1);
+    bd.emit(Op::GetSlot(0), 1);
+    bd.emit(Op::LoadInt(200), 1);
+    bd.emit(Op::NumLt, 1);
+    let jmp = bd.emit(Op::JumpIfTrue(0), 1);
+    bd.patch_jump(jmp, anchor);
+    bd.emit(Op::GetSlot(1), 1);
+    (bd.build(), anchor)
+}
+
+/// Run `chunk` with the given slot count, optionally with the tracing JIT on.
+fn run_with_slots(chunk: &Chunk, tracing: bool) -> Option<Value> {
+    let mut vm = VM::new(chunk.clone());
+    if tracing {
+        vm.enable_tracing_jit();
+    }
+    let frame = vm.frames.last_mut().unwrap();
+    while frame.slots.len() < 4 {
+        frame.slots.push(Value::Int(0));
+    }
+    match vm.run() {
+        VMResult::Ok(v) => Some(v),
+        VMResult::Halted => vm.stack.last().cloned(),
+        VMResult::Error(_) => None,
+    }
+}
+
+/// Cross `ops` with `operands` through the tracing tier.
+///
+/// Returns `(diffs, compiled)`. A case whose trace never compiled is SKIPPED,
+/// not scored — but `compiled` is reported so a caller can refuse to pass on an
+/// empty corpus. The reference is always the interpreter running the *same*
+/// chunk with tracing off, never the traced answer.
+fn diff_trace(ops: &[Op], operands: &[Operand], binary: bool, salt0: i64) -> (Vec<String>, usize) {
+    let jit = JitCompiler::new();
+    let mut diffs = Vec::new();
+    let mut compiled = 0usize;
+    let mut salt = salt0;
+    for op in ops {
+        for a in operands {
+            let bs: Vec<Option<&Operand>> = if binary {
+                operands.iter().map(Some).collect()
+            } else {
+                vec![None]
+            };
+            for b in bs {
+                salt += 1;
+                let (chunk, anchor) = trace_chunk_for(a, b, op, salt);
+                let traced = run_with_slots(&chunk, true);
+                if !jit.trace_is_compiled(&chunk, anchor) {
+                    continue; // never reached the tier — not evidence of agreement
+                }
+                compiled += 1;
+                let expected = run_with_slots(&chunk, false);
+                let agree = match (&expected, &traced) {
+                    (Some(e), Some(t)) => same(e, t),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !agree {
+                    diffs.push(format!(
+                        "{:?}({}{}): interp={} trace={}",
+                        op,
+                        a.label,
+                        b.map(|b| format!(", {}", b.label)).unwrap_or_default(),
+                        describe(&expected),
+                        describe(&traced)
+                    ));
+                }
+            }
+        }
+    }
+    (diffs, compiled)
+}
+
+fn assert_trace_clean(what: &str, (diffs, compiled): (Vec<String>, usize)) {
+    assert!(
+        compiled > 0,
+        "{what}: no case in this corpus ever compiled a trace, so a clean run \
+         proves nothing. A trace anchors only on a conditional backward branch \
+         — check the loop shape before trusting this test."
+    );
+    assert_no_diffs(what, diffs);
+}
+
+#[test]
+fn tracing_jit_matches_interpreter_on_arithmetic_and_bitwise() {
+    assert_trace_clean(
+        "trace arithmetic",
+        diff_trace(
+            &[
+                Op::Add,
+                Op::Sub,
+                Op::Mul,
+                Op::Div,
+                Op::Mod,
+                Op::Pow,
+                Op::BitAnd,
+                Op::BitOr,
+                Op::BitXor,
+                Op::Shl,
+                Op::Shr,
+            ],
+            &all_operands(),
+            true,
+            1_000_000,
+        ),
+    );
+}
+
+#[test]
+fn tracing_jit_matches_interpreter_on_comparisons_and_int_intrinsics() {
+    assert_trace_clean(
+        "trace comparison",
+        diff_trace(
+            &[
+                Op::NumEq,
+                Op::NumNe,
+                Op::NumLt,
+                Op::NumGt,
+                Op::NumLe,
+                Op::NumGe,
+                Op::Spaceship,
+                Op::GcdInt,
+                Op::LcmInt,
+            ],
+            &all_operands(),
+            true,
+            2_000_000,
+        ),
+    );
+}
+
+#[test]
+fn tracing_jit_matches_interpreter_on_unary_ops() {
+    assert_trace_clean(
+        "trace unary",
+        diff_trace(
+            &[
+                Op::Negate,
+                Op::Inc,
+                Op::Dec,
+                Op::BitNot,
+                Op::LogNot,
+                Op::AbsInt,
+                Op::TruncInt,
+                Op::AbsFloat,
+                Op::CeilFloat,
+                Op::FloorFloat,
+                Op::TruncFloat,
+                Op::RoundFloat,
+                Op::SqrtFloat,
+            ],
+            &all_operands(),
+            false,
+            3_000_000,
+        ),
+    );
 }

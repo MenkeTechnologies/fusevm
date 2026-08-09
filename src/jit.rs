@@ -4424,8 +4424,71 @@ mod cranelift_jit_impl {
             }
     }
 
+    /// The ops whose interpreter result is a `Value::Bool`, among those the
+    /// block and trace tiers otherwise admit.
+    ///
+    /// `Op::Spaceship` is deliberately absent — it answers `Value::Int(-1|0|1)`
+    /// (see its arm in `vm.rs`), not a boolean. `Op::LogAnd`/`Op::LogOr` and the
+    /// `Op::Str*` comparisons do produce booleans but are not in the eligible
+    /// set at all, so they never reach this check.
+    fn produces_bool(op: &Op) -> bool {
+        matches!(
+            op,
+            Op::LoadTrue
+                | Op::LoadFalse
+                | Op::NumEq
+                | Op::NumNe
+                | Op::NumLt
+                | Op::NumGt
+                | Op::NumLe
+                | Op::NumGe
+                | Op::LogNot
+        )
+    }
+
+    /// Whether the boolean produced at `ip` is consumed on the spot.
+    ///
+    /// The block and trace tiers carry every value in an int-or-float register
+    /// (`JitTy`) and hand results back through `BlockNum` and a raw `i64` slot
+    /// buffer — no channel in that lattice has a boolean kind, so a
+    /// `Value::Bool` that outlives its producing op becomes `Int(0|1)`. That is
+    /// observable two ways: on the way out `Bool(false).to_str()` is `""` where
+    /// `Int(0).to_str()` is `"0"`, and on the way in the interpreter coerces a
+    /// boolean operand through `to_float` (`is_native_num` is false for `Bool`,
+    /// so `true + 1` is `Float(2.0)`, not `Int(2)`).
+    ///
+    /// Worse, the mis-kind does not stay a variant error. A boolean stored into
+    /// a float-kinded slot is written to the raw `i64` buffer and read back as
+    /// an `f64` *bit pattern*: `0 + true` answered `Float(5e-324)` (the bits of
+    /// `1`) and `0 - true` answered `NaN` (the bits of `-1`) where the
+    /// interpreter answers `Float(1.0)` and `Float(-1.0)`.
+    ///
+    /// A boolean consumed by the very next op cannot be observed as a value:
+    /// `Op::JumpIfTrue`/`Op::JumpIfFalse` only test it for truth and `Op::Pop`
+    /// discards it, so the hot loop shape (`GetSlot`, `LoadInt`, `NumLt`,
+    /// `JumpIfTrue`) stays eligible. Anything else — storing it to a slot,
+    /// feeding it to arithmetic, or leaving it as the chunk's result — makes
+    /// the chunk ineligible, which hands it to the interpreter, and the
+    /// interpreter is always right.
+    ///
+    /// The linear tier solves the same problem with `Cell::ConstB`/`Cell::DynB`
+    /// (`pop_num` declines a boolean operand; `ret_is_bool` recovers the result
+    /// kind) and the AOT tier with `Kind::Bool`. Those two lattices can
+    /// represent the kind; this one cannot, so it declines instead.
+    fn bool_is_consumed_in_place(ops: &[Op], ip: usize) -> bool {
+        matches!(
+            ops.get(ip + 1),
+            Some(Op::JumpIfTrue(_) | Op::JumpIfFalse(_) | Op::Pop)
+        )
+    }
+
     /// Per-op block-JIT eligibility. `ops`/`ip` give the op its context: the
-    /// strict-mode `Op::Mod` carve-out needs to see its divisor.
+    /// strict-mode `Op::Mod` carve-out needs to see its divisor, and the
+    /// boolean-escape check needs to see the op that consumes the result.
+    ///
+    /// This is the single definition of block-tier eligibility. The trace tier
+    /// routes through it too (`is_trace_op_allowed_at` delegates here for every
+    /// op it does not special-case), so a rule added here covers both tiers.
     fn is_block_eligible_op_at(ops: &[Op], ip: usize) -> bool {
         let op = &ops[ip];
         if let Op::Extended(id, _) = op {
@@ -4472,6 +4535,12 @@ mod cranelift_jit_impl {
             )
             && !(matches!(op, Op::Mod) && safe_const_mod(ops, ip))
         {
+            return false;
+        }
+        // A `Value::Bool` has no kind in this tier's lattice; it may only be
+        // produced when the next op consumes it as a truth value or discards
+        // it. See `bool_is_consumed_in_place`.
+        if produces_bool(op) && !bool_is_consumed_in_place(ops, ip) {
             return false;
         }
         matches!(

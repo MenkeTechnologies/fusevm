@@ -441,15 +441,20 @@ it differently by design:
   `Float(2.0)`, not `Int(2)`, and native code has no way to produce that from
   an integer register.
 - **AOT** carries `Kind::Bool` through its own lattice and boxes the same way.
-- **Block** has no boolean kind at all: `JitTy` and the public `BlockNum` are
-  both Int-or-Float. **This is an open divergence, not a division of labour.**
-  It is tempting to call it a property of the numeric entry point that the
-  frontend then boxes, but `VM::run` does the boxing itself — a `BlockNum::Int(n)`
-  becomes `Value::Int(n)` before any frontend sees it — so a boolean-valued
-  block-eligible chunk changes variant on its second run, when the block cache
-  goes warm:
+- **Block and tracing** have no boolean kind at all: `JitTy` and the public
+  `BlockNum` are both Int-or-Float, so they **decline** instead. A boolean may
+  only be produced when the very next op consumes it as a truth value
+  (`JumpIfTrue`/`JumpIfFalse`) or discards it (`Pop`); anything else — storing
+  it to a slot, feeding it to arithmetic, or leaving it as the chunk's result —
+  makes the chunk ineligible and the interpreter runs it. Declining is always a
+  correct answer, so the hot loop shape (`GetSlot`, `LoadInt`, `NumLt`,
+  `JumpIfTrue`) is unaffected while the divergent shapes fall back.
 
-  | chunk | 1st call (interpreter) | 2nd call on (block JIT) |
+  Before that rule, `VM::run` boxed `BlockNum::Int(n)` as `Value::Int(n)` before
+  any frontend saw it, so a boolean-valued chunk changed variant on its second
+  run, once the block cache went warm:
+
+  | chunk | 1st call (interpreter) | 2nd call (block JIT), before the fix |
   |---|---|---|
   | `1 < 2` | `Bool(true)` | `Int(1)` |
   | `1 > 2` | `Bool(false)` | `Int(0)` |
@@ -458,15 +463,32 @@ it differently by design:
 
   The difference is observable: `Bool(false).to_str()` is `""` where
   `Int(0).to_str()` is `"0"`, and arithmetic on a `Bool` coerces through
-  `to_float`. Closing it means a `JitTy::Bool` through the whole block/tracing
-  lattice plus a `BlockNum` variant; until then
-  `tier_matrix_diff.rs::block_jit_preserves_boolean_result_kind` asserts the
-  correct behaviour and is `#[ignore]`d. Run it with `--ignored` to reproduce.
+  `to_float`. In the tracing tier it was worse than a variant error — a boolean
+  stored into a float-kinded slot was written to the raw `i64` slot buffer and
+  read back as an `f64` *bit pattern*, so `0 + true` answered `Float(5e-324)`
+  (the bits of `1`) and `0 - true` answered `NaN` (the bits of `-1`) where the
+  interpreter answers `Float(1.0)` and `Float(-1.0)`.
+
+  Widening the lattice — a `JitTy::Bool` through the whole block/tracing
+  pipeline plus a `BlockNum` variant — would let these chunks compile instead of
+  declining, and remains open.
 
 `tests/tier_matrix_diff.rs` pins all of it: every native-lowerable op crossed
 with the operand edges — `0`, `-1`, `i64::MIN`, `2^53+1`, `-0.0`, `±1e30`,
-booleans — run through the interpreter, the linear JIT, the block JIT, and the
-AOT compiler, compared on the `Value` variant and on raw float bits. The
+booleans — run through the interpreter, the linear JIT, the block JIT, the
+tracing JIT, and the AOT compiler, compared on the `Value` variant and on raw
+float bits.
+
+A tier that declines a case is skipped, never scored as agreement — so a
+harness whose corpus never reaches a tier would report a clean run it never
+earned. That is not hypothetical: the tracing tier anchors only on a
+**conditional backward branch**, and every chunk in this file was straight-line
+until `diff_trace` wrapped each op in a hot do-while loop. The trace harness
+therefore also asserts that at least one case actually compiled a trace, so it
+fails loudly rather than passing vacuously if the loop shape ever stops
+closing.
+
+The
 `±1e30` edge is what separates Cranelift's trapping `fcvt_to_sint` from the
 saturating `fcvt_to_sint_sat`: `Inc`/`Dec` on a float operand used the former
 and executed an illegal instruction where the interpreter returns
