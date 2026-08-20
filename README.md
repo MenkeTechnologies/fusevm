@@ -441,14 +441,21 @@ it differently by design:
   `Float(2.0)`, not `Int(2)`, and native code has no way to produce that from
   an integer register.
 - **AOT** carries `Kind::Bool` through its own lattice and boxes the same way.
-- **Block and tracing** have no boolean kind at all: `JitTy` and the public
-  `BlockNum` are both Int-or-Float, so they **decline** instead. A boolean may
-  only be produced when the very next op consumes it as a truth value
-  (`JumpIfTrue`/`JumpIfFalse`) or discards it (`Pop`); anything else — storing
-  it to a slot, feeding it to arithmetic, or leaving it as the chunk's result —
-  makes the chunk ineligible and the interpreter runs it. Declining is always a
-  correct answer, so the hot loop shape (`GetSlot`, `LoadInt`, `NumLt`,
-  `JumpIfTrue`) is unaffected while the divergent shapes fall back.
+- **Block** carries no boolean through its register lattice — `JitTy` is
+  Int-or-Float — but it does not have to in order to answer one. A chunk's
+  result kind is a static property of its last op, so a terminal boolean
+  compiles and comes back as `BlockNum::Bool`, which is the channel that keeps
+  the kind. Every other escape route still **declines**: a boolean may
+  otherwise only be produced when the very next op consumes it as a truth value
+  (`JumpIfTrue`/`JumpIfFalse`) or discards it (`Pop`), and storing it to a slot
+  or feeding it to arithmetic makes the chunk ineligible. A JIT *region* is
+  held to the stricter rule too, since its result flows back onto the
+  surrounding chunk's stack where the next op may consume it as a number.
+- **Tracing** has no boolean kind and still declines every escaping boolean,
+  terminal ones included. Its results are stored into raw `i64` slots and read
+  back under each slot's own kind, so a boolean landing in a float-kinded slot
+  is read as an `f64` bit pattern — the worst of the failures below, and not
+  something a result-kind channel fixes.
 
   Before that rule, `VM::run` boxed `BlockNum::Int(n)` as `Value::Int(n)` before
   any frontend saw it, so a boolean-valued chunk changed variant on its second
@@ -469,9 +476,11 @@ it differently by design:
   (the bits of `1`) and `0 - true` answered `NaN` (the bits of `-1`) where the
   interpreter answers `Float(1.0)` and `Float(-1.0)`.
 
-  Widening the lattice — a `JitTy::Bool` through the whole block/tracing
-  pipeline plus a `BlockNum` variant — would let these chunks compile instead of
-  declining, and remains open.
+  The block half of that is now closed: `BlockNum::Bool` carries a terminal
+  boolean's kind out, so `1 < 2` compiles and answers `Bool(true)` rather than
+  declining. Widening `JitTy` itself — a boolean kind live *through* the
+  block/tracing pipeline, which is what a boolean operand or a boolean stored to
+  a slot would need — remains open.
 
 `tests/tier_matrix_diff.rs` pins all of it: every native-lowerable op crossed
 with the operand edges — `0`, `-1`, `i64::MIN`, `2^53+1`, `-0.0`, `±1e30`,

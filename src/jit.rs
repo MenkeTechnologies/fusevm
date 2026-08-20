@@ -242,6 +242,12 @@ pub enum BlockNum {
     Int(i64),
     /// Float result (decoded from the returned bit pattern).
     Float(f64),
+    /// Boolean result, from a chunk whose last op is a comparison or another
+    /// predicate. It rides the integer return register as 0/1 like any other
+    /// int; the variant is what stops the caller boxing it as `Value::Int`,
+    /// which is a different value — `Bool(false).to_str()` is `""` where
+    /// `Int(0).to_str()` is `"0"`.
+    Bool(bool),
 }
 
 /// Serializable trace metadata for persistent cache export/import (phase 7).
@@ -4510,6 +4516,24 @@ mod cranelift_jit_impl {
         )
     }
 
+    /// Whether a boolean produced at `ip` is the chunk's result — the one other
+    /// place it can stand without a kind to carry it.
+    ///
+    /// Nothing consumes it, so none of the operand-side coercions that motivated
+    /// the escape rule apply; it only has to survive being returned, and
+    /// [`BlockNum::Bool`](super::BlockNum::Bool) is the channel that carries the
+    /// kind out. `decode_block_num` recovers it from this same terminal-op test.
+    ///
+    /// Only true for a whole chunk. A JIT *region* returns into the surrounding
+    /// chunk's stack, where the next op may well consume the boolean as a
+    /// number, and the tracing tier stores results into raw i64 slots that are
+    /// read back under a slot's own kind — a boolean landing in a float-kinded
+    /// slot is read as an `f64` bit pattern, which is the worst of the failures
+    /// the escape rule was written for. Both pass `false`.
+    fn bool_is_chunk_result(ops: &[Op], ip: usize) -> bool {
+        ip + 1 == ops.len()
+    }
+
     /// Per-op block-JIT eligibility. `ops`/`ip` give the op its context: the
     /// strict-mode `Op::Mod` carve-out needs to see its divisor, and the
     /// boolean-escape check needs to see the op that consumes the result.
@@ -4517,7 +4541,7 @@ mod cranelift_jit_impl {
     /// This is the single definition of block-tier eligibility. The trace tier
     /// routes through it too (`is_trace_op_allowed_at` delegates here for every
     /// op it does not special-case), so a rule added here covers both tiers.
-    fn is_block_eligible_op_at(ops: &[Op], ip: usize) -> bool {
+    fn is_block_eligible_op_at(ops: &[Op], ip: usize, allow_bool_result: bool) -> bool {
         let op = &ops[ip];
         if let Op::Extended(id, _) = op {
             return super::global_extension_for(*id).is_some();
@@ -4568,7 +4592,10 @@ mod cranelift_jit_impl {
         // A `Value::Bool` has no kind in this tier's lattice; it may only be
         // produced when the next op consumes it as a truth value or discards
         // it. See `bool_is_consumed_in_place`.
-        if produces_bool(op) && !bool_is_consumed_in_place(ops, ip) {
+        if produces_bool(op)
+            && !bool_is_consumed_in_place(ops, ip)
+            && !(allow_bool_result && bool_is_chunk_result(ops, ip))
+        {
             return false;
         }
         matches!(
@@ -4711,7 +4738,8 @@ mod cranelift_jit_impl {
         }
         // Slow path: scan ops, cache result.
         let ops = &chunk.ops;
-        let result = !ops.is_empty() && (0..ops.len()).all(|ip| is_block_eligible_op_at(ops, ip));
+        let result =
+            !ops.is_empty() && (0..ops.len()).all(|ip| is_block_eligible_op_at(ops, ip, true));
         BLOCK_ELIGIBLE_TLS.with(|c| c.borrow_mut().insert(key, result));
         result
     }
@@ -4727,7 +4755,7 @@ mod cranelift_jit_impl {
         let mut start: Option<usize> = None;
 
         for ip in 0..ops.len() {
-            if is_block_eligible_op_at(ops, ip) {
+            if is_block_eligible_op_at(ops, ip, false) {
                 if start.is_none() {
                     start = Some(ip);
                 }
@@ -5907,7 +5935,7 @@ mod cranelift_jit_impl {
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
     ) -> Option<super::BlockNum> {
-        try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold()).map(decode_block_num)
+        try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold()).map(|r| decode_block_num(chunk, r))
     }
 
     /// Like `try_run_block` but compiles immediately (no warmup). For tests
@@ -5931,7 +5959,7 @@ mod cranelift_jit_impl {
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
     ) -> Option<super::BlockNum> {
-        try_run_block_inner(chunk, slots, slot_kinds, 0).map(decode_block_num)
+        try_run_block_inner(chunk, slots, slot_kinds, 0).map(|r| decode_block_num(chunk, r))
     }
 
     /// Decode a `(raw_bits, ret_is_float)` block result to an i64, truncating a
@@ -5945,12 +5973,25 @@ mod cranelift_jit_impl {
     }
 
     /// Decode a `(raw_bits, ret_is_float)` block result to a typed [`BlockNum`].
-    fn decode_block_num((raw, is_float): (i64, bool)) -> super::BlockNum {
+    fn decode_block_num(chunk: &Chunk, (raw, is_float): (i64, bool)) -> super::BlockNum {
         if is_float {
             super::BlockNum::Float(f64::from_bits(raw as u64))
+        } else if chunk_result_is_bool(chunk) {
+            super::BlockNum::Bool(raw != 0)
         } else {
             super::BlockNum::Int(raw)
         }
+    }
+
+    /// Whether a chunk's result is a `Value::Bool`.
+    ///
+    /// This tier's register lattice is int-or-float, so boolness cannot come
+    /// out of codegen — but it does not have to. A chunk's result kind is a
+    /// static property of its last op, and eligibility already refuses every
+    /// other way a boolean could escape (`bool_is_consumed_in_place`), so the
+    /// terminal op is the only place one can be left standing.
+    pub(crate) fn chunk_result_is_bool(chunk: &Chunk) -> bool {
+        chunk.ops.last().is_some_and(produces_bool)
     }
 
     fn try_run_block_inner(
@@ -6640,7 +6681,7 @@ mod cranelift_jit_impl {
             // `is_block_eligible_op_at` still refuses these and a whole-chunk
             // compile is unaffected.
             Op::GetVar(_) | Op::SetVar(_) | Op::DeclareVar(_) => true,
-            _ => is_block_eligible_op_at(ops, ip),
+            _ => is_block_eligible_op_at(ops, ip, false),
         }
     }
 

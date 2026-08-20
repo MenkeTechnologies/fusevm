@@ -542,21 +542,29 @@ fn describe_block(v: &Option<fusevm::BlockNum>) -> String {
         None => "<declined>".to_string(),
         Some(fusevm::BlockNum::Int(n)) => format!("Int({n})"),
         Some(fusevm::BlockNum::Float(f)) => format!("Float({f:?} bits={:#x})", f.to_bits()),
+        Some(fusevm::BlockNum::Bool(b)) => format!("Bool({b})"),
     }
 }
 
 /// Declining is always correct — the caller falls back to the interpreter.
 /// Answering differently is not.
 ///
-/// There is deliberately no `Bool`-answers-`Int` arm. The block tier has no
-/// boolean kind, so it must *decline* every chunk whose result is a
-/// `Value::Bool` rather than flatten it to `Int(0|1)` — see
-/// `bool_is_consumed_in_place` in `src/jit.rs`. Accepting `Bool(true)` against
-/// `BlockNum::Int(1)` here is what let that flattening go unnoticed.
+/// There is still deliberately no `Bool`-answers-`Int` arm, and that is the
+/// load-bearing part of this function: accepting `Bool(true)` against
+/// `BlockNum::Int(1)` is exactly what let the old flattening go unnoticed. A
+/// boolean result must arrive as `BlockNum::Bool` or not at all.
+///
+/// What changed is that arriving is now allowed. The tier no longer has to
+/// decline a chunk whose result is a `Value::Bool`: `BlockNum::Bool` carries
+/// the kind out, so a comparison at the end of a chunk compiles and answers
+/// with the kind the interpreter would. Every other escape route for a boolean
+/// is still refused — see `bool_is_consumed_in_place` and
+/// `bool_is_chunk_result` in `src/jit.rs`.
 fn block_agrees(expected: &Option<Value>, got: &Option<fusevm::BlockNum>) -> bool {
     match (expected, got) {
         (_, None) => true,
         (Some(Value::Int(a)), Some(fusevm::BlockNum::Int(b))) => a == b,
+        (Some(Value::Bool(a)), Some(fusevm::BlockNum::Bool(b))) => a == b,
         (Some(Value::Float(a)), Some(fusevm::BlockNum::Float(b))) => {
             a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
         }

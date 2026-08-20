@@ -87,6 +87,7 @@ fn block_jit_typed_returns_exact_float_result() {
     match out {
         BlockNum::Float(v) => assert_eq!(v, 4.0 * 1.5 + 2.0, "exact float result preserved"),
         BlockNum::Int(n) => panic!("expected Float, got Int({n})"),
+        BlockNum::Bool(b) => panic!("expected Float, got Bool({b})"),
     }
 
     // The plain i64 entry point must still truncate the same result.
@@ -1033,6 +1034,7 @@ fn block_jit_negate_neg_zero_float_kind_preserved() {
             "-(-0.0) must be +0.0, got {f:?}"
         ),
         BlockNum::Int(n) => panic!("float kind collapsed to Int({n})"),
+        BlockNum::Bool(b) => panic!("float kind collapsed to Bool({b})"),
     }
 }
 
@@ -1058,6 +1060,7 @@ fn block_jit_sub_neg_zero_float_kind_preserved() {
             "-0.0 - 0 must be -0.0, got {f:?}"
         ),
         BlockNum::Int(n) => panic!("float kind collapsed to Int({n})"),
+        BlockNum::Bool(b) => panic!("float kind collapsed to Bool({b})"),
     }
 }
 

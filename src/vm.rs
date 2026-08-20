@@ -1725,6 +1725,12 @@ impl VM {
                             return VMResult::Ok(match result {
                                 crate::jit::BlockNum::Int(n) => Value::Int(n),
                                 crate::jit::BlockNum::Float(f) => Value::Float(f),
+                                // A chunk ending in a comparison. `Bool` and
+                                // `Int(0|1)` are the same register value and
+                                // different `Value`s, which is why the block
+                                // tier used to decline these chunks outright
+                                // rather than flatten them.
+                                crate::jit::BlockNum::Bool(b) => Value::Bool(b),
                             });
                         }
                     }
