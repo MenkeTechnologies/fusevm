@@ -18,8 +18,6 @@
 
 > *"One VM to run them all."*
 
-## `[PATENT PENDING]`
-
 A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 235 opcodes across 22 sections, 11 fused superinstructions, 29 first-class shell ops, 61 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
