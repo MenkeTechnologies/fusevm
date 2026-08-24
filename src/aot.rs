@@ -41,7 +41,7 @@
 //! live). This covers integer **and float** arithmetic/comparisons — including
 //! `int→float` promotion mirroring the interpreter (except where that
 //! promotion would round an integer past `2^53` and the frontend installs a
-//! numeric hook — see [`native_rounds_operand`]) — modulo (`Mod`: integer
+//! numeric hook — see `native_rounds_operand`) — modulo (`Mod`: integer
 //! `srem` guarding the divisors that would trap, or an `fmod` libcall for
 //! floats) and power (`Pow`/`PowFloat` via a `powf` libcall), the math
 //! intrinsics (`AbsFloat`/`SqrtFloat`/`Ceil`/`Floor`/`Trunc`/`RoundFloat` as
