@@ -647,6 +647,41 @@ pub fn build_entry<M: Module>(module: &mut M, chunk: &Chunk) -> Result<FuncId, S
 /// them by name — see [`compile_program_object`]. Every function still lowers to
 /// native code (the fully-native path when the chunk qualifies, else the threaded
 /// path); only the export name differs.
+/// Which lowering the AOT compiler emits for a chunk — the decision
+/// [`build_named`] makes, exposed so a frontend can see (and pin in a test) what
+/// its own compiler's output actually gets. Both this and `build_named` route
+/// through `NativePlan::worth_lowering`, so they cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lowering {
+    /// Register-native: ops become real machine arithmetic, the operand stack
+    /// lives in registers. `covered` of the chunk's ops lower this way and
+    /// `deopts` of them exit to the interpreter; `deopts == 0` with
+    /// `covered == chunk.ops.len()` means the interpreter never runs.
+    Native {
+        /// Ops lowered to native IR.
+        covered: usize,
+        /// Ops among them that exit to the interpreter at run time.
+        deopts: usize,
+    },
+    /// One native block per op, each running that op through the runtime shim.
+    /// Still machine code — the whole chunk, with no bytecode dispatch loop —
+    /// but each op's *work* is a call into the runtime rather than inline IR.
+    /// This is what a shell chunk gets, and what the analysis falls back to.
+    Threaded,
+}
+
+/// The lowering [`build_named`] would pick for `chunk`. Cheap: it runs the
+/// analysis, not codegen.
+pub fn lowering_for(chunk: &Chunk) -> Lowering {
+    match analyze_native(chunk) {
+        Some(plan) if plan.worth_lowering(chunk) => Lowering::Native {
+            covered: plan.native_ops,
+            deopts: plan.deopt_points.len(),
+        },
+        _ => Lowering::Threaded,
+    }
+}
+
 pub fn build_named<M: Module>(
     module: &mut M,
     chunk: &Chunk,
@@ -2246,6 +2281,15 @@ fn build_entry_native<M: Module>(
     let truthy_keep_id = module
         .declare_function("fusevm_aot_truthy_keep", Linkage::Import, &clone_sig)
         .map_err(|e| format!("aot: declare truthy_keep: {e}"))?;
+    // `finish` (vm) -> (): the stack-tail result rule, needed on the one native
+    // exit that leaves the result on the BOXED stack — a builtin that halted the
+    // VM (see the `Op::CallBuiltin` arm). Every other exit reports its result
+    // from a register through `set_*_result`.
+    let mut fin_sig = module.make_signature();
+    fin_sig.params.push(AbiParam::new(ptr_ty));
+    let fin_id = module
+        .declare_function("fusevm_aot_finish", Linkage::Import, &fin_sig)
+        .map_err(|e| format!("aot: declare finish: {e}"))?;
 
     let mut resume_sig = module.make_signature();
     resume_sig.params.push(AbiParam::new(ptr_ty));
@@ -2322,6 +2366,7 @@ fn build_entry_native<M: Module>(
         let free_ref = module.declare_func_in_func(free_id, b.func);
         let truthy_ref = module.declare_func_in_func(truthy_id, b.func);
         let truthy_keep_ref = module.declare_func_in_func(truthy_keep_id, b.func);
+        let fin_ref = module.declare_func_in_func(fin_id, b.func);
         let lsi_ref = module.declare_func_in_func(lsi_id, b.func);
         let guard_ref = module.declare_func_in_func(guard_id, b.func);
         let resume_ref = module.declare_func_in_func(resume_id, b.func);
@@ -2639,6 +2684,14 @@ fn build_entry_native<M: Module>(
                     b.ins().brif(is_halt, halt_blk, &[], check_blk, &[]);
 
                     b.switch_to_block(halt_blk);
+                    // The op ended the run. Its result — an `ExecFlow::Ret`
+                    // value the shim already stored, or whatever the handler
+                    // left on the boxed stack before halting — is reported by
+                    // `finish`, exactly as the threaded path's ret block does.
+                    // Returning without it would answer `Halted` where the
+                    // interpreter answers the handler's value.
+                    let vmm = b.use_var(vm_var);
+                    b.ins().call(fin_ref, &[vmm]);
                     let z = b.ins().iconst(types::I64, 0);
                     b.ins().return_(&[z]);
 
@@ -4109,6 +4162,41 @@ fn build_entry_threaded<M: Module>(
 /// the VM before the run. This validates the closed-world compiler end to end
 /// and is the in-memory analog of the on-disk object path.
 pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result<VMResult, String> {
+    Ok(run_chunk_with(chunk, register, build_entry)?.take_aot_result())
+}
+
+/// Same, but forced onto the threaded lowering — the fallback `build_named`
+/// picks when a native plan would cover too little of the chunk. Tests use it to
+/// run ONE chunk through BOTH lowerings and pin that they agree, which is the
+/// invariant that lets `NativePlan::worth_lowering` choose freely between them.
+#[cfg(test)]
+fn run_chunk_threaded(
+    chunk: &Chunk,
+    register: impl FnOnce(&mut VM),
+) -> Result<VMResult, String> {
+    Ok(run_chunk_with(chunk, register, |m, c| {
+        build_entry_threaded(m, c, AOT_ENTRY_SYMBOL)
+    })?
+    .take_aot_result())
+}
+
+/// Same as [`run_chunk_native`] but hands back the finished VM, so a test can
+/// inspect runtime state the result value doesn't carry (arena occupancy).
+#[cfg(test)]
+fn run_chunk_native_vm(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result<VM, String> {
+    run_chunk_with(chunk, register, build_entry)
+}
+
+/// Shared body of the two runners: stand up a JIT module with every runtime shim
+/// registered, lower `chunk` with `build`, and run the result on a fresh VM.
+fn run_chunk_with<F>(
+    chunk: &Chunk,
+    register: impl FnOnce(&mut VM),
+    build: F,
+) -> Result<VM, String>
+where
+    F: FnOnce(&mut JITModule, &Chunk) -> Result<FuncId, String>,
+{
     let isa = host_isa()?;
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
     builder.symbol("fusevm_aot_exec_op", fusevm_aot_exec_op as *const u8);
@@ -4188,7 +4276,7 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
     );
     let mut module = JITModule::new(builder);
 
-    let entry_id = build_entry(&mut module, chunk)?;
+    let entry_id = build(&mut module, chunk)?;
     module
         .finalize_definitions()
         .map_err(|e| format!("aot: finalize: {e}"))?;
@@ -4199,7 +4287,7 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
     let mut vm = VM::new(chunk.clone());
     register(&mut vm);
     let _ = entry(&mut vm as *mut VM);
-    Ok(vm.take_aot_result())
+    Ok(vm)
 }
 
 /// Build a Cranelift ISA for emitting a relocatable object (`is_pic=true`).
@@ -4421,7 +4509,7 @@ mod tests {
     /// Whether `build_named` would actually take the native path — stricter than
     /// [`native_lowerable`], which only says a plan exists.
     fn native_path_taken(chunk: &Chunk) -> bool {
-        analyze_native(chunk).is_some_and(|p| p.worth_lowering(chunk))
+        matches!(lowering_for(chunk), Lowering::Native { .. })
     }
 
     #[test]
@@ -7085,5 +7173,367 @@ mod tests {
             "an un-declared builtin call must be a deopt point"
         );
         assert_native_matches_interp_with(chunk, register_test_builtins);
+    }
+
+    // ── Both lowerings must agree ─────────────────────────────────────────
+    //
+    // `NativePlan::worth_lowering` is free to send a chunk down either path, so
+    // the paths have to answer identically. Anything else turns a codegen
+    // heuristic into a behaviour change.
+
+    /// Run `chunk` through the native path, the threaded path, and the
+    /// interpreter, and assert all three agree.
+    fn assert_all_three_agree(label: &str, chunk: &Chunk, register: fn(&mut VM)) {
+        let interp = {
+            let mut vm = VM::new(chunk.clone());
+            register(&mut vm);
+            vm.run()
+        };
+        let native = run_chunk_native(chunk, register).expect("native");
+        let threaded = run_chunk_threaded(chunk, register).expect("threaded");
+        let same = |a: &VMResult, b: &VMResult| match (a, b) {
+            (VMResult::Ok(x), VMResult::Ok(y)) => x == y,
+            (VMResult::Halted, VMResult::Halted) => true,
+            (VMResult::Error(x), VMResult::Error(y)) => x == y,
+            _ => false,
+        };
+        assert!(
+            same(&interp, &native),
+            "{label}: interp {interp:?} != native {native:?}"
+        );
+        assert!(
+            same(&interp, &threaded),
+            "{label}: interp {interp:?} != threaded {threaded:?}"
+        );
+    }
+
+    #[test]
+    fn native_and_threaded_lowerings_agree() {
+        // Scalar arithmetic — the fully-register-native shape.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(6), 1);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::Mul, 1);
+        assert_all_three_agree("mul", &b.build(), |_| {});
+
+        // Float promotion.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::LoadFloat(2.0), 1);
+        b.emit(Op::Div, 1);
+        assert_all_three_agree("div", &b.build(), |_| {});
+
+        // Divide by zero — native `fdiv` guard deopts, threaded never lowered it.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::Div, 1);
+        assert_all_three_agree("div0", &b.build(), |_| {});
+
+        // Heap values: a string constant threaded through a boxed handle.
+        let mut b = ChunkBuilder::new();
+        let c = b.add_constant(Value::str("ab"));
+        b.emit(Op::LoadConst(c), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::StringRepeat, 1);
+        assert_all_three_agree("repeat", &b.build(), |_| {});
+
+        // A loop with a slot accumulator.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let top = b.current_pos();
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(10), 1);
+        b.emit(Op::NumLt, 1);
+        let back = b.emit(Op::JumpIfTrue(0), 1);
+        b.patch_jump(back, top);
+        b.emit(Op::GetSlot(0), 1);
+        assert_all_three_agree("loop", &b.build(), |_| {});
+
+        // Builtin calls, both with and without the inline-lowering opt-in.
+        for optin in [false, true] {
+            let mut b = ChunkBuilder::new();
+            b.set_builtin_argc_is_arity(optin);
+            b.emit(Op::LoadInt(4), 1);
+            b.emit(Op::LoadInt(9), 1);
+            b.emit(Op::CallBuiltin(0, 2), 1);
+            assert_all_three_agree("builtin", &b.build(), register_test_builtins);
+        }
+    }
+
+    // ── The `CallBuiltin` cold paths ──────────────────────────────────────
+    //
+    // A builtin is the one shimmed op whose returned next-ip matters: the other
+    // heap ops fall through unconditionally. Both non-fallthrough answers have
+    // their own codegen block, and neither is reachable from an ordinary call.
+
+    /// Halts the VM the way a shell `exit` does, and returns a code.
+    fn halting_builtin(vm: &mut VM, _argc: u8) -> Value {
+        vm.request_halt();
+        Value::int(42)
+    }
+
+    /// Moves `vm.ip`, so `aot_exec_op` answers something other than `ip + 1`.
+    /// `VM::run` reads `self.ip` after `exec_op` the same way, so the
+    /// interpreter and the native path must land on the same instruction.
+    fn jumping_builtin(vm: &mut VM, _argc: u8) -> Value {
+        vm.ip = 4;
+        Value::int(0)
+    }
+
+    #[test]
+    fn native_callbuiltin_halt_ends_the_run() {
+        // `request_halt` makes the shim answer -1. The native code must return
+        // there instead of running on into the ops that follow.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        b.emit(Op::CallBuiltin(2, 0), 1); // halts
+        b.emit(Op::Pop, 1);
+        b.emit(Op::LoadInt(999), 1); // must NOT become the result
+        let chunk = b.build();
+        assert!(native_path_taken(&chunk), "the builtin call lowers inline");
+        let reg: fn(&mut VM) = |vm| vm.register_builtin(2, halting_builtin);
+        let native = run_chunk_native(&chunk, reg).expect("run");
+        match &native {
+            VMResult::Ok(v) => assert_ne!(*v, Value::int(999), "ran past the halt"),
+            VMResult::Halted => {}
+            other => panic!("got {other:?}"),
+        }
+        assert_all_three_agree("halt", &chunk, reg);
+    }
+
+    #[test]
+    fn native_callbuiltin_moved_ip_resumes_the_interpreter() {
+        // The handler jumps to ip 4, skipping the LoadInt(111) at ip 1..3.
+        // The native code can't keep going in registers past an ip it didn't
+        // plan for, so it spills and hands off — and must land on 222.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        b.emit(Op::CallBuiltin(3, 0), 1); // ip 0 — jumps to ip 4
+        b.emit(Op::Pop, 1); // ip 1
+        b.emit(Op::LoadInt(111), 1); // ip 2 — skipped
+        b.emit(Op::Jump(6), 1); // ip 3
+        b.emit(Op::Pop, 1); // ip 4 — drops the builtin's result
+        b.emit(Op::LoadInt(222), 1); // ip 5
+        let chunk = b.build();
+        assert!(native_path_taken(&chunk));
+        let reg: fn(&mut VM) = |vm| vm.register_builtin(3, jumping_builtin);
+        match run_chunk_native(&chunk, reg).expect("run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::int(222)),
+            other => panic!("got {other:?}"),
+        }
+        assert_all_three_agree("moved-ip", &chunk, reg);
+    }
+
+    // ── Boxed-handle bookkeeping ──────────────────────────────────────────
+
+    #[test]
+    fn native_obj_truthiness_keep_variants_peek_without_consuming() {
+        // `JumpIf*Keep` leaves its condition on the stack for BOTH arms, so the
+        // Obj case must peek the arena rather than take from it: consuming here
+        // would free a handle that is still live, and the value that survives
+        // the branch would read back as `Undef`.
+        //
+        // `tag_builtin` with one arg returns that arg as a string, so the
+        // condition is a truthy boxed "x" that the chunk then keeps as its
+        // result — proving the handle outlived the branch.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        let c = b.add_constant(Value::str("x"));
+        b.emit(Op::LoadConst(c), 1);
+        b.emit(Op::CallBuiltin(1, 1), 1); // boxed "x"
+        let jt = b.emit(Op::JumpIfTrueKeep(0), 1);
+        // Falsy arm: drop the kept value and answer a different string. Both
+        // arms must reach the end with the same stack KIND (`Obj` here) or the
+        // analysis refuses the chunk — a join it cannot type is a real bail,
+        // not the behaviour under test.
+        b.emit(Op::Pop, 1);
+        let no = b.add_constant(Value::str("no"));
+        b.emit(Op::LoadConst(no), 1);
+        let end = b.emit(Op::Jump(0), 1);
+        let target = b.current_pos();
+        b.patch_jump(jt, target);
+        let after = b.current_pos();
+        b.patch_jump(end, after);
+        let chunk = b.build();
+        assert!(native_path_taken(&chunk));
+        match run_chunk_native(&chunk, register_test_builtins).expect("run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::str("x"), "kept value was consumed"),
+            other => panic!("got {other:?}"),
+        }
+        assert_all_three_agree("keep-obj", &chunk, register_test_builtins);
+    }
+
+    #[test]
+    fn native_obj_logical_ops_use_the_value_not_the_handle() {
+        // `LogNot`/`LogAnd`/`LogOr` admit any operand kind, so an `Obj` reaches
+        // them too — and like the branches, they must ask the runtime for
+        // truthiness. `tag_builtin` with 0 args returns "" (falsy) and with 1
+        // arg returns a non-empty string (truthy); both live at nonzero arena
+        // indices, so testing the register would answer "truthy" for each.
+        for (argc, expect_not) in [(0u8, 1i64), (1u8, 0)] {
+            let mut b = ChunkBuilder::new();
+            b.set_builtin_argc_is_arity(true);
+            if argc == 1 {
+                let c = b.add_constant(Value::str("x"));
+                b.emit(Op::LoadConst(c), 1);
+            }
+            b.emit(Op::CallBuiltin(1, argc), 1);
+            b.emit(Op::LogNot, 1);
+            b.emit(Op::TruncInt, 1); // Bool result would not box as the answer
+            let chunk = b.build();
+            assert!(native_path_taken(&chunk), "argc={argc}");
+            match run_chunk_native(&chunk, register_test_builtins).expect("run") {
+                VMResult::Ok(v) => assert_eq!(v, Value::int(expect_not), "argc={argc}"),
+                other => panic!("got {other:?}"),
+            }
+            assert_all_three_agree("lognot-obj", &chunk, register_test_builtins);
+        }
+
+        // LogOr over two boxed operands: "" || "x" is true.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        b.emit(Op::CallBuiltin(1, 0), 1); // ""
+        let c = b.add_constant(Value::str("x"));
+        b.emit(Op::LoadConst(c), 1);
+        b.emit(Op::CallBuiltin(1, 1), 1); // "x"
+        b.emit(Op::LogOr, 1);
+        b.emit(Op::TruncInt, 1);
+        let chunk = b.build();
+        match run_chunk_native(&chunk, register_test_builtins).expect("run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::int(1)),
+            other => panic!("got {other:?}"),
+        }
+        assert_all_three_agree("logor-obj", &chunk, register_test_builtins);
+    }
+
+    #[test]
+    fn native_callbuiltin_handles_are_recycled() {
+        // Every builtin result is boxed into the arena. A loop that discards its
+        // results must return those slots to the free list — otherwise a long-
+        // running script grows the arena once per call, which is a leak in the
+        // shape of correct output.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let top = b.current_pos();
+        b.emit(Op::CallBuiltin(1, 0), 1); // boxes a result
+        b.emit(Op::Pop, 1); // and drops it
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(500), 1);
+        b.emit(Op::NumLt, 1);
+        let back = b.emit(Op::JumpIfTrue(0), 1);
+        b.patch_jump(back, top);
+        b.emit(Op::GetSlot(0), 1);
+        let chunk = b.build();
+        // Slots + builtins can't be register-cached together, so this runs
+        // threaded — which is the path a real shell loop takes, and the one
+        // whose handle accounting matters most.
+        let vm = run_chunk_native_vm(&chunk, register_test_builtins).expect("run");
+        assert!(
+            vm.aot_arena_len() <= 4,
+            "arena grew to {} over 500 boxed-and-dropped results",
+            vm.aot_arena_len()
+        );
+    }
+
+    // ── The coverage gate's boundary ──────────────────────────────────────
+
+    #[test]
+    fn worth_lowering_boundary_is_half_the_chunk() {
+        // Straight-line, no loop: the rule is "native only if it covers at least
+        // half". Build a chunk whose native prefix is exactly at, and then just
+        // under, that line — the two must land on opposite sides.
+        let build = |prefix: usize, tail: usize| {
+            let mut b = ChunkBuilder::new();
+            for _ in 0..prefix {
+                b.emit(Op::LoadInt(1), 1);
+                b.emit(Op::Pop, 1);
+            }
+            b.emit(Op::SortDefault, 1); // not lowerable → deopt point
+            for _ in 0..tail {
+                b.emit(Op::LoadInt(2), 1);
+                b.emit(Op::Pop, 1);
+            }
+            b.build()
+        };
+
+        // 20 covered ops of 41 total — just under half.
+        let under = build(10, 10);
+        let p = analyze_native(&under).expect("plan");
+        assert_eq!(p.native_ops, 20);
+        assert!(!p.native_loop);
+        assert!(
+            !p.worth_lowering(&under),
+            "{} of {} is under half",
+            p.native_ops,
+            under.ops.len()
+        );
+
+        // 40 covered ops of 51 total — well over.
+        let over = build(20, 5);
+        let p = analyze_native(&over).expect("plan");
+        assert_eq!(p.native_ops, 40);
+        assert!(p.worth_lowering(&over));
+
+        // Both still answer correctly whichever path they took.
+        assert_all_three_agree("under-half", &under, |_| {});
+        assert_all_three_agree("over-half", &over, |_| {});
+    }
+
+
+    #[test]
+    fn lowering_for_reports_the_path_each_chunk_takes() {
+        // The public read of the decision. A frontend uses this to check what
+        // its compiler's output gets — which is the only way the "every script
+        // lowered to two calls" regression was visible from outside fusevm.
+
+        // Fully native, no interpreter at all.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::Add, 1);
+        let chunk = b.build();
+        assert_eq!(
+            lowering_for(&chunk),
+            Lowering::Native {
+                covered: 3,
+                deopts: 0
+            }
+        );
+
+        // Native with a deopt: covered ops still outnumber the tail.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(40), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::Add, 1);
+        let c = b.add_constant(Value::str("!"));
+        b.emit(Op::LoadConst(c), 1);
+        b.emit(Op::Concat, 1);
+        let chunk = b.build();
+        match lowering_for(&chunk) {
+            Lowering::Native { covered, .. } => assert!(covered > 1, "covered={covered}"),
+            other => panic!("expected native, got {other:?}"),
+        }
+
+        // The shell shape: one lowerable op, then a long body behind a deopt.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::SortDefault, 1);
+        for _ in 0..40 {
+            b.emit(Op::LoadInt(2), 1);
+            b.emit(Op::Pop, 1);
+        }
+        assert_eq!(lowering_for(&b.build()), Lowering::Threaded);
     }
 }

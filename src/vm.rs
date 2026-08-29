@@ -4104,6 +4104,14 @@ impl VM {
         self.aot_alloc(v)
     }
 
+    /// How many arena slots the native path currently holds. The arena is a
+    /// free-list, so a chunk that boxes and discards handles in a loop must keep
+    /// this bounded rather than growing once per iteration; tests assert that.
+    #[cfg(all(feature = "aot", test))]
+    pub(crate) fn aot_arena_len(&self) -> usize {
+        self.aot_arena.len()
+    }
+
     /// Truthiness of the value behind `handle`, *consuming* the handle — the
     /// `Kind::Obj` case of `JumpIfTrue`/`JumpIfFalse`, which pop their condition.
     /// A boxed value's truthiness is [`Value::is_truthy`] (an empty string, an

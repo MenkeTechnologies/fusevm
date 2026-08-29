@@ -593,6 +593,18 @@ threaded lowering: a shell chunk starts `LoadInt` then `CallBuiltin`, so an enti
 script compiled to a native driver of two calls (`push_int`, then `resume`) with
 the whole program interpreted.
 
+`aot::lowering_for(&chunk)` reports that decision without running codegen:
+
+```rust
+match fusevm::aot::lowering_for(&chunk) {
+    Lowering::Native { covered, deopts } => …, // ops in registers; `deopts` exit to the interpreter
+    Lowering::Threaded => …,                   // one native block per op, each calling the runtime
+}
+```
+
+A frontend should pin it in a test. That regression was invisible from outside
+fusevm — the binary was produced, ran, and printed the right answer.
+
 ### Partial deopt (one-way exit to the interpreter)
 
 Anything the native path can't handle at a given op — a string/array/hash/heap
