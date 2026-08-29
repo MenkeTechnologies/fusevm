@@ -445,7 +445,7 @@ fn sited_hook_separates_int_and_long_sites_in_one_chunk() {
 
 /// A frontend that opts into nothing must be byte-identical to before: no hook,
 /// no range, `i64::MAX + 1` still wraps at 64 bits and nothing is consulted.
-/// This is the blast-radius pin for the other sixteen frontends.
+/// This is the blast-radius pin for the other seventeen frontends.
 #[test]
 fn default_policy_still_wraps_at_i64_with_no_hook() {
     let mut vm = VM::new(binop_chunk(i64::MAX, 1, Op::Add));
