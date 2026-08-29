@@ -119,6 +119,33 @@
 //! scalar). Anything not yet specialized falls back wholesale to
 //! `build_entry_threaded`.
 //!
+//! # Builtin calls
+//!
+//! [`Op::CallBuiltin`] crosses the same boundary — operands spilled from
+//! registers, the handler run through the shim, its result threaded back as a
+//! boxed `Obj` handle — with one addition: the shim's returned next-ip is
+//! *honoured*, because a builtin is the one shimmed op that can end the run (a
+//! handler calling [`VM::request_halt`], e.g. a shell `exit`) or move `vm.ip`.
+//!
+//! It is gated on [`Chunk::builtin_argc_is_arity`] and off by default. Native
+//! codegen needs `argc` to be the op's exact stack effect, and that is a
+//! per-frontend property, not a guarantee of the opcode: zshrs emits
+//! `CallBuiltin(BUILTIN_XTRACE_ARGS, 2)` for a handler that pops one value and
+//! peeks the rest. Without the declaration a builtin call stays a deopt point,
+//! and — since a shell chunk's *second* op is already a builtin — such a chunk
+//! lowers through `build_entry_threaded` instead (see below).
+//!
+//! # Choosing between the two paths
+//!
+//! A deopt is one-way: the interpreter owns everything after it. So a plan that
+//! lowers a short prefix and deopts is *worse* than no plan at all, because the
+//! threaded path lowers every op to a native block. `NativePlan::worth_lowering`
+//! makes that call — the native path wins when it lowers the chunk outright,
+//! when it covers a loop, or when it covers most of the ops; otherwise the
+//! threaded path takes it. Without that gate a one-op plan silently beat a full
+//! threaded lowering, and every shell script compiled to a native driver of two
+//! calls (`push_int`, then `resume`) with the whole program interpreted.
+//!
 //! [`build_entry`] is generic over [`Module`], so the in-memory JIT path used
 //! to validate the compiler ([`run_chunk_native`]) and the on-disk object path
 //! (`ObjectModule`, wired in the linker stage) share identical codegen.
@@ -156,8 +183,11 @@ use std::path::Path;
 /// fusevm, which is what actually happened. Bump the last byte whenever
 /// `Chunk`'s serialized shape changes.
 ///
-/// `FVAOT002` — 001 was the unstamped layout, before `Chunk::sub_slot_names`.
-pub const AOT_CHUNK_MAGIC: &[u8; 8] = b"FVAOT002";
+/// `FVAOT003` — 001 was the unstamped layout, 002 predates
+/// `Chunk::builtin_argc_is_arity`. Bumped on every `Chunk` layout change so an
+/// object built by an older fusevm is REJECTED with a rebuild message instead of
+/// mis-deserializing.
+pub const AOT_CHUNK_MAGIC: &[u8; 8] = b"FVAOT003";
 
 /// Exported symbol of the embedded serialized chunk (defined in the object).
 pub const AOT_CHUNK_BLOB_SYMBOL: &str = "fusevm_aot_chunk_blob";
@@ -286,6 +316,28 @@ pub extern "C" fn fusevm_aot_free(vm: *mut VM, handle: i64) {
     debug_assert!(!vm.is_null());
     // SAFETY: see the function contract; the driver owns the VM for the run.
     unsafe { (*vm).aot_free(handle) }
+}
+
+/// Truthiness of a boxed handle, consuming it (`VM::aot_truthy`).
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_truthy(vm: *mut VM, handle: i64) -> i64 {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_truthy(handle) }
+}
+
+/// Truthiness of a boxed handle, leaving it owned (`VM::aot_truthy_keep`).
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub extern "C" fn fusevm_aot_truthy_keep(vm: *mut VM, handle: i64) -> i64 {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_truthy_keep(handle) }
 }
 
 /// Deopt writeback of an `Obj` slot from a register handle
@@ -601,8 +653,13 @@ pub fn build_named<M: Module>(
     symbol: &str,
 ) -> Result<FuncId, String> {
     match analyze_native(chunk) {
-        Some(plan) => build_entry_native(module, chunk, &plan, symbol),
-        None => build_entry_threaded(module, chunk, symbol),
+        // A plan that lowers too little is worse than no plan: its deopt is
+        // one-way, so the interpreter gets everything after it, whereas the
+        // threaded path lowers every op. See `NativePlan::worth_lowering`.
+        Some(plan) if plan.worth_lowering(chunk) => {
+            build_entry_native(module, chunk, &plan, symbol)
+        }
+        _ => build_entry_threaded(module, chunk, symbol),
     }
 }
 
@@ -721,8 +778,24 @@ fn var_ty_kind(plan: &NativePlan, key: u32) -> Kind {
 /// Pop counts MUST exactly match the interpreter's op (else the boxed stack
 /// desyncs). `Concat` has its own arm; everything here is fixed- or
 /// operand-encoded-arity with no register-resident operands of its own.
-fn heap_op_effect(op: &Op) -> Option<(usize, Option<Kind>)> {
+fn heap_op_effect(chunk: &Chunk, op: &Op) -> Option<(usize, Option<Kind>)> {
     Some(match op {
+        // A frontend builtin: pops `argc` operands, pushes exactly one result
+        // (`VM::exec_op`'s `Op::CallBuiltin` arm always pushes the handler's
+        // return). The result's type is decided by the handler at run time, so
+        // it comes back as a boxed `Obj` handle rather than a typed scalar.
+        // Codegen has its OWN arm for this op (it must also honour the shim's
+        // returned next-ip); this entry is what `analyze_native` reads for the
+        // stack effect.
+        //
+        // Gated on `Chunk::builtin_argc_is_arity`, because `argc` is only a
+        // stack arity when the frontend says so — a handler that peeks its
+        // arguments instead of popping them would desync the boxed stack. Also
+        // sound only in a chunk that register-caches no slot or global (a
+        // handler holds `&mut VM`) — see `builtin_var_conflict`.
+        Op::CallBuiltin(_, argc) if chunk.builtin_argc_is_arity => {
+            (*argc as usize, Some(Kind::Obj))
+        }
         Op::StringRepeat => (2, Some(Kind::Obj)),
         Op::StringLen => (1, Some(Kind::Int)),
         // String comparisons: pop 2 (stringified operands), push Bool; `StrCmp`
@@ -800,6 +873,49 @@ fn heap_op_effect(op: &Op) -> Option<(usize, Option<Kind>)> {
         Op::HashExists(_) => (1, Some(Kind::Bool)),
         _ => return None,
     })
+}
+
+/// Whether `op` makes the native path hold a slot or global in a register.
+/// `Op::CallBuiltin` runs a frontend handler with `&mut VM`, and both
+/// [`VM::slots`] and [`VM::globals`] are public — a handler may read or write
+/// either, which would leave those registers stale (or lose a write). fusevm
+/// cannot see what an arbitrary frontend handler touches, so rather than assume,
+/// a chunk that calls a builtin AND register-caches any variable is refused for
+/// the native path entirely (`build_named` lowers it through the threaded path,
+/// which keeps every variable in the VM where the handler expects it).
+fn caches_var(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::GetSlot(_)
+            | Op::SetSlot(_)
+            | Op::PreIncSlot(_)
+            | Op::PreIncSlotVoid(_)
+            | Op::PreDecSlot(_)
+            | Op::PostIncSlot(_)
+            | Op::PostDecSlot(_)
+            | Op::SlotLtIntJumpIfFalse(_, _, _)
+            | Op::SlotIncLtIntJumpBack(_, _, _)
+            | Op::AddAssignSlotVoid(_, _)
+            | Op::AccumSumLoop(_, _, _)
+            | Op::GetVar(_)
+            | Op::SetVar(_)
+            | Op::DeclareVar(_)
+    )
+}
+
+/// Whether `chunk` mixes a builtin call with register-cached variables — the
+/// unsound combination described on [`caches_var`]. Seeded slots count: the
+/// driver holds those in registers too.
+fn builtin_var_conflict(chunk: &Chunk) -> bool {
+    // Only when builtin calls are lowered inline. With the flag off they stay
+    // deopt points, and a deopt writes the registers back before the
+    // interpreter runs the handler — so there is nothing to go stale.
+    chunk.builtin_argc_is_arity
+        && chunk
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::CallBuiltin(_, _)))
+        && (chunk.aot_seeded_slots > 0 || chunk.ops.iter().any(caches_var))
 }
 
 /// Name-pool index of a heap op that reads/writes `self.globals[name]` in the
@@ -985,6 +1101,32 @@ struct NativePlan {
     /// Leading slots the caller seeds before the run (`Chunk::aot_seeded_slots`):
     /// codegen loads and integer-guards each on entry instead of zero-initing it.
     seeded_slots: u16,
+    /// How many ops this plan actually lowers (reached natively and not a deopt
+    /// point). With the deopt machinery a plan may cover as little as ONE op and
+    /// hand the rest to the interpreter — see `NativePlan::worth_lowering`.
+    native_ops: usize,
+    /// Whether the natively-covered region contains a back-edge (a jump to an ip
+    /// at or before itself), i.e. a loop.
+    native_loop: bool,
+}
+
+impl NativePlan {
+    /// Whether the native path is the better lowering for this chunk, or whether
+    /// [`build_entry_threaded`] should take it instead.
+    ///
+    /// A deopt is one-way: everything after it is interpreted. So a plan that
+    /// lowers a short prefix and deopts leaves the whole body to the interpreter,
+    /// while the threaded path lowers EVERY op to a native block. The native path
+    /// is the better choice when it lowers the chunk outright, when it covers a
+    /// loop (where the run's time goes), or when it covers most of the ops.
+    ///
+    /// Without this, a plan of one op silently beat a full threaded lowering: a
+    /// shell chunk begins `LoadInt` (lowerable) then `CallBuiltin`, so every zsh
+    /// script compiled to a native driver of one `push_int` and a `resume`, with
+    /// the entire program interpreted — machine code in name only.
+    fn worth_lowering(&self, chunk: &Chunk) -> bool {
+        self.deopt_points.is_empty() || self.native_loop || self.native_ops * 2 >= chunk.ops.len()
+    }
 }
 
 /// Whether `chunk` lowers natively — thin wrapper over `analyze_native` used
@@ -1100,6 +1242,8 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             deopt_points: BTreeSet::new(),
             inits_at: HashMap::new(),
             seeded_slots: 0,
+            native_ops: 0,
+            native_loop: false,
         });
     }
 
@@ -1129,6 +1273,11 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     // check below and falls back, and a non-integer argument trips the entry guard.
     let seeded = chunk.aot_seeded_slots;
     if seeded as usize > NATIVE_SLOT_LIMIT {
+        return None;
+    }
+    // A builtin handler may touch `vm.slots`/`vm.globals` behind the native
+    // path's back; refuse to hold either in a register in the same chunk.
+    if builtin_var_conflict(chunk) {
         return None;
     }
     let mut entry_inits = BTreeSet::new();
@@ -1727,8 +1876,8 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
             // Boxed heap ops (string repeat/len, array/hash construction,
             // ranges): pop their operands, push the result kind (Obj or scalar).
             // Run through the shim with box/unbox staging in codegen.
-            op if heap_op_effect(op).is_some() => {
-                let (pops, res) = heap_op_effect(op).unwrap();
+            op if heap_op_effect(chunk, op).is_some() => {
+                let (pops, res) = heap_op_effect(chunk, op).unwrap();
                 for _ in 0..pops {
                     st.pop()?;
                 }
@@ -1846,7 +1995,10 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     let has_ovf_arith =
         chunk.int_overflow_deopt && ops.iter().any(|o| matches!(o, Op::Add | Op::Sub | Op::Mul));
     let has_div = ops.iter().any(|o| matches!(o, Op::Div));
-    let may = if deopt_points.is_empty() && !has_ovf_arith && !has_div {
+    // `CallBuiltin` also deopts at run time — on the cold path where the handler
+    // halted the VM or moved `vm.ip` — without being in `deopt_points`.
+    let has_builtin = ops.iter().any(|o| matches!(o, Op::CallBuiltin(_, _)));
+    let may = if deopt_points.is_empty() && !has_ovf_arith && !has_div && !has_builtin {
         HashMap::new()
     } else {
         may_assigned(chunk, n, &deopt_points)
@@ -1854,7 +2006,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     let mut inits_at: HashMap<usize, BTreeSet<u32>> = HashMap::new();
     for &ip in state.keys() {
         if deopt_points.contains(&ip)
-            || matches!(ops[ip], Op::Div)
+            || matches!(ops[ip], Op::Div | Op::CallBuiltin(_, _))
             || (chunk.int_overflow_deopt && matches!(ops[ip], Op::Add | Op::Sub | Op::Mul))
         {
             inits_at.insert(ip, may.get(&ip).cloned().unwrap_or_default());
@@ -1868,6 +2020,19 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     let slot_count = max_slot.map_or(0, |m| m as usize + 1);
     let global_count = max_global.map_or(0, |m| m as usize + 1);
 
+    // Coverage, for `NativePlan::worth_lowering`: the ops this plan really
+    // lowers, and whether any of them jumps backwards (a loop).
+    let native_ops = state
+        .keys()
+        .filter(|ip| !deopt_points.contains(ip))
+        .count();
+    let native_loop = state.keys().any(|&ip| {
+        !deopt_points.contains(&ip)
+            && native_successors(chunk, ip, &deopt_points)
+                .iter()
+                .any(|&s| s <= ip)
+    });
+
     Some(NativePlan {
         leaders,
         entry_kinds,
@@ -1879,6 +2044,8 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
         deopt_points,
         inits_at,
         seeded_slots: seeded,
+        native_ops,
+        native_loop,
     })
 }
 
@@ -2072,6 +2239,13 @@ fn build_entry_native<M: Module>(
     let free_id = module
         .declare_function("fusevm_aot_free", Linkage::Import, &pushi_sig)
         .map_err(|e| format!("aot: declare free: {e}"))?;
+    // Boxed-value truthiness, (vm, i64 handle) -> i64 — same shape as `clone`.
+    let truthy_id = module
+        .declare_function("fusevm_aot_truthy", Linkage::Import, &clone_sig)
+        .map_err(|e| format!("aot: declare truthy: {e}"))?;
+    let truthy_keep_id = module
+        .declare_function("fusevm_aot_truthy_keep", Linkage::Import, &clone_sig)
+        .map_err(|e| format!("aot: declare truthy_keep: {e}"))?;
 
     let mut resume_sig = module.make_signature();
     resume_sig.params.push(AbiParam::new(ptr_ty));
@@ -2146,6 +2320,8 @@ fn build_entry_native<M: Module>(
         let obj_res_ref = module.declare_func_in_func(obj_res_id, b.func);
         let clone_ref = module.declare_func_in_func(clone_id, b.func);
         let free_ref = module.declare_func_in_func(free_id, b.func);
+        let truthy_ref = module.declare_func_in_func(truthy_id, b.func);
+        let truthy_keep_ref = module.declare_func_in_func(truthy_keep_id, b.func);
         let lsi_ref = module.declare_func_in_func(lsi_id, b.func);
         let guard_ref = module.declare_func_in_func(guard_id, b.func);
         let resume_ref = module.declare_func_in_func(resume_id, b.func);
@@ -2403,12 +2579,129 @@ fn build_entry_native<M: Module>(
                     b.def_var(ivars[ix], h);
                     kinds.push(Kind::Obj);
                 }
+                // A frontend builtin. Same spill/run/reload boundary as the heap
+                // ops below — stage `argc` operands onto the boxed stack, run the
+                // handler through the shim, box its pushed result back into a
+                // register — with one addition: the shim's RETURN VALUE is
+                // honoured. `VM::aot_exec_op` answers the next ip, and a builtin
+                // is the one shimmed op that can change it: a handler may halt
+                // the VM (`VM::request_halt` — a shell `exit`) or store a result,
+                // which answers -1, and a handler that moves `vm.ip` answers some
+                // other target. Ignoring that (as the straight-line heap ops do)
+                // would run on past a halt.
+                //
+                // Sound because `analyze_native` refuses any chunk that mixes a
+                // builtin with register-cached slots/globals (`caches_var`), so
+                // there is no variable state a handler could stale — only the
+                // operand-stack registers, which the cold path spills.
+                Op::CallBuiltin(_, argc) if chunk.builtin_argc_is_arity => {
+                    let pops = *argc as usize;
+                    let base = kinds.len() - pops;
+                    // Operands, bottom-most first (the interpreter's order).
+                    for pos in base..kinds.len() {
+                        let vm = b.use_var(vm_var);
+                        match kinds[pos] {
+                            Kind::Float => {
+                                let v = b.use_var(fvars[pos]);
+                                b.ins().call(pushf_ref, &[vm, v]);
+                            }
+                            Kind::Bool => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(pushb_ref, &[vm, v]);
+                            }
+                            Kind::Status => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(push_status_ref, &[vm, v]);
+                            }
+                            Kind::Int => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(pushi_ref, &[vm, v]);
+                            }
+                            Kind::Obj => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(unbox_ref, &[vm, v]);
+                            }
+                        }
+                    }
+                    let vm = b.use_var(vm_var);
+                    let ipc = b.ins().iconst(types::I64, ip as i64);
+                    let call = b.ins().call(exec_ref, &[vm, ipc]);
+                    let next = b.inst_results(call)[0];
+                    kinds.truncate(base);
+
+                    // -1 ⇒ the run is over and `aot_exec_op` already stored the
+                    // result; return without touching `aot_result`.
+                    let halt_blk = b.create_block();
+                    let check_blk = b.create_block();
+                    let moved_blk = b.create_block();
+                    let cont_blk = b.create_block();
+                    let is_halt = b.ins().icmp_imm(IntCC::SignedLessThan, next, 0);
+                    b.ins().brif(is_halt, halt_blk, &[], check_blk, &[]);
+
+                    b.switch_to_block(halt_blk);
+                    let z = b.ins().iconst(types::I64, 0);
+                    b.ins().return_(&[z]);
+
+                    // Anything but `ip + 1` means the handler moved `vm.ip`:
+                    // hand the rest of the run to the interpreter there.
+                    b.switch_to_block(check_blk);
+                    let straight = b.ins().icmp_imm(IntCC::Equal, next, ip as i64 + 1);
+                    b.ins().brif(straight, cont_blk, &[], moved_blk, &[]);
+
+                    b.switch_to_block(moved_blk);
+                    // The result is on the boxed stack, ABOVE the operands the
+                    // registers still hold. Lift it into the arena, spill the
+                    // register stack underneath it, then put it back on top so
+                    // the interpreter resumes on the stack the op really left.
+                    let vmm = b.use_var(vm_var);
+                    let call = b.ins().call(box_ref, &[vmm]);
+                    let saved = b.inst_results(call)[0];
+                    for (pos, &k) in kinds.iter().enumerate() {
+                        let vm = b.use_var(vm_var);
+                        match k {
+                            Kind::Float => {
+                                let v = b.use_var(fvars[pos]);
+                                b.ins().call(pushf_ref, &[vm, v]);
+                            }
+                            Kind::Bool => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(pushb_ref, &[vm, v]);
+                            }
+                            Kind::Status => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(push_status_ref, &[vm, v]);
+                            }
+                            Kind::Int => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(pushi_ref, &[vm, v]);
+                            }
+                            Kind::Obj => {
+                                let v = b.use_var(ivars[pos]);
+                                b.ins().call(unbox_ref, &[vm, v]);
+                            }
+                        }
+                    }
+                    let vmm = b.use_var(vm_var);
+                    b.ins().call(unbox_ref, &[vmm, saved]);
+                    let vmm = b.use_var(vm_var);
+                    let nip = b.ins().ireduce(types::I32, next);
+                    b.ins().call(resume_ref, &[vmm, nip]);
+                    let z = b.ins().iconst(types::I64, 0);
+                    b.ins().return_(&[z]);
+
+                    // Straight-line path: box the pushed result into a register.
+                    b.switch_to_block(cont_blk);
+                    let vmm = b.use_var(vm_var);
+                    let call = b.ins().call(box_ref, &[vmm]);
+                    b.def_var(ivars[base], b.inst_results(call)[0]);
+                    kinds.push(Kind::Obj);
+                }
                 // Boxed heap ops (string repeat/len, array/hash construction,
                 // ranges): stage the top `pops` operands onto the boxed stack
                 // (scalars by kind, Obj handles unboxed; bottom-most first), run
                 // the shim, then reload the result (box an Obj, pop a scalar).
-                op if heap_op_effect(op).is_some() => {
-                    let (pops, res) = heap_op_effect(op).unwrap();
+                op if heap_op_effect(chunk, op).is_some() => {
+                    let (pops, res) = heap_op_effect(chunk, op).unwrap();
                     let base = kinds.len() - pops;
                     for pos in base..kinds.len() {
                         let vm = b.use_var(vm_var);
@@ -3344,7 +3637,9 @@ fn build_entry_native<M: Module>(
                 Op::LogNot => {
                     let k = kinds.pop().unwrap();
                     let idx = kinds.len();
-                    let pred = truthy(&mut b, &ivars, &fvars, idx, k);
+                    let pred = truthy(
+                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, idx, k, true,
+                    );
                     // !truthy: truthy ⇒ 0, falsy ⇒ 1.
                     let one = b.ins().iconst(types::I64, 1);
                     let zero = b.ins().iconst(types::I64, 0);
@@ -3436,8 +3731,12 @@ fn build_entry_native<M: Module>(
                     let iy = kinds.len();
                     let ka = kinds.pop().unwrap();
                     let ix = kinds.len();
-                    let ta = truthy(&mut b, &ivars, &fvars, ix, ka);
-                    let tb = truthy(&mut b, &ivars, &fvars, iy, kb);
+                    let ta = truthy(
+                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, ix, ka, true,
+                    );
+                    let tb = truthy(
+                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, iy, kb, true,
+                    );
                     let combined = match op {
                         Op::LogAnd => b.ins().band(ta, tb),
                         _ => b.ins().bor(ta, tb),
@@ -3481,15 +3780,28 @@ fn build_entry_native<M: Module>(
                     // Peek (don't pop): the value stays live on both arms.
                     let k = *kinds.last().unwrap();
                     let idx = kinds.len() - 1;
-                    let cond = truthy(&mut b, &ivars, &fvars, idx, k);
+                    let cond = truthy(
+                        &mut b,
+                        vm_var,
+                        truthy_ref,
+                        truthy_keep_ref,
+                        &ivars,
+                        &fvars,
+                        idx,
+                        k,
+                        false,
+                    );
                     b.ins()
                         .brif(cond, block_for(*t), &[], block_for(ip + 1), &[]);
                     terminated = true;
                 }
                 Op::JumpIfFalseKeep(t) => {
+                    // Peek (don't pop): the value stays live on both arms.
                     let k = *kinds.last().unwrap();
                     let idx = kinds.len() - 1;
-                    let cond = truthy(&mut b, &ivars, &fvars, idx, k);
+                    let cond = truthy(
+                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, idx, k, false,
+                    );
                     b.ins()
                         .brif(cond, block_for(ip + 1), &[], block_for(*t), &[]);
                     terminated = true;
@@ -3501,7 +3813,9 @@ fn build_entry_native<M: Module>(
                 Op::JumpIfTrue(t) => {
                     let k = kinds.pop().unwrap();
                     let idx = kinds.len();
-                    let cond = truthy(&mut b, &ivars, &fvars, idx, k);
+                    let cond = truthy(
+                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, idx, k, true,
+                    );
                     b.ins()
                         .brif(cond, block_for(*t), &[], block_for(ip + 1), &[]);
                     terminated = true;
@@ -3509,7 +3823,9 @@ fn build_entry_native<M: Module>(
                 Op::JumpIfFalse(t) => {
                     let k = kinds.pop().unwrap();
                     let idx = kinds.len();
-                    let cond = truthy(&mut b, &ivars, &fvars, idx, k);
+                    let cond = truthy(
+                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, idx, k, true,
+                    );
                     // truthy ⇒ fallthrough; false ⇒ branch to the target.
                     b.ins()
                         .brif(cond, block_for(ip + 1), &[], block_for(*t), &[]);
@@ -3633,12 +3949,17 @@ fn store_raw(
 /// Build an i8 truthiness predicate for the value at position `idx`, matching
 /// [`crate::value::Value::is_truthy`]: integers/bools are nonzero-true; floats
 /// use `!= 0.0` (unordered, so `NaN` is truthy).
+#[allow(clippy::too_many_arguments)]
 fn truthy(
     b: &mut FunctionBuilder,
+    vm_var: Variable,
+    truthy_ref: FuncRef,
+    truthy_keep_ref: FuncRef,
     ivars: &[Variable],
     fvars: &[Variable],
     idx: usize,
     k: Kind,
+    consume: bool,
 ) -> cranelift_codegen::ir::Value {
     match k {
         Kind::Float => {
@@ -3650,6 +3971,19 @@ fn truthy(
         Kind::Status => {
             let v = b.use_var(ivars[idx]);
             b.ins().icmp_imm(IntCC::Equal, v, 0)
+        }
+        // Obj: the register holds an *arena index*, not a value — testing it for
+        // zero would answer about the handle, not the string/array behind it (an
+        // empty string is falsy at any index). Ask the runtime, which applies
+        // `Value::is_truthy`. The consuming form matches `JumpIf*`'s pop; the
+        // keeping form matches `JumpIf*Keep`'s peek (the handle stays owned).
+        Kind::Obj => {
+            let h = b.use_var(ivars[idx]);
+            let vm = b.use_var(vm_var);
+            let f = if consume { truthy_ref } else { truthy_keep_ref };
+            let call = b.ins().call(f, &[vm, h]);
+            let r = b.inst_results(call)[0];
+            b.ins().icmp_imm(IntCC::NotEqual, r, 0)
         }
         // Int / Bool: nonzero is truthy.
         _ => {
@@ -3831,6 +4165,11 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
     builder.symbol("fusevm_aot_unbox", fusevm_aot_unbox as *const u8);
     builder.symbol("fusevm_aot_clone", fusevm_aot_clone as *const u8);
     builder.symbol("fusevm_aot_free", fusevm_aot_free as *const u8);
+    builder.symbol("fusevm_aot_truthy", fusevm_aot_truthy as *const u8);
+    builder.symbol(
+        "fusevm_aot_truthy_keep",
+        fusevm_aot_truthy_keep as *const u8,
+    );
     builder.symbol(
         "fusevm_aot_store_slot_obj",
         fusevm_aot_store_slot_obj as *const u8,
@@ -4060,17 +4399,29 @@ mod tests {
 
     /// Native AOT result must equal the interpreter's for the same chunk.
     fn assert_native_matches_interp(chunk: Chunk) {
+        assert_native_matches_interp_with(chunk, |_| {});
+    }
+
+    /// Same, for a chunk that needs frontend builtins registered on both VMs.
+    fn assert_native_matches_interp_with(chunk: Chunk, register: fn(&mut VM)) {
         let interp = {
             let mut vm = VM::new(chunk.clone());
+            register(&mut vm);
             vm.run()
         };
-        let native = run_chunk_native(&chunk, |_| {}).expect("native compile/run");
+        let native = run_chunk_native(&chunk, register).expect("native compile/run");
         match (interp, native) {
             (VMResult::Ok(a), VMResult::Ok(b)) => assert_eq!(a, b, "value mismatch"),
             (VMResult::Halted, VMResult::Halted) => {}
             (VMResult::Error(a), VMResult::Error(b)) => assert_eq!(a, b, "error mismatch"),
             (i, n) => panic!("interp {i:?} != native {n:?}"),
         }
+    }
+
+    /// Whether `build_named` would actually take the native path — stricter than
+    /// [`native_lowerable`], which only says a plan exists.
+    fn native_path_taken(chunk: &Chunk) -> bool {
+        analyze_native(chunk).is_some_and(|p| p.worth_lowering(chunk))
     }
 
     #[test]
@@ -6529,5 +6880,210 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(&obj);
+    }
+
+    // ── `CallBuiltin` lowering + the plan-coverage gate ───────────────────
+    //
+    // Before these, `analyze_native` returned a plan for every shell-shaped
+    // chunk that lowered exactly its first op and deopted at the first
+    // `CallBuiltin`, and `build_named` preferred that plan over a full threaded
+    // lowering. The compiled driver was two calls — `push_int` then `resume` —
+    // for any script, however large.
+
+    /// A builtin that sums its `argc` integer operands. Frontend-shaped: pops
+    /// its own arguments and returns one value.
+    fn sum_builtin(vm: &mut VM, argc: u8) -> Value {
+        let mut total = 0i64;
+        for _ in 0..argc {
+            total += vm.pop().to_int();
+        }
+        Value::int(total)
+    }
+
+    /// A builtin that returns a string, so its result is a genuinely boxed value
+    /// (not a scalar that happens to fit a register).
+    fn tag_builtin(vm: &mut VM, argc: u8) -> Value {
+        let mut s = String::new();
+        for _ in 0..argc {
+            s.push_str(&vm.pop().to_str());
+        }
+        Value::str(s)
+    }
+
+    fn register_test_builtins(vm: &mut VM) {
+        vm.register_builtin(0, sum_builtin);
+        vm.register_builtin(1, tag_builtin);
+    }
+
+    #[test]
+    fn native_callbuiltin_lowers_and_matches_interp() {
+        // Operands staged from registers, handler run through the shim, result
+        // threaded back as a boxed handle.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::CallBuiltin(0, 2), 1);
+        let chunk = b.build();
+        assert!(
+            native_path_taken(&chunk),
+            "a builtin call must take the native path, not deopt"
+        );
+        match run_chunk_native(&chunk, register_test_builtins).expect("run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::int(12)),
+            other => panic!("got {other:?}"),
+        }
+        assert_native_matches_interp_with(chunk, register_test_builtins);
+    }
+
+    #[test]
+    fn native_callbuiltin_result_feeds_later_ops() {
+        // The boxed result must be consumable: as another builtin's operand, as
+        // a branch condition, and as the chunk's result.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::CallBuiltin(0, 2), 1); // 5 (boxed)
+        b.emit(Op::LoadInt(10), 1);
+        b.emit(Op::CallBuiltin(0, 2), 1); // 15 — takes the boxed 5 back
+        let chunk = b.build();
+        assert!(native_path_taken(&chunk));
+        match run_chunk_native(&chunk, register_test_builtins).expect("run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::int(15)),
+            other => panic!("got {other:?}"),
+        }
+        assert_native_matches_interp_with(chunk, register_test_builtins);
+    }
+
+    #[test]
+    fn native_callbuiltin_with_slots_falls_back() {
+        // A handler gets `&mut VM` and both `slots` and `globals` are public, so
+        // a chunk that also register-caches a variable must NOT lower natively —
+        // the register could go stale behind the handler.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::CallBuiltin(0, 1), 1);
+        let chunk = b.build();
+        assert!(
+            !native_lowerable(&chunk),
+            "builtin + register-cached slot must fall back to threaded"
+        );
+        assert_native_matches_interp_with(chunk, register_test_builtins);
+
+        // Globals are the same hazard.
+        let mut b = ChunkBuilder::new();
+        b.set_builtin_argc_is_arity(true);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::SetVar(0), 1);
+        b.emit(Op::LoadInt(2), 1);
+        b.emit(Op::CallBuiltin(0, 1), 1);
+        let chunk = b.build();
+        assert!(!native_lowerable(&chunk));
+        assert_native_matches_interp_with(chunk, register_test_builtins);
+    }
+
+    #[test]
+    fn native_obj_truthiness_asks_the_value_not_the_handle() {
+        // A boxed operand's register holds an ARENA INDEX. Branching on that
+        // index answers about the handle, not the value: an empty string is
+        // falsy at every index, and index 0 would make any value falsy.
+        // `tag_builtin` with no args returns "" — falsy.
+        for (argc, expect) in [(0u8, 111i64), (1u8, 222)] {
+            let mut b = ChunkBuilder::new();
+            b.set_builtin_argc_is_arity(true);
+            if argc == 1 {
+                let c = b.add_constant(Value::str("x"));
+                b.emit(Op::LoadConst(c), 1);
+            }
+            b.emit(Op::CallBuiltin(1, argc), 1); // "" (falsy) or "x" (truthy)
+            let jf = b.emit(Op::JumpIfFalse(0), 1);
+            b.emit(Op::LoadInt(222), 1); // truthy arm
+            let end = b.emit(Op::Jump(0), 1);
+            let target = b.current_pos();
+            b.patch_jump(jf, target);
+            b.emit(Op::LoadInt(111), 1); // falsy arm
+            let after = b.current_pos();
+            b.patch_jump(end, after);
+            let chunk = b.build();
+            assert!(native_path_taken(&chunk), "argc={argc}");
+            match run_chunk_native(&chunk, register_test_builtins).expect("run") {
+                VMResult::Ok(v) => assert_eq!(v, Value::int(expect), "argc={argc}"),
+                other => panic!("got {other:?}"),
+            }
+            assert_native_matches_interp_with(chunk, register_test_builtins);
+        }
+    }
+
+    #[test]
+    fn short_native_prefix_prefers_threaded() {
+        // The shell shape: one lowerable op, then an op the register model can't
+        // hold, then a long body. The plan exists but covers 1 of N ops with no
+        // loop — the threaded path lowers all N, so it must win.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::SortDefault, 1); // not lowerable → deopt point at ip 1
+        for _ in 0..40 {
+            b.emit(Op::LoadInt(2), 1);
+            b.emit(Op::Pop, 1);
+        }
+        let chunk = b.build();
+        let plan = analyze_native(&chunk).expect("a plan still exists");
+        assert!(
+            !plan.worth_lowering(&chunk),
+            "a 1-op native prefix must not beat a full threaded lowering \
+             (native_ops={} of {})",
+            plan.native_ops,
+            chunk.ops.len()
+        );
+    }
+
+    #[test]
+    fn native_loop_coverage_keeps_the_native_path() {
+        // The converse: a hot numeric loop followed by an op that deopts still
+        // belongs on the native path, however few ops it covers proportionally.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let top = b.current_pos();
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(10), 1);
+        b.emit(Op::NumLt, 1);
+        let back = b.emit(Op::JumpIfTrue(0), 1);
+        b.patch_jump(back, top);
+        b.emit(Op::GetSlot(0), 1);
+        let chunk = b.build();
+        let plan = analyze_native(&chunk).expect("plan");
+        assert!(plan.native_loop, "the covered region contains a back-edge");
+        assert!(plan.worth_lowering(&chunk));
+        assert_native_matches_interp(chunk);
+    }
+
+    #[test]
+    fn callbuiltin_without_the_arity_optin_stays_a_deopt() {
+        // The default. zshrs emits `CallBuiltin(id, argc)` where `argc` is the
+        // command's word count and the handler may only PEEK those words — so
+        // `argc` is not a stack arity and the op cannot be lowered inline.
+        // Without the opt-in it must stay a deopt point, and the result must
+        // still match the interpreter.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::CallBuiltin(0, 2), 1);
+        let chunk = b.build();
+        assert!(!chunk.builtin_argc_is_arity, "opt-in is off by default");
+        let plan = analyze_native(&chunk).expect("plan");
+        assert!(
+            plan.deopt_points.contains(&2),
+            "an un-declared builtin call must be a deopt point"
+        );
+        assert_native_matches_interp_with(chunk, register_test_builtins);
     }
 }

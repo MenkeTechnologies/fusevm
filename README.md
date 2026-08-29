@@ -565,6 +565,34 @@ the shim then reloads the pushed value into a register with no type guard. Slots
 and globals are typed by a chunk-wide inferred kind, so a float accumulator
 (`sum += 0.5`) lowers to an `f64` register.
 
+**Builtin calls** cross the same boundary — operands spilled from registers, the
+handler run through the shim, the result threaded back as a boxed handle — with
+one addition: the shim's returned next-ip is *honoured*, because a builtin is the
+one shimmed op that can end the run (a handler calling `VM::request_halt`, e.g. a
+shell `exit`) or move `vm.ip`.
+
+It is gated on **`Chunk::builtin_argc_is_arity`**, off by default. Native codegen
+needs `argc` to be the op's exact stack effect, and that is a property of the
+frontend's builtin table, not of the opcode — zshrs, for instance, emits
+`CallBuiltin(BUILTIN_XTRACE_ARGS, 2)` for a handler that pops one value and
+*peeks* the rest, leaving them for the following op. A frontend sets the flag only
+when every one of its handlers pops exactly `argc` and pushes one result;
+otherwise a builtin call stays a deopt point. A chunk that lowers builtins inline
+must also register-cache no slot or global, since a handler holds `&mut VM` and
+both `slots` and `globals` are public.
+
+### Choosing between the two paths
+
+A deopt is one-way: the interpreter owns everything after it. So a plan that
+lowers a short prefix and deopts is *worse* than no plan at all, because the
+threaded path lowers every op to a native block. `build_named` weighs the two —
+the native path wins when it lowers the chunk outright, when the region it covers
+contains a loop, or when it covers at least half the ops; otherwise the threaded
+path takes the chunk. Without that gate a one-op plan silently beat a full
+threaded lowering: a shell chunk starts `LoadInt` then `CallBuiltin`, so an entire
+script compiled to a native driver of two calls (`push_int`, then `resume`) with
+the whole program interpreted.
+
 ### Partial deopt (one-way exit to the interpreter)
 
 Anything the native path can't handle at a given op — a string/array/hash/heap

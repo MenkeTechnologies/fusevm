@@ -4104,6 +4104,26 @@ impl VM {
         self.aot_alloc(v)
     }
 
+    /// Truthiness of the value behind `handle`, *consuming* the handle — the
+    /// `Kind::Obj` case of `JumpIfTrue`/`JumpIfFalse`, which pop their condition.
+    /// A boxed value's truthiness is [`Value::is_truthy`] (an empty string, an
+    /// empty array, `Status(0)`…), never the arena index the register carries, so
+    /// the native path must ask the runtime instead of testing the register.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_truthy(&mut self, handle: i64) -> i64 {
+        self.aot_take(handle).is_truthy() as i64
+    }
+
+    /// Truthiness of the value behind `handle` *without* consuming it — the
+    /// `Kind::Obj` case of `JumpIfTrueKeep`/`JumpIfFalseKeep`, which peek.
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_truthy_keep(&mut self, handle: i64) -> i64 {
+        match self.aot_arena.get(handle as usize) {
+            Some(v) => v.is_truthy() as i64,
+            None => 0,
+        }
+    }
+
     /// Free an owned handle without using its value (e.g. a slot overwritten, or
     /// an `Obj` popped). A negative handle is the "empty slot" sentinel: no-op.
     #[cfg(feature = "aot")]

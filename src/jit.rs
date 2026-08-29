@@ -4810,6 +4810,7 @@ mod cranelift_jit_impl {
             sub_chunks: Vec::new(),
             source: chunk.source.clone(),
             int_overflow_deopt: chunk.int_overflow_deopt,
+            builtin_argc_is_arity: chunk.builtin_argc_is_arity,
             op_hash: 0,
             native_id: 0,
             aot_seeded_slots: 0,

@@ -79,6 +79,26 @@ pub struct Chunk {
     /// input here instead of mis-reading something that follows.
     #[serde(default)]
     pub sub_slot_names: Vec<(usize, Vec<String>)>,
+    /// Opt-in: every [`Op::CallBuiltin(id, argc)`](crate::op::Op::CallBuiltin)
+    /// handler in this chunk pops **exactly** `argc` values and pushes exactly
+    /// one — `argc` is a stack arity, not just a hint the handler may consult.
+    ///
+    /// Native codegen needs that guarantee to lower a builtin call: it holds the
+    /// operand stack in registers, so it must know how many to spill before the
+    /// call and how deep the stack is after. Without the guarantee it cannot,
+    /// and the call becomes a deopt (or, chunk-wide, the threaded lowering).
+    ///
+    /// Default `false`, because it is NOT true of every frontend. zshrs, for
+    /// one, emits `CallBuiltin(BUILTIN_XTRACE_ARGS, 2)` for a handler that pops
+    /// one value and *peeks* the rest, leaving them for the following op — so
+    /// its `argc` describes the command's word count, not the op's stack effect.
+    /// A frontend sets this only when its whole builtin table is arity-honest.
+    ///
+    /// Declared last for the same reason as [`Chunk::sub_slot_names`]: an
+    /// appended field makes an older bincode blob run out of input here rather
+    /// than mis-read a field that follows.
+    #[serde(default)]
+    pub builtin_argc_is_arity: bool,
 }
 
 impl Chunk {
@@ -183,6 +203,15 @@ impl ChunkBuilder {
     /// overflow instead of wrapping.
     pub fn set_int_overflow_deopt(&mut self, on: bool) {
         self.chunk.int_overflow_deopt = on;
+    }
+
+    /// Declare that every builtin this chunk calls pops exactly its `argc` and
+    /// pushes one result, letting native codegen lower `Op::CallBuiltin` inline
+    /// instead of deopting (see [`Chunk::builtin_argc_is_arity`]). Only set this
+    /// when it holds for the whole builtin table — a handler that peeks its
+    /// arguments, or pops a different number, would desync the operand stack.
+    pub fn set_builtin_argc_is_arity(&mut self, on: bool) {
+        self.chunk.builtin_argc_is_arity = on;
     }
 
     /// Emit an op at the current position.
