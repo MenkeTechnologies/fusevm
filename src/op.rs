@@ -12,6 +12,8 @@ use std::hash::{Hash, Hasher};
 /// Operands: u16 for pool indices (64k names/constants), usize for jump targets.
 /// Language-specific operations use `Extended` with a frontend-registered handler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "rkyv-archive", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(feature = "rkyv-archive", archive(check_bytes))]
 pub enum Op {
     /// No-op; consumed for cycle-counting and as a branch sentinel.
     Nop,

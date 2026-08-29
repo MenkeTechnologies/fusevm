@@ -33,6 +33,10 @@ bincode = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 sha2 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
+# Zero-copy archived form of Chunk/Op/Value. Optional so frontends that only
+# ever build Chunks in memory (or cache them with serde) do not inherit rkyv.
+# Feature set MUST match the consumer's: zshrs pins validation/archive_le/size_32.
+rkyv = { version = "0.7", optional = true, features = ["validation", "archive_le", "size_32"] }
 
 [features]
 default = []
@@ -56,6 +60,10 @@ aot = ["jit", "dep:cranelift-object", "dep:bincode", "dep:libc"]
 # live here once. Pulls in `libc` (dlopen/dlsym), `sha2` (cache key), `base64`
 # (block-body transport).
 ffi = ["dep:libc", "dep:sha2", "dep:base64"]
+# Derive rkyv::Archive/Serialize/Deserialize on Chunk, Op and Value so a
+# compiled Chunk can be mmap'd from an rkyv archive instead of decoded. See
+# the note on `Chunk::op_hash` — rkyv has no `skip`, so it is archived.
+rkyv-archive = ["dep:rkyv"]
 
 [dev-dependencies]
 serde_json = "1"

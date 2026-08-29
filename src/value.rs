@@ -14,6 +14,15 @@ use std::sync::Arc;
 /// Designed to be small (1 word tag + 1-2 words payload) so the
 /// dispatch loop stays cache-friendly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "rkyv-archive", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(feature = "rkyv-archive", archive(check_bytes))]
+#[cfg_attr(feature = "rkyv-archive", archive(bound(
+    serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace + rkyv::ser::SharedSerializeRegistry",
+    deserialize = "__D: rkyv::de::SharedDeserializeRegistry",
+)))]
+#[cfg_attr(feature = "rkyv-archive", archive_attr(check_bytes(
+    bound = "__C: rkyv::validation::ArchiveContext + rkyv::validation::SharedContext, <__C as rkyv::Fallible>::Error: std::error::Error"
+)))]
 pub enum Value {
     /// No value / uninitialized
     #[default]
@@ -25,7 +34,7 @@ pub enum Value {
     /// 64-bit float
     Float(f64),
     /// Heap-allocated string (Arc for cheap clone in closures)
-    Str(Arc<String>),
+    Str(#[cfg_attr(feature = "rkyv-archive", omit_bounds, archive_attr(omit_bounds))] Arc<String>),
     /// Ordered array of values.
     ///
     /// The payload is `Arc<Vec<Value>>` so cloning a `Value` — which the VM
@@ -44,13 +53,13 @@ pub enum Value {
     /// are the hot path.
     ///
     /// Construct with [`Value::array`] rather than the variant directly.
-    Array(Arc<Vec<Value>>),
+    Array(#[cfg_attr(feature = "rkyv-archive", omit_bounds, archive_attr(omit_bounds))] Arc<Vec<Value>>),
     /// Key-value associative array
-    Hash(HashMap<String, Value>),
+    Hash(#[cfg_attr(feature = "rkyv-archive", omit_bounds, archive_attr(omit_bounds))] HashMap<String, Value>),
     /// Exit status code (shell-specific but universal enough)
     Status(i32),
     /// Reference to another value (for pass-by-reference, nested structures)
-    Ref(Box<Value>),
+    Ref(#[cfg_attr(feature = "rkyv-archive", omit_bounds, archive_attr(omit_bounds))] Box<Value>),
     /// Native function pointer (builtin dispatch)
     NativeFn(u16),
     /// Opaque handle into a frontend object heap (e.g. elisp cons/symbol/vector

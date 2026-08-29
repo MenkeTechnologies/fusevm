@@ -10,6 +10,15 @@ use serde::{Deserialize, Serialize};
 
 /// A compiled bytecode unit.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "rkyv-archive", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(feature = "rkyv-archive", archive(check_bytes))]
+#[cfg_attr(feature = "rkyv-archive", archive(bound(
+    serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace + rkyv::ser::SharedSerializeRegistry",
+    deserialize = "__D: rkyv::de::SharedDeserializeRegistry",
+)))]
+#[cfg_attr(feature = "rkyv-archive", archive_attr(check_bytes(
+    bound = "__C: rkyv::validation::ArchiveContext + rkyv::validation::SharedContext, <__C as rkyv::Fallible>::Error: std::error::Error"
+)))]
 pub struct Chunk {
     /// Bytecode instructions
     pub ops: Vec<Op>,
@@ -27,6 +36,7 @@ pub struct Chunk {
     /// `>(cmd)` bodies, trap handlers, with-redirects bodies, function bodies
     /// when they're stored as separate chunks. Indexed by `Op::CmdSubst(u16)`,
     /// `Op::ProcessSubIn(u16)`, `Op::ProcessSubOut(u16)`, `Op::TrapSet(u16)`.
+    #[cfg_attr(feature = "rkyv-archive", omit_bounds, archive_attr(omit_bounds))]
     pub sub_chunks: Vec<Chunk>,
     /// Source file name (for error messages)
     pub source: String,

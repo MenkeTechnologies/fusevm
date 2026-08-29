@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! fusevm — Language-agnostic bytecode VM with fused superinstructions.
 //!
 //! Any language frontend can compile to fusevm opcodes and get:
