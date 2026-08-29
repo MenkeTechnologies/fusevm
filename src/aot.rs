@@ -7013,9 +7013,16 @@ mod tests {
         b.emit(Op::LoadInt(5), 1);
         b.emit(Op::CallBuiltin(0, 2), 1);
         let chunk = b.build();
-        assert!(
-            native_path_taken(&chunk),
-            "a builtin call must take the native path, not deopt"
+        // `deopts: 0` is the real assertion: the call was lowered INLINE. A
+        // `native_path_taken` check alone would still pass with the builtin as a
+        // deopt point, since the two ops before it are most of a 3-op chunk.
+        assert_eq!(
+            lowering_for(&chunk),
+            Lowering::Native {
+                covered: 3,
+                deopts: 0
+            },
+            "the builtin call must lower inline, not deopt"
         );
         match run_chunk_native(&chunk, register_test_builtins).expect("run") {
             VMResult::Ok(v) => assert_eq!(v, Value::int(12)),
