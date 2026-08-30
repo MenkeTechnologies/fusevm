@@ -38,6 +38,13 @@ base64 = { version = "0.22", optional = true }
 # Feature set MUST match the consumer's: zshrs pins validation/archive_le/size_32.
 rkyv = { version = "0.7", optional = true, features = ["validation", "archive_le", "size_32"] }
 
+[package.metadata.docs.rs]
+# The JIT, AOT, FFI and rkyv surfaces are all feature-gated and `default = []`,
+# so a docs.rs build with default features publishes a JIT VM's API with no
+# JIT in it — and rustdoc then reports the intra-doc links into those items as
+# unresolved. Build the docs with everything on.
+all-features = true
+
 [features]
 default = []
 jit = ["cranelift-jit", "cranelift-codegen", "cranelift-frontend", "cranelift-native", "cranelift-module"]
