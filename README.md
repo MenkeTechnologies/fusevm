@@ -105,6 +105,9 @@ git clone https://github.com/MenkeTechnologies/fusevm && cd fusevm && cargo buil
 |---------|--------|
 | `jit` | Cranelift-backed native JIT (linear, block, and tracing tiers). |
 | `jit-disk-cache` | Persists compiled native code to `~/.cache/fusevm-jit` so codegen is skipped across process restarts. Implies `jit`; on by default once enabled (see [JIT Compilation](#0x07-jit-compilation)). |
+| `aot` | Closed-world ahead-of-time compiler (`src/aot.rs`) that lowers a whole `Chunk` to a relocatable native object via `cranelift-object`. Implies `jit`. |
+| `ffi` | Runtime behind inline `rust { … }` blocks (`src/ffi.rs`): compiles the block body to a `cdylib`, caches it, `dlopen`s it, and registers each `pub extern "C" fn` export as a callable. |
+| `rkyv-archive` | Derives `rkyv` archive impls on `Value` and `Chunk` for zero-copy mmap-backed bytecode caches. |
 
 ---
 
@@ -668,6 +671,7 @@ runtime.
 | `Status(i32)` | Inline | 4 bytes |
 | `Ref(Box<Value>)` | Heap | pointer |
 | `NativeFn(u16)` | Inline | 2 bytes |
+| `Obj(u32)` | Inline | 4 bytes |
 
 String coercion returns `Cow<str>` via `as_str_cow()` — borrows the inner `Arc<String>` for `Str` variants, avoiding allocation on string comparisons, concatenation, hash key lookup, and I/O.
 

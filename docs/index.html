@@ -128,7 +128,7 @@
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.26.6 · 235 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 26 float/int math ops · 7 goroutine / channel ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 30,990 lines Rust · 7,833 #[test] fns</p>
+          <p class="docs-build-line">fusevm v0.26.6 · 235 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 26 float/int math ops · 7 goroutine / channel ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 30,997 lines Rust · 7,833 #[test] fns</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -983,11 +983,12 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
           <tr><td><code>Float(f64)</code></td><td>Inline 8 bytes</td><td>IEEE 754 double</td></tr>
           <tr><td><code>Bool(bool)</code></td><td>Inline 1 byte</td><td>Logical ops, conditionals</td></tr>
           <tr><td><code>Str(Arc&lt;String&gt;)</code></td><td>Heap, Arc-shared</td><td>UTF-8, <code>Cow&lt;str&gt;</code> coercion borrows without alloc</td></tr>
-          <tr><td><code>Array(Vec&lt;Value&gt;)</code></td><td>Heap, in-place mutation</td><td>Ordered collection, direct <code>ref mut</code> access</td></tr>
+          <tr><td><code>Array(Arc&lt;Vec&lt;Value&gt;&gt;)</code></td><td>Heap, Arc-shared buffer + copy-on-write</td><td>Ordered collection; clone is a refcount bump, mutation copies via <code>Value::array_mut</code> / <code>Arc::make_mut</code></td></tr>
           <tr><td><code>Hash(HashMap&lt;String, Value&gt;)</code></td><td>Heap, in-place mutation</td><td>Key-value map, direct <code>ref mut</code> access</td></tr>
           <tr><td><code>Status(i32)</code></td><td>Inline 4 bytes</td><td>Exit status (<code>$?</code>)</td></tr>
           <tr><td><code>Ref(Box&lt;Value&gt;)</code></td><td>Heap</td><td>Pass-by-reference, nested structures</td></tr>
           <tr><td><code>NativeFn(u16)</code></td><td>Inline 2 bytes</td><td>Builtin function pointer ID</td></tr>
+          <tr><td><code>Obj(u32)</code></td><td>Inline 4 bytes</td><td>Opaque handle into a frontend object heap (elisp cons / symbol / vector cells); identity-comparable</td></tr>
         </table>
       </section>
 
