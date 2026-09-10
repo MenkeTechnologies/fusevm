@@ -415,6 +415,9 @@ pub const BUILTIN_UNAME: u16 = 260;
 pub const BUILTIN_DATE: u16 = 261;
 /// Dispatch ID for the shell `mktemp` builtin.
 pub const BUILTIN_MKTEMP: u16 = 262;
+/// Dispatch ID for the shell `ai` builtin (zshrs extension:
+/// `src/extensions/ai.rs`).
+pub const BUILTIN_AI: u16 = 263;
 
 /// Maximum builtin ID (for pre-allocating the handler table)
 pub const BUILTIN_MAX: u16 = 280;
@@ -561,6 +564,7 @@ pub fn builtin_id(name: &str) -> Option<u16> {
         "uname" => Some(BUILTIN_UNAME),
         "date" => Some(BUILTIN_DATE),
         "mktemp" => Some(BUILTIN_MKTEMP),
+        "ai" => Some(BUILTIN_AI),
         _ => None,
     }
 }
@@ -832,6 +836,7 @@ mod tests {
             "uname",
             "date",
             "mktemp",
+            "ai",
         ];
         for name in canonicals {
             let id = builtin_id(name).unwrap_or_else(|| panic!("missing builtin {}", name));
@@ -991,6 +996,7 @@ mod tests {
             BUILTIN_UNAME,
             BUILTIN_DATE,
             BUILTIN_MKTEMP,
+            BUILTIN_AI,
         ];
         for &id in assigned {
             assert!(
