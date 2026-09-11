@@ -416,8 +416,10 @@ pub const BUILTIN_DATE: u16 = 261;
 /// Dispatch ID for the shell `mktemp` builtin.
 pub const BUILTIN_MKTEMP: u16 = 262;
 /// Dispatch ID for the shell `ai` builtin (zshrs extension:
-/// `src/extensions/ai.rs`).
-pub const BUILTIN_AI: u16 = 263;
+/// `src/extensions/ai.rs`). Not 263: zshrs registers its in-process `cp`
+/// there (`fusevm_bridge.rs`, `BUILTIN_CP`), and zshrs compiles a command
+/// name through [`builtin_id`], so an `ai` mapped to 263 would run `cp`.
+pub const BUILTIN_AI: u16 = 264;
 
 /// Maximum builtin ID (for pre-allocating the handler table)
 pub const BUILTIN_MAX: u16 = 280;
@@ -840,6 +842,9 @@ mod tests {
         ];
         for name in canonicals {
             let id = builtin_id(name).unwrap_or_else(|| panic!("missing builtin {}", name));
+            // zshrs registers its own `cp` at 263 and resolves command names
+            // through `builtin_id`, so a name mapped to 263 here runs `cp`.
+            assert_ne!(id, 263, "{} maps to zshrs's `cp` slot", name);
             if let Some(prev) = seen.insert(id, name) {
                 panic!(
                     "duplicate builtin id {} shared by {} and {}",
