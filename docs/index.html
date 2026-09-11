@@ -128,7 +128,7 @@
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.26.6 · 235 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 26 float/int math ops · 7 goroutine / channel ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 30,997 lines Rust · 7,833 #[test] fns</p>
+          <p class="docs-build-line">fusevm v0.26.6 · 235 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 26 float/int math ops · 7 goroutine / channel ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 31,008 lines Rust · 7,833 #[test] fns</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -163,9 +163,9 @@
           <div><div class="stat">11</div><div class="stat-label">fused superinstructions</div></div>
           <div><div class="stat">29</div><div class="stat-label">shell ops</div></div>
           <div><div class="stat">61</div><div class="stat-label">AWK ops</div></div>
-          <div><div class="stat">29,486</div><div class="stat-label">production lines</div></div>
+          <div><div class="stat">31,008</div><div class="stat-label">production lines</div></div>
           <!-- production lines derived from: find src -name '*.rs' | xargs wc -l | tail -1 -->
-          <div><div class="stat">7,777</div><div class="stat-label">#[test] fns</div></div>
+          <div><div class="stat">7,833</div><div class="stat-label">#[test] fns</div></div>
           <!-- test fns derived from: grep -rc '#\[test\]\|#\[tokio::test\]' --include='*.rs' . | awk -F: '{s+=$2}END{print s}' -->
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
           <div><div class="stat">18</div><div class="stat-label">language frontends</div></div>
@@ -197,7 +197,7 @@
         analysis &mdash; for free. <span class="highlight">The VM doesn&rsquo;t care which language produced the bytecodes.</span></p>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
-        stryke registers ~450 extended ops. zshrs registers ~20. awkrs registers ~95. elisprs registers 10. vimlrs takes the other route &mdash; ~510 builtin IDs through <code>CallBuiltin</code> rather than extended ops. They don&rsquo;t conflict &mdash;
+        strykelang reserves 131 extended-op IDs in two disjoint blocks (38 from <code>0x0000</code>, 93 from <code>0x1000</code>). awkrs reserves 65 (1000&ndash;1213). elisprs reserves 13 (0&ndash;12). zshrs and vimlrs take the other route and emit no extended ops: both lower to <code>CallBuiltin</code> &mdash; zshrs to the IDs in <code>shell_builtins.rs</code> plus 160 of its own (263&ndash;683), vimlrs to 579 handlers on IDs 3000&ndash;3614. They don&rsquo;t conflict &mdash;
         each frontend owns its own ID space via <code>Extended(u16, u8)</code>. Process control ops
         (pipes, redirects, globs, file tests) are first-class because multiple frontends need them.</p>
       </section>
@@ -213,7 +213,7 @@
   │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐        │
   │  │  strykelang   │  │    zshrs      │  │    awkrs      │        │
   │  │ Perl 5 compat │  │ shell compiler│  │ awk compiler  │        │
-  │  │ ~450 ext ops  │  │ ~20 ext ops   │  │ ~95 ext ops   │        │
+  │  │ 131 ext IDs   │  │ CallBuiltin   │  │ 65 ext IDs    │        │
   │  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘        │
   │          │       compile    │                  │                │
   │          └──────────────────┼──────────────────┘                │
@@ -603,44 +603,41 @@ b.emit(Op::AwkSubstr(<span class="var">3</span>), <span class="var">1</span>);  
 
         <div class="diagram">
   ┌──────────────────────────────────────────────────────────────┐
-  │                  EXTENSION DISPATCH TABLE                     │
+  │                 EXTENSION DISPATCH TABLE                     │
   │                                                              │
-  │  strykelang frontend:                                         │
-  │    Extended(0, _)   → RegexMatch                              │
-  │    Extended(1, _)   → RegexSubst                              │
-  │    Extended(2, _)   → HashSlice                               │
-  │    Extended(3, _)   → ArraySlice                              │
-  │    ...                                                        │
-  │    Extended(449, _) → PmapCollect                             │
+  │ strykelang (two disjoint blocks, 131 IDs):                   │
+  │   Extended(0x0000, _) → STK_REGEX_MATCH                      │
+  │   Extended(0x0001, _) → STK_REGEX_SUBST                      │
+  │   ...                                                        │
+  │   Extended(0x0025, _) → STK_VAL_SPRINTF2                     │
+  │   Extended(0x1000, _) → nops::CONCAT                         │
+  │   ...                                                        │
+  │   Extended(0x105C, _) → nops::ARROW_ARRAY_AUTOVIV            │
   │                                                              │
-  │  zshrs frontend:                                              │
-  │    Extended(0, _)   → HistoryExpand                           │
-  │    Extended(1, _)   → ZleWidget                               │
-  │    Extended(2, _)   → ZstyleLookup                            │
-  │    ...                                                        │
-  │    Extended(19, _)  → ModuleLoad                              │
+  │ awkrs (65 IDs):                                              │
+  │   Extended(1000, _)   → AWK_GET_FIELD                        │
+  │   Extended(1001, _)   → AWK_SET_FIELD                        │
+  │   ...                                                        │
+  │   Extended(1213, _)   → AWK_JUMP_IF_SLOT_GE_NUM              │
   │                                                              │
-  │  awkrs frontend:                                              │
-  │    Extended(0, _)   → FieldGet                                │
-  │    Extended(1, _)   → FieldSet                                │
-  │    Extended(2, _)   → PrintColumns                            │
-  │    ...                                                        │
-  │    Extended(94, _)  → GetlineCmd                              │
+  │ elisprs (13 IDs):                                            │
+  │   Extended(0, _)      → TRUTHY                               │
+  │   Extended(1, _)      → CALL                                 │
+  │   ...                                                        │
+  │   Extended(12, _)     → DEFVAR_INIT                          │
   │                                                              │
-  │  vimlrs frontend (dispatches via CallBuiltin, not Extended):  │
-  │    CallBuiltin(3000, _) → GetVar                              │
-  │    CallBuiltin(3001, _) → SetVar                              │
-  │    ...                                                        │
-  │    CallBuiltin(3520, _) → FoldTextResult   (~510 IDs)         │
+  │ zshrs (CallBuiltin, not Extended):                           │
+  │   CallBuiltin(0..=264, _)   → shell_builtins.rs (not 263)    │
+  │   CallBuiltin(263, _)       → BUILTIN_CP                     │
+  │   CallBuiltin(283..=683, _) → zshrs-owned IDs                │
   │                                                              │
-  │  elisprs frontend:                                            │
-  │    Extended(0, _)   → Truthy                                  │
-  │    Extended(1, _)   → Call                                    │
-  │    Extended(2, _)   → GetVar                                  │
-  │    ...                                                        │
-  │    Extended(9, _)   → MakeClosure                             │
+  │ vimlrs (CallBuiltin, not Extended; 579 handlers):            │
+  │   CallBuiltin(3000, _) → VIML_GETVAR                         │
+  │   CallBuiltin(3001, _) → VIML_SETVAR                         │
+  │   ...                                                        │
+  │   CallBuiltin(3614, _) → VIML_UNPACK_CHECK                   │
   │                                                              │
-  │  No conflicts — each frontend owns its own ID space.         │
+  │ No conflicts — each frontend owns its own ID space.          │
   └──────────────────────────────────────────────────────────────┘
         </div>
       </section>
