@@ -51,7 +51,7 @@ cargo add fusevm                  # interpreter only
 
 ## [0x00] OVERVIEW
 
-fusevm is the shared execution engine behind eighteen language frontends — [zshrs](https://github.com/MenkeTechnologies/zshrs), [strykelang](https://github.com/MenkeTechnologies/strykelang), [awkrs](https://github.com/MenkeTechnologies/awkrs), [vimlrs](https://github.com/MenkeTechnologies/vimlrs), [elisprs](https://github.com/MenkeTechnologies/elisprs), [rubylang](https://github.com/MenkeTechnologies/rubylang), [arb](https://github.com/MenkeTechnologies/arb), [pythonrs](https://github.com/MenkeTechnologies/pythonrs), [phplang](https://github.com/MenkeTechnologies/phplang), [node-js](https://github.com/MenkeTechnologies/node-js), [rlang](https://github.com/MenkeTechnologies/rlang)/R, [javars](https://github.com/MenkeTechnologies/javars), [kotlinrs](https://github.com/MenkeTechnologies/kotlinrs), [scalars](https://github.com/MenkeTechnologies/scalars), [groovyrs](https://github.com/MenkeTechnologies/groovyrs), [go-rs](https://github.com/MenkeTechnologies/go-rs), and [tclrs](https://github.com/MenkeTechnologies/tclrs)/Tcl, plus [texrs](https://github.com/MenkeTechnologies/texrs) (a TeX engine — Knuth's mouth and expander), the newest: its mouth and expander lower to the same bytecode and it ships `--disasm`, `--tiers`, `--dap` and `--aot`; TeX's stomach is not implemented. They all compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
+fusevm is the shared execution engine behind eighteen language frontends — [zshrs](https://github.com/MenkeTechnologies/zshrs), [strykelang](https://github.com/MenkeTechnologies/strykelang), [awkrs](https://github.com/MenkeTechnologies/awkrs), [vimlrs](https://github.com/MenkeTechnologies/vimlrs), [elisprs](https://github.com/MenkeTechnologies/elisprs), [rubylang](https://github.com/MenkeTechnologies/rubylang), [arb](https://github.com/MenkeTechnologies/arb), [pythonrs](https://github.com/MenkeTechnologies/pythonrs), [phplang](https://github.com/MenkeTechnologies/phplang), [node-js](https://github.com/MenkeTechnologies/node-js), [rlang](https://github.com/MenkeTechnologies/rlang)/R, [javars](https://github.com/MenkeTechnologies/javars), [kotlinrs](https://github.com/MenkeTechnologies/kotlinrs), [scalars](https://github.com/MenkeTechnologies/scalars), [groovyrs](https://github.com/MenkeTechnologies/groovyrs), [go-rs](https://github.com/MenkeTechnologies/go-rs), [tclrs](https://github.com/MenkeTechnologies/tclrs)/Tcl, and [texrs](https://github.com/MenkeTechnologies/texrs)/TeX. texrs lowers TeX's mouth and expander to the same bytecode, typesets through a ported stomach to `--dvi` and `--pdf`, and ships `--disasm`, `--tiers`, `--dap` and `--aot`. They all compile to the same `Op` enum. The VM doesn't care which language produced the bytecodes.
 
 ```
 zshrs  ──► shell  compiler ──┐
@@ -70,7 +70,8 @@ java   ──► java   compiler ──┤                              │
 kotlin ──► kotlin compiler ──┤                              │
 scala  ──► scala  compiler ──┤                              │
 groovy ──► groovy compiler ──┤                              │
-tcl    ──► tcl    compiler ──┘                              │
+tcl    ──► tcl    compiler ──┤
+tex    ──► tex    compiler ──┘                              │
                                                             ▼
                                    JitCompiler tiers (Cranelift 0.130)
                                    ├── Linear JIT (straight-line, instant)

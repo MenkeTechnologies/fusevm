@@ -168,7 +168,7 @@
           <div><div class="stat">7,777</div><div class="stat-label">#[test] fns</div></div>
           <!-- test fns derived from: grep -rc '#\[test\]\|#\[tokio::test\]' --include='*.rs' . | awk -F: '{s+=$2}END{print s}' -->
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
-          <div><div class="stat">17</div><div class="stat-label">language frontends</div></div>
+          <div><div class="stat">18</div><div class="stat-label">language frontends</div></div>
         </div>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
@@ -188,10 +188,10 @@
         <a href="https://github.com/MenkeTechnologies/kotlinrs" style="color: var(--cyan);">kotlinrs</a>,
         <a href="https://github.com/MenkeTechnologies/scalars" style="color: var(--cyan);">scalars</a>,
         <a href="https://github.com/MenkeTechnologies/groovyrs" style="color: var(--cyan);">groovyrs</a>,
-        <a href="https://github.com/MenkeTechnologies/go-rs" style="color: var(--cyan);">go-rs</a>, and
-        <a href="https://github.com/MenkeTechnologies/tclrs" style="color: var(--cyan);">tclrs</a>/Tcl, plus
-        <a href="https://github.com/MenkeTechnologies/texrs" style="color: var(--cyan);">texrs</a>
-        (a TeX engine &mdash; Knuth&rsquo;s mouth and expander), the newest: its mouth and expander lower to the same bytecode and it ships <code>--disasm</code>, <code>--tiers</code>, <code>--dap</code> and <code>--aot</code>; TeX&rsquo;s stomach is not implemented.
+        <a href="https://github.com/MenkeTechnologies/go-rs" style="color: var(--cyan);">go-rs</a>,
+        <a href="https://github.com/MenkeTechnologies/tclrs" style="color: var(--cyan);">tclrs</a>/Tcl, and
+        <a href="https://github.com/MenkeTechnologies/texrs" style="color: var(--cyan);">texrs</a>/TeX.
+        texrs lowers TeX&rsquo;s mouth and expander to the same bytecode, typesets through a ported stomach to <code>--dvi</code> and <code>--pdf</code>, and ships <code>--disasm</code>, <code>--tiers</code>, <code>--dap</code> and <code>--aot</code>.
         Any language frontend compiles to the same <code>Op</code> enum and gets fused hot-loop dispatch,
         extension opcode tables, stack-based execution with slot-indexed fast paths, and JIT eligibility
         analysis &mdash; for free. <span class="highlight">The VM doesn&rsquo;t care which language produced the bytecodes.</span></p>
@@ -920,7 +920,7 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
         across reuse), or multi-chunk evaluation loops with non-trivial chunk shapes. For uniform tight loops
         on tiny chunks the pool is actually <em>slower</em> (<code>reset</code> does more bookkeeping than
         <code>VM::new</code> skips), so the API is shipped to let callers choose. All eighteen sibling frontends already on the VM
-        (strykelang, awkrs, zshrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, go-rs, tclrs) drive <code>fusevm::VM</code> through bridge layers backed by a frontend-owned
+        (strykelang, awkrs, zshrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, go-rs, tclrs, texrs) drive <code>fusevm::VM</code> through bridge layers backed by a frontend-owned
         <code>VMPool</code>.</p>
       </section>
 
