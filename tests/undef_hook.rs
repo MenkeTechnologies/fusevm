@@ -265,3 +265,48 @@ fn the_hook_can_tell_two_chunks_apart_at_the_same_ip() {
          collided — which is why the identity hashes the name pool too"
     );
 }
+
+/// A pooled VM reset onto a different chunk reports the *new* chunk's identity.
+///
+/// The identity is memoised on the first undef read. `VM::reset` swaps the
+/// chunk, so the memo has to go with it — otherwise the second chunk's reads
+/// are attributed to the first, which is the exact `(chunk, ip)` confusion the
+/// field exists to prevent.
+#[test]
+fn reset_onto_another_chunk_reports_that_chunks_identity() {
+    let seen: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let hook = || -> fusevm::UndefHook {
+        let log = Arc::clone(&seen);
+        Arc::new(move |read: UndefRead<'_>| {
+            log.lock().expect("log").push(read.chunk);
+            Ok(Value::Int(0))
+        })
+    };
+    let chunk_reading = |name: &str| {
+        let mut b = ChunkBuilder::new();
+        let idx = b.add_name(name);
+        b.emit(Op::GetVar(idx), 1);
+        b.build()
+    };
+
+    let mut pooled = VM::new(chunk_reading("a"));
+    pooled.set_undef_hook(hook());
+    pooled.run();
+    pooled.reset(chunk_reading("b"));
+    pooled.run();
+
+    let mut fresh = VM::new(chunk_reading("b"));
+    fresh.set_undef_hook(hook());
+    fresh.run();
+
+    let seen = seen.lock().expect("log").clone();
+    assert_eq!(seen.len(), 3, "one read per run: {seen:?}");
+    assert_ne!(
+        seen[0], seen[1],
+        "the reset VM still names chunk `a`: {seen:?}"
+    );
+    assert_eq!(
+        seen[1], seen[2],
+        "a reset VM and a fresh one agree: {seen:?}"
+    );
+}

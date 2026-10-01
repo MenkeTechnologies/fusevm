@@ -856,7 +856,8 @@ impl VM {
     /// - Globals (resized to match the new chunk's name pool)
     /// - Instruction pointer, halted flag, exit status
     /// - Tracing JIT recorder / slot buffers / deopt info
-    /// - Cached block-JIT eligibility (the new chunk has a different hash)
+    /// - Per-chunk memos: block-JIT eligibility and the identity reported in
+    ///   [`UndefRead::chunk`] (both describe the old chunk)
     ///
     /// State that's preserved:
     /// - Tracing JIT enabled flag
@@ -866,11 +867,34 @@ impl VM {
     ///
     /// This pairs with [`VMPool`] for hot-path callers that run many
     /// chunks back-to-back and want to skip the per-call allocation cost
-    /// of `VM::new`.
+    /// of `VM::new`. To run the chunk the VM already holds again, use
+    /// [`VM::rewind`], which keeps the per-chunk memos.
     pub fn reset(&mut self, chunk: Chunk) {
+        self.chunk = chunk;
+        self.chunk_ident.set(0);
+        #[cfg(feature = "jit")]
+        {
+            self.block_eligible_cached = None;
+        }
+        self.rewind();
+    }
+
+    /// Return to the start of the chunk the VM already holds, as [`VM::reset`]
+    /// does for a new one, but keep what was derived from the chunk itself:
+    /// the block-JIT eligibility answer and the [`UndefRead::chunk`] identity.
+    ///
+    /// A frontend that pools one VM per function runs the same chunk on every
+    /// call. Handing it back through `reset` threw the eligibility answer away
+    /// each time, so every call re-probed the JIT's thread-local table for an
+    /// answer that cannot have changed — the numeric-policy setters, the only
+    /// other inputs to it, clear the memo themselves.
+    ///
+    /// Assigning [`VM::chunk`] directly bypasses this: a caller that swaps the
+    /// chunk must go through `reset`.
+    pub fn rewind(&mut self) {
         self.stack.clear();
         self.frames.clear();
-        let num_names = chunk.names.len();
+        let num_names = self.chunk.names.len();
         self.globals.clear();
         self.globals.resize(num_names, Value::Undef);
         self.frames.push(Frame {
@@ -883,7 +907,6 @@ impl VM {
         self.last_status = 0;
         self.halted = false;
         self.awk_rand_seed = 1;
-        self.chunk = chunk;
         #[cfg(feature = "jit")]
         {
             self.recorder = None;
@@ -893,7 +916,6 @@ impl VM {
             self.global_kinds_buf.clear();
             self.global_numeric.clear();
             self.deopt_info = DeoptInfo::zeroed();
-            self.block_eligible_cached = None;
         }
     }
 
@@ -6873,5 +6895,40 @@ mod tests {
             VMResult::Ok(Value::Undef) => {}
             other => panic!("expected Undef at EOF, got {other:?}"),
         }
+    }
+
+    /// `rewind` — what a per-function VM pool does on every call — keeps the
+    /// block-JIT eligibility memo, so the next run does not re-probe the JIT's
+    /// thread-local table, while still restarting execution from scratch.
+    /// `reset` drops it even when handed an identical chunk: it has no way to
+    /// know the chunk is the same one.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn rewind_keeps_block_eligibility_and_reset_drops_it() {
+        let mut b = ChunkBuilder::new();
+        let g = b.add_name("g");
+        b.emit(Op::GetVar(g), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::Dup, 1);
+        b.emit(Op::SetVar(g), 1);
+        let mut vm = VM::new(b.build());
+        vm.enable_tracing_jit();
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Float(f)) if f == 1.0));
+        let first = vm.block_eligible_cached;
+        assert!(first.is_some(), "the first run computes it");
+
+        for _ in 0..3 {
+            vm.rewind();
+            assert_eq!(vm.block_eligible_cached, first, "rewind keeps the memo");
+            // The global written by the previous run is gone, so every run
+            // starts from Undef (0.0) and answers 1.0 again.
+            assert!(matches!(vm.run(), VMResult::Ok(Value::Float(f)) if f == 1.0));
+        }
+
+        let own = std::mem::take(&mut vm.chunk);
+        vm.reset(own);
+        assert!(vm.block_eligible_cached.is_none(), "reset drops the memo");
+        assert!(matches!(vm.run(), VMResult::Ok(Value::Float(f)) if f == 1.0));
     }
 }

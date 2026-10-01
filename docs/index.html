@@ -898,6 +898,11 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
         <code>acquire</code> pops a recycled VM and resets its state via <code>VM::reset</code>;
         <code>release</code> returns it for reuse.</p>
 
+        <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
+        To run the chunk a VM already holds again, call <code>VM::rewind()</code> instead of
+        <code>VM::reset</code>: it restarts execution identically but keeps the per-chunk memos (the
+        block-JIT eligibility answer and the <code>UndefRead::chunk</code> identity).</p>
+
         <div class="code-block"><span class="keyword">use</span> fusevm::{ChunkBuilder, Op, VMPool, VMResult, Value};
 
 <span class="keyword">let</span> <span class="keyword">mut</span> pool = VMPool::new();
