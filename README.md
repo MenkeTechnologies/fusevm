@@ -18,7 +18,7 @@
 
 > *"One VM to run them all."*
 
-A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 235 opcodes across 22 sections, 11 fused superinstructions, 29 first-class shell ops, 61 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
+A language-agnostic bytecode virtual machine with fused superinstructions and 3 stage (linear, block, tracing) Cranelift JIT. Any language frontend compiles to fusevm opcodes and gets fused hot-loop dispatch, extension opcode tables, stack-based execution with slot-indexed fast paths, and native code compilation via Cranelift — for free. 237 opcodes across 22 sections, 11 fused superinstructions, 29 first-class shell ops, 61 first-class AWK ops. Cranelift 0.130 behind `jit` feature flag.
 
 ```sh
 cargo add fusevm --features jit   # with Cranelift JIT
@@ -195,7 +195,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 
 ## [0x05] OP CATEGORIES
 
-235 opcodes across 22 sections in `src/op.rs`:
+237 opcodes across 22 sections in `src/op.rs`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -216,7 +216,7 @@ Each fused op eliminates N-1 dispatch cycles, stack pushes, and branch mispredic
 | Shell Ops | 29 | `Exec`, `PipelineBegin`, `Redirect`, `Glob`, `TestFile`, `RegexMatch` |
 | AWK Ops | 61 | `AwkFieldGet`, `AwkPrint`, `AwkStrtonum`, `AwkDivJit`, `AwkModJit`, `AwkGensub`, `AwkOrd`, `AwkChr`, `AwkMkbool`, `AwkIntdiv` |
 | Float / Int Math | 26 | `SqrtFloat`, `Atan2Float`, `Log2Float`, `RoundFloat`, `GcdInt`, `LcmInt`, `TimeInt` |
-| Cooperative Concurrency | 10 | `Go`, `ChanMake`, `ChanSend`, `ChanRecv`, `ChanRecvOk`, `ChanClose`, `Select`, `CallDynamic`, `MulModFloor`, `MulAddModFloor` |
+| Cooperative Concurrency | 12 | `Go`, `ChanMake`, `ChanSend`, `ChanRecv`, `ChanRecvOk`, `ChanClose`, `ChanLen`, `ChanCap`, `Select`, `CallDynamic`, `MulModFloor`, `MulAddModFloor` |
 | Extension | 2 | `Extended(u16, u8)`, `ExtendedWide(u16, usize)` |
 
 ---
@@ -268,11 +268,11 @@ Twenty-nine builtins are the exception — they execute natively **even with no 
 - **Strings:** `substr`, `index`, `tolower`, `toupper`, scalar `length(s)`.
 - **Characters (gawk):** `ord` (first char → codepoint), `chr` (codepoint → char, empty if invalid).
 - **Math:** `int`, `sqrt`, `sin`, `cos`, `exp`, `log`, `atan2` (pure `f64`), `intdiv` (truncating integer quotient; `Undef` on divide-by-zero), `intdiv0` (same, but `0` on divide-by-zero), `mkbool` (`1`/`0` by truthiness).
-- **Bitwise (gawk):** `and`, `or`, `xor`, `compl`, `lshift`, `rshift` (operands truncated to integers).
+- **Bitwise (gawk):** `and`, `or`, `xor`, `compl`, `lshift`, `rshift` — a port of gawk's `builtin.c` (`do_and`…`do_rshift`) and `floatcomp.c` `adjust_uint`: each operand takes C's `(uintmax_t)` cast (Rust `as u64`, Cranelift `fcvt_to_uint_sat`), the op runs in 64-bit unsigned arithmetic (a shift count of 64 or more yields 0), and the result is narrowed by `adjust_uint` — keep at most 53 significant bits above the lowest set bit — before it becomes a `Float`. So `compl(0)` is `9007199254740991` and `or(2^54, 1)` is `1`, as in gawk. A negative operand raises gawk's fatal text verbatim (`lshift(-1.000000, 2.000000): negative values are not allowed`, `and: argument 3 negative value -3 is not allowed` — the folds report the right-most negative argument, since gawk pops the last one first), and `and`/`or`/`xor` with fewer than two arguments raise `…: called with less than two arguments`. All tiers agree: the interpreter computes it through `awk_host::awk_*_checked`; the block JIT inlines the same instruction sequence (`jit::emit_awk_*`, shared with the AOT compiler) and guards every operand with the same early-exit trap `AwkDivJit` uses, through `fusevm_jit_awk_bit_trap(code, a, b)`, which also records the operands so the VM formats the identical message after the block returns (disk-cache helper `H_AWK_BIT_TRAP`); the AOT compiler lowers `AwkLshiftJit`/`AwkRshiftJit`/`AwkComplJit` natively with an error return through `fusevm_aot_set_awk_bit_error`, and runs `AwkAnd`/`AwkOr`/`AwkXor` on its interpreter shim. Checked against gawk 5.4.1 output on generated calls, fatals included.
 - **Conversion (gawk):** `strtonum` (`0x…` hex, `0…` octal, else longest decimal/float prefix).
 - **Time (gawk):** `systime`, `strftime`, `mktime` (`chrono`-backed; local-tz and UTC paths).
 - **PRNG (POSIX/gawk):** `rand`, `srand` (glibc LCG over a VM-owned seed initialized to 1; deterministic without a host).
-- **Arithmetic (POSIX awk):** `AwkDiv` (`a / b`), `AwkMod` (`a % b`) — float divide/modulo that raise a fatal `"division by zero attempted"` / `"division by zero attempted in \`%'"` runtime error on a zero divisor (vs the shell-arithmetic `Op::Div`/`Op::Mod`, which yield `Undef`/`0`). Host-independent; interpreter-only (not block/trace-JIT-eligible, since they conditionally trap). `AwkDivJit` / `AwkModJit` are block-JIT-eligible variants with byte-identical interpreter semantics: the block JIT emits a **guarded early-exit** (compare the divisor to `0.0`; on equality call the `fusevm_jit_awk_div_trap` libcall with a code — `1` div / `2` mod — and `return` a sentinel, else `fdiv`/`fmod`). The VM's block-dispatch path reads the trap channel after the compiled run and converts a set code into the same fatal error the interpreter raises, so a JIT-compiled `for(;;) x = 1/0` traps instead of producing `inf`/`NaN` or hanging. The trap libcall is not a registered host-helper id, so `AwkDivJit`/`AwkModJit` chunks skip on-disk cache persistence (in-process JIT only) and never touch the shared cache schema — zshrs/stryke (which emit only `Op::Div`/`Op::Mod`) get byte-identical native code.
+- **Arithmetic (POSIX awk):** `AwkDiv` (`a / b`), `AwkMod` (`a % b`) — float divide/modulo that raise a fatal `"division by zero attempted"` / `"division by zero attempted in \`%'"` runtime error on a zero divisor (vs the shell-arithmetic `Op::Div`/`Op::Mod`, which yield `Undef`/`0`). Host-independent; interpreter-only (not block/trace-JIT-eligible, since they conditionally trap). `AwkDivJit` / `AwkModJit` are block-JIT-eligible variants with byte-identical interpreter semantics: the block JIT emits a **guarded early-exit** (compare the divisor to `0.0`; on equality call the `fusevm_jit_awk_div_trap` libcall with a code — `1` div / `2` mod — and `return` a sentinel, else `fdiv`/`fmod`). The VM's block-dispatch path reads the trap channel after the compiled run and converts a set code into the same fatal error the interpreter raises, so a JIT-compiled `for(;;) x = 1/0` traps instead of producing `inf`/`NaN` or hanging. The trap libcall is the registered disk-cache host helper `H_AWK_DIV_TRAP`, so `AwkDivJit`/`AwkModJit` chunks persist to the on-disk cache; it is imported only by chunks that contain those ops, so zshrs/stryke (which emit only `Op::Div`/`Op::Mod`) get byte-identical native code.
 
 **AWK control flow** has no `fusevm::Value` representation (`next`/`nextfile`/`exit` are statements, not expressions). `Op::AwkSignal(code)` carries it host-free: it halts the current chunk and stashes `code` (`awk_builtins::signal::{NEXT, NEXTFILE, EXIT}`) in the VM, which the frontend driver reads via `VM::awk_signal()` after `run()` to drive its own record/file/exit flow. zshrs/stryke never emit it, so `awk_signal()` stays `None` for them and `Halted` is byte-identical to before — the channel is a VM-state side effect, not a new `VMResult` variant. Interpreter-only.
 
@@ -289,7 +289,7 @@ let mut vm = VM::new(b.build());      // no set_awk_host needed
 // vm.run() → "ell"
 ```
 
-A registered host may still override these (e.g. locale-aware casing, MPFR-precision math, or gawk's fatal-error on negative bitwise operands); the native path is used only when no host is present. `length($0)` and `length(arr)` always need the host (field/array state). `rand`/`srand` also need the host (RNG seed state).
+A registered host may still override these (e.g. locale-aware casing, or MPFR-precision math and bignum bitwise ops); the native path is used only when no host is present. The `AwkHost` bitwise defaults compute gawk's narrowed result but have no error channel, so a host that wants gawk's negative-operand fatal raises it itself — with no host, the VM raises it. `length($0)` and `length(arr)` always need the host (field/array state). `rand`/`srand` also need the host (RNG seed state).
 
 ---
 
@@ -749,9 +749,9 @@ native code should emit `Op::TruncFloat`, whose contract is pure
 (`Float(trunc(x))` for every operand, no host consulted) and identical in all
 four tiers. The general rule: an op that reaches `AwkHost` may be lowered
 natively only if every conforming host produces exactly the value the lowering
-does. The transcendentals `Op::AwkSin` / `AwkCos` / `AwkExp` / `AwkAtan2` compile to Cranelift libcalls into small `extern "C"` Rust helpers (`fusevm_jit_sin_f64`, …) that canonicalize a NaN result to `+nan` to match gawk/awkrs. These follow the same `None`-guarded import pattern as the existing `pow`/`fmod`/`lognot` libcalls — the helper imports are declared only when the op appears in the chunk (`MathIds::declare`), so chunks without them compile to byte-identical native code. For the on-disk cache the helper relocations are keyed by stable host-helper ids (`H_SIN_F64`…`H_ATAN2_F64`), carried in the per-function `[Option<FuncId>; 8]` helper table and re-resolved on load via `host_addr` (cache `SCHEMA_VERSION` 16). The gawk bitwise builtins `Op::AwkAnd` / `AwkOr` / `AwkXor` (variadic, ≥2 args) also compile natively: each operand is converted to `i64` with a **saturating** `fcvt_to_sint_sat` (matching awkrs's `num_to_u64`, which truncates and saturates NaN→0 / ±inf→i64 bounds rather than trapping), folded with Cranelift `band`/`bor`/`bxor`, and pushed back as an integer. No libcall and no host needed — pure integer arithmetic — so they are admitted to `is_block_eligible_op` directly.
+does. The transcendentals `Op::AwkSin` / `AwkCos` / `AwkExp` / `AwkAtan2` compile to Cranelift libcalls into small `extern "C"` Rust helpers (`fusevm_jit_sin_f64`, …) that canonicalize a NaN result to `+nan` to match gawk/awkrs. These follow the same `None`-guarded import pattern as the existing `pow`/`fmod`/`lognot` libcalls — the helper imports are declared only when the op appears in the chunk (`MathIds::declare`), so chunks without them compile to byte-identical native code. For the on-disk cache the helper relocations are keyed by stable host-helper ids (`H_SIN_F64`…`H_ATAN2_F64`), carried in the per-function `[Option<FuncId>; 8]` helper table and re-resolved on load via `host_addr` (cache `SCHEMA_VERSION` 17). The gawk bitwise builtins `Op::AwkAnd` / `AwkOr` / `AwkXor` (variadic, ≥2 args) also compile natively: each operand is guarded against a negative value (early-exit trap, see **Bitwise (gawk)** above), converted with the **saturating** `fcvt_to_uint_sat` (gawk's `(uintmax_t)` cast — NaN→0, out-of-range saturates rather than trapping), folded with Cranelift `band`/`bor`/`bxor`, narrowed by `adjust_uint` (`bor_imm`/`ctz`/`ishl`/`band`) and pushed back as a `Float`. No host needed, so they are admitted to `is_block_eligible_op` directly.
 
-**Trapping div/mod in the JIT (guarded early-exit).** `Op::AwkDivJit` / `AwkModJit` are the block-JIT-eligible counterparts of the interpreter-only `AwkDiv`/`AwkMod`. Float `fdiv`/`fmod` do not hardware-trap (they yield `inf`/`NaN`), so a JIT-compiled awk division must check the divisor explicitly: the codegen pops divisor then dividend, emits `fcmp eq divisor, 0.0`, and branches — the trap block calls the `fusevm_jit_awk_div_trap(code)` libcall (`code` = `1` for div, `2` for mod) into a thread-local channel and `return`s a sentinel, while the continuation block computes `fdiv` (div) or the `fmod` libcall (mod). After the compiled block returns, the VM's block-dispatch path calls `take_awk_div_trap()` and, if a code was set, raises the same fatal `"division by zero attempted"` / `…in \`%'` error the interpreter raises — *before* writing slots back. Because the trap libcall is not a registered host-helper id, these chunks skip on-disk persistence (in-process JIT only) and add nothing to the cache schema; frontends that never emit them (zshrs/stryke) are byte-identical.
+**Trapping div/mod in the JIT (guarded early-exit).** `Op::AwkDivJit` / `AwkModJit` are the block-JIT-eligible counterparts of the interpreter-only `AwkDiv`/`AwkMod`. Float `fdiv`/`fmod` do not hardware-trap (they yield `inf`/`NaN`), so a JIT-compiled awk division must check the divisor explicitly: the codegen pops divisor then dividend, emits `fcmp eq divisor, 0.0`, and branches — the trap block calls the `fusevm_jit_awk_div_trap(code)` libcall (`code` = `1` for div, `2` for mod) into a thread-local channel and `return`s a sentinel, while the continuation block computes `fdiv` (div) or the `fmod` libcall (mod). After the compiled block returns, the VM's block-dispatch path calls `take_awk_div_trap()` and, if a code was set, raises the same fatal `"division by zero attempted"` / `…in \`%'` error the interpreter raises — *before* writing slots back. The trap libcall is the disk-cache host helper `H_AWK_DIV_TRAP`, so these chunks persist to the on-disk cache; it is imported only by chunks that contain the ops, so frontends that never emit them (zshrs/stryke) are byte-identical. The gawk bitwise ops use the same protocol through `fusevm_jit_awk_bit_trap` (codes `3`..`8`).
 
 ### Tracing JIT — hot loop bodies compiled to native code
 
@@ -924,7 +924,7 @@ single-VM dispatch loop, so a frontend (e.g. Go) can express `go`, `make(chan)`,
 `<-`, and `close` without a bespoke runtime.
 
 Each goroutine is its own `VM` sharing the program `Chunk` and the frontend's
-thread-local heap. Five interpreter-only ops raise a scheduling request in the
+thread-local heap. These interpreter-only ops raise a scheduling request in the
 VM and halt the chunk — the same "op stashes a value, halts, driver reads it
 after `run()`" pattern as `Op::AwkSignal`:
 
@@ -936,6 +936,8 @@ after `run()`" pattern as `Op::AwkSignal`:
 | `ChanRecv` | receive from the popped channel, pushing the value (may block) |
 | `ChanRecvOk` | two-value receive: pushes `[value, ok]`, `ok` on top (`0` = closed and drained) |
 | `ChanClose` | close the popped channel |
+| `ChanLen` | Go's `len(ch)`: pushes the number of buffered values (a parked sender is not counted; `0` for a nil handle) |
+| `ChanCap` | Go's `cap(ch)`: pushes the buffer capacity (`0` unbuffered or nil) |
 
 The scheduler owns the channel table and a run queue, reads each request via
 `VM::take_sched`, and resumes a VM by delivering results directly onto its stack
