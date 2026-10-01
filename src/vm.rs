@@ -203,11 +203,12 @@ pub struct VM {
     /// do, so for them this stays `None` and `Halted` behaves exactly as before.
     awk_signal: Option<u8>,
     /// Cooperative-concurrency scheduling request raised by a goroutine/channel
-    /// op (`Op::Go`/`ChanMake`/`ChanSend`/`ChanRecv`/`ChanClose`): the op stores
-    /// the request here and halts the chunk, and a [`crate::sched::Scheduler`]
-    /// driver reads it via [`VM::take_sched`] after `run()` returns, then resumes
-    /// this VM (or another goroutine). `None` unless a frontend emits those ops,
-    /// so zshrs/stryke/etc. behave exactly as before.
+    /// op (`Op::Go`/`ChanMake`/`ChanSend`/`ChanRecv`/`ChanClose`/`ChanLen`/
+    /// `ChanCap`): the op stores the request here and halts the chunk, and a
+    /// [`crate::sched::Scheduler`] driver reads it via [`VM::take_sched`] after
+    /// `run()` returns, then resumes this VM (or another goroutine). `None`
+    /// unless a frontend emits those ops, so zshrs/stryke/etc. behave exactly as
+    /// before.
     sched: Option<crate::sched::SchedReq>,
     /// Halted flag
     halted: bool,
@@ -1682,9 +1683,10 @@ impl VM {
                             self.ip = 0;
                         } else {
                             // A JIT-compiled AwkDivJit/AwkModJit may have hit a zero
-                            // divisor and set the thread-local trap code before
-                            // returning. Honor it as the awk fatal, discarding the
-                            // (garbage) block result and slot writeback.
+                            // divisor (or a bitwise op a negative operand) and set
+                            // the thread-local trap code before returning. Honor it
+                            // as the awk fatal, discarding the (garbage) block
+                            // result and slot writeback.
                             match crate::jit::take_awk_div_trap() {
                                 1 => {
                                     return VMResult::Error(
@@ -1696,20 +1698,11 @@ impl VM {
                                         "division by zero attempted in `%'".to_string(),
                                     )
                                 }
-                                3 => {
-                                    return VMResult::Error(
-                                        "lshift: negative values are not allowed".to_string(),
-                                    )
-                                }
-                                4 => {
-                                    return VMResult::Error(
-                                        "rshift: negative values are not allowed".to_string(),
-                                    )
-                                }
-                                5 => {
-                                    return VMResult::Error(
-                                        "compl: negative value is not allowed".to_string(),
-                                    )
+                                code @ 3..=8 => {
+                                    let (a, b) = crate::jit::take_awk_trap_args();
+                                    if let Some(msg) = crate::awk_host::awk_bit_fatal(code, a, b) {
+                                        return VMResult::Error(msg);
+                                    }
                                 }
                                 _ => {}
                             }
@@ -1888,6 +1881,8 @@ impl VM {
                             | Op::ChanRecv
                             | Op::ChanRecvOk
                             | Op::ChanClose
+                            | Op::ChanLen
+                            | Op::ChanCap
                             | Op::Select(_, _)
                             | Op::CallDynamic(_) => rec.aborted = true,
                             _ => {}
@@ -2607,7 +2602,11 @@ impl VM {
             }
             Op::ExtendedWide(id, payload) => {
                 let (id, payload) = (*id, *payload);
-                if crate::awk_builtins::is_awk_op(id) {
+                if crate::awk_builtins::is_awk_bitwise_op(id) {
+                    if let Err(e) = self.awk_bitwise(id, payload) {
+                        return ExecFlow::Ret(VMResult::Error(e));
+                    }
+                } else if crate::awk_builtins::is_awk_op(id) {
                     self.dispatch_awk(id, payload);
                 } else if let Some(mut handler) = self.ext_wide_handler.take() {
                     handler(self, id, payload);
@@ -3559,45 +3558,24 @@ impl VM {
                     self.push(Value::Float(a.ln()));
                 }
             }
-            // awk lshift(a, n) — fatal on negative operands. Stack [a, n]:
-            // pop n then a (matches the awk evaluation order pushed by
-            // frontends).
-            Op::AwkLshiftJit => {
+            // awk lshift(a, n) / rshift(a, n) — gawk `do_lshift`/`do_rshift`:
+            // fatal on a negative operand, else a `(uintmax_t)` shift (a count
+            // of 64+ yields 0) narrowed by `adjust_uint`. Stack [a, n]: pop n
+            // then a (the awk evaluation order pushed by frontends).
+            op @ (Op::AwkLshiftJit | Op::AwkRshiftJit) => {
                 let n = self.pop().to_float();
                 let a = self.pop().to_float();
-                if a < 0.0 || n < 0.0 {
-                    return ExecFlow::Ret(VMResult::Error(
-                        "lshift: negative values are not allowed".to_string(),
-                    ));
+                match crate::awk_host::awk_shift_checked(matches!(op, Op::AwkLshiftJit), a, n) {
+                    Ok(r) => self.push(Value::Float(r)),
+                    Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
                 }
-                let shifted = (a as i64).wrapping_shl((n as u32) & 0x3f);
-                self.push(Value::Float(shifted as f64));
             }
-            // awk rshift(a, n) — same guard as lshift but logical right.
-            Op::AwkRshiftJit => {
-                let n = self.pop().to_float();
-                let a = self.pop().to_float();
-                if a < 0.0 || n < 0.0 {
-                    return ExecFlow::Ret(VMResult::Error(
-                        "rshift: negative values are not allowed".to_string(),
-                    ));
-                }
-                let shifted = ((a as i64) as u64).wrapping_shr((n as u32) & 0x3f);
-                self.push(Value::Float(shifted as f64));
-            }
-            // awk compl(a) — fatal on negative. `!a` in u64 space then back
-            // to f64 (the high bits saturate the f64 mantissa, matching
-            // awkrs's `num_to_u64` semantics).
-            Op::AwkComplJit => {
-                let a = self.pop().to_float();
-                if a < 0.0 {
-                    return ExecFlow::Ret(VMResult::Error(
-                        "compl: negative value is not allowed".to_string(),
-                    ));
-                }
-                let v = !(a as i64);
-                self.push(Value::Float(v as f64));
-            }
+            // awk compl(a) — gawk `do_compl`: fatal on negative, else `~a` in
+            // `uintmax_t` narrowed by `adjust_uint` (`compl(0)` = 2^53 - 1).
+            Op::AwkComplJit => match crate::awk_host::awk_compl_checked(self.pop().to_float()) {
+                Ok(r) => self.push(Value::Float(r)),
+                Err(e) => return ExecFlow::Ret(VMResult::Error(e)),
+            },
             // awk `$N` numeric read — interpreter path. Calls the same
             // host-installed hook as the JIT-compiled variant so behavior
             // matches across tiers. Returns 0.0 when no hook is set, which
@@ -3841,12 +3819,24 @@ impl VM {
             Op::AwkArrayDelete(n) => self.dispatch_awk(ab::AWK_ARRAY_DELETE, *n as usize),
             Op::AwkArrayClear(n) => self.dispatch_awk(ab::AWK_ARRAY_CLEAR, *n as usize),
             Op::AwkArrayLen(n) => self.dispatch_awk(ab::AWK_ARRAY_LEN, *n as usize),
-            Op::AwkAnd(argc) => self.dispatch_awk(ab::AWK_AND, *argc as usize),
-            Op::AwkOr(argc) => self.dispatch_awk(ab::AWK_OR, *argc as usize),
-            Op::AwkXor(argc) => self.dispatch_awk(ab::AWK_XOR, *argc as usize),
-            Op::AwkCompl => self.dispatch_awk(ab::AWK_COMPL, 0),
-            Op::AwkLshift => self.dispatch_awk(ab::AWK_LSHIFT, 0),
-            Op::AwkRshift => self.dispatch_awk(ab::AWK_RSHIFT, 0),
+            op @ (Op::AwkAnd(_)
+            | Op::AwkOr(_)
+            | Op::AwkXor(_)
+            | Op::AwkCompl
+            | Op::AwkLshift
+            | Op::AwkRshift) => {
+                let (id, argc) = match op {
+                    Op::AwkAnd(n) => (ab::AWK_AND, *n as usize),
+                    Op::AwkOr(n) => (ab::AWK_OR, *n as usize),
+                    Op::AwkXor(n) => (ab::AWK_XOR, *n as usize),
+                    Op::AwkCompl => (ab::AWK_COMPL, 0),
+                    Op::AwkLshift => (ab::AWK_LSHIFT, 0),
+                    _ => (ab::AWK_RSHIFT, 0),
+                };
+                if let Err(e) = self.awk_bitwise(id, argc) {
+                    return ExecFlow::Ret(VMResult::Error(e));
+                }
+            }
             Op::AwkStrtonum => self.dispatch_awk(ab::AWK_STRTONUM, 0),
             Op::AwkSystime => self.dispatch_awk(ab::AWK_SYSTIME, 0),
             Op::AwkRand => self.dispatch_awk(ab::AWK_RAND, 0),
@@ -3907,6 +3897,16 @@ impl VM {
             Op::ChanClose => {
                 let ch = self.pop().to_int();
                 self.sched = Some(crate::sched::SchedReq::Close { ch });
+                self.halted = true;
+            }
+            Op::ChanLen => {
+                let ch = self.pop().to_int();
+                self.sched = Some(crate::sched::SchedReq::Len { ch });
+                self.halted = true;
+            }
+            Op::ChanCap => {
+                let ch = self.pop().to_int();
+                self.sched = Some(crate::sched::SchedReq::Cap { ch });
                 self.halted = true;
             }
             Op::CallDynamic(argc) => {
@@ -4266,12 +4266,17 @@ impl VM {
         let msg = match code {
             0 => "division by zero attempted",
             1 => "division by zero attempted in `%'",
-            2 => "lshift: negative values are not allowed",
-            3 => "rshift: negative values are not allowed",
-            4 => "compl: negative value is not allowed",
             _ => "aot: runtime error",
         };
         self.aot_result = Some(VMResult::Error(msg.to_string()));
+    }
+
+    /// Store an already-formatted error result from natively-lowered AOT code
+    /// (gawk's bitwise fatals carry operand values, so they are not keyed by a
+    /// fixed code like [`VM::aot_set_error`]).
+    #[cfg(feature = "aot")]
+    pub(crate) fn aot_set_error_msg(&mut self, msg: String) {
+        self.aot_result = Some(VMResult::Error(msg));
     }
 
     /// Take the result captured by the AOT driver, leaving `None` behind.
@@ -4644,16 +4649,54 @@ impl VM {
         self.awk_host = Some(host);
     }
 
+    /// gawk `and`/`or`/`xor`/`compl`/`lshift`/`rshift` (`id` is the AWK op id,
+    /// `argc` the fold arity). A registered [`AwkHost`] owns them (awkrs routes
+    /// them through its bignum-aware builtins); with no host the VM computes
+    /// gawk's result natively — `(uintmax_t)` operands, `adjust_uint`
+    /// narrowing, a `Float` result — and returns gawk's fatal text as `Err` on
+    /// a negative operand, exactly as the block-JIT and AOT tiers do.
+    ///
+    /// [`AwkHost`]: crate::awk_host::AwkHost
+    fn awk_bitwise(&mut self, id: u16, argc: usize) -> Result<(), String> {
+        use crate::awk_builtins as ab;
+        use crate::awk_host::{
+            awk_bit_fold_checked, awk_compl_checked, awk_shift_checked, bit_code,
+        };
+        if self.awk_host.is_some() {
+            self.dispatch_awk(id, argc);
+            return Ok(());
+        }
+        let r = match id {
+            ab::AWK_AND | ab::AWK_OR | ab::AWK_XOR => {
+                let start = self.stack.len().saturating_sub(argc);
+                let args: Vec<f64> = self.stack.drain(start..).map(|v| v.to_float()).collect();
+                let code = match id {
+                    ab::AWK_AND => bit_code::AND,
+                    ab::AWK_OR => bit_code::OR,
+                    _ => bit_code::XOR,
+                };
+                awk_bit_fold_checked(code, &args)?
+            }
+            ab::AWK_COMPL => awk_compl_checked(self.pop().to_float())?,
+            _ => {
+                let n = self.pop().to_float();
+                let a = self.pop().to_float();
+                awk_shift_checked(id == ab::AWK_LSHIFT, a, n)?
+            }
+        };
+        self.push(Value::Float(r));
+        Ok(())
+    }
+
     /// Inert fallback for AWK ops when no [`AwkHost`] is registered. Keeps the
     /// stack balanced: value-producing ops push a neutral default; statement
     /// ops drop their operands.
     fn dispatch_awk_stub(&mut self, id: u16, payload: usize) {
         use crate::awk_builtins as ab;
         use crate::awk_host::{
-            awk_canon_nan, awk_chr, awk_compl, awk_fold_and, awk_fold_or, awk_fold_xor, awk_index,
-            awk_int, awk_intdiv, awk_intdiv0, awk_length, awk_lshift, awk_mkbool, awk_mktime,
-            awk_ord, awk_rand, awk_rshift, awk_srand, awk_strftime, awk_strtonum, awk_substr,
-            awk_systime, awk_tolower, awk_toupper,
+            awk_canon_nan, awk_chr, awk_index, awk_int, awk_intdiv, awk_intdiv0, awk_length,
+            awk_mkbool, awk_mktime, awk_ord, awk_rand, awk_srand, awk_strftime, awk_strtonum,
+            awk_substr, awk_systime, awk_tolower, awk_toupper,
         };
         match id {
             // value-producing: pop declared operands, push neutral default
@@ -4730,45 +4773,8 @@ impl VM {
                     y.to_float().atan2(x.to_float()),
                 )));
             }
-            // Host-independent bitwise builtins (gawk): pure integer math.
-            ab::AWK_AND => {
-                let args: Vec<Value> = {
-                    let mut v: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
-                    v.reverse();
-                    v
-                };
-                self.push(Value::Int(awk_fold_and(&args)));
-            }
-            ab::AWK_OR => {
-                let args: Vec<Value> = {
-                    let mut v: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
-                    v.reverse();
-                    v
-                };
-                self.push(Value::Int(awk_fold_or(&args)));
-            }
-            ab::AWK_XOR => {
-                let args: Vec<Value> = {
-                    let mut v: Vec<Value> = (0..payload).map(|_| self.pop()).collect();
-                    v.reverse();
-                    v
-                };
-                self.push(Value::Int(awk_fold_xor(&args)));
-            }
-            ab::AWK_COMPL => {
-                let v = self.pop();
-                self.push(Value::Int(awk_compl(&v)));
-            }
-            ab::AWK_LSHIFT => {
-                let n = self.pop();
-                let v = self.pop();
-                self.push(Value::Int(awk_lshift(&v, &n)));
-            }
-            ab::AWK_RSHIFT => {
-                let n = self.pop();
-                let v = self.pop();
-                self.push(Value::Int(awk_rshift(&v, &n)));
-            }
+            // The bitwise builtins never reach the stub: `VM::awk_bitwise` runs
+            // them natively (raising gawk's fatal) when no host is registered.
             ab::AWK_STRTONUM => {
                 let s = self.pop();
                 self.push(Value::Float(awk_strtonum(&s.to_str())));
@@ -6106,15 +6112,15 @@ mod tests {
     }
 
     #[test]
-    fn awk_compl_matches_awkrs_i64_wrap_without_host() {
-        // awkrs f64 path: compl(0) = (!0u64) as i64 = -1.
+    fn awk_compl_narrows_like_gawk_without_host() {
+        // gawk 5.4.1: compl(0) = 9007199254740991 (adjust_uint keeps 53 bits).
         let chunk = {
             let mut b = ChunkBuilder::new();
             b.emit(Op::LoadInt(0), 1);
             b.emit(Op::AwkCompl, 1);
             b.build()
         };
-        assert_eq!(run_native_int(chunk), -1);
+        assert_eq!(run_native(chunk), Value::Float(9_007_199_254_740_991.0));
     }
 
     #[test]
@@ -6140,13 +6146,127 @@ mod tests {
 
     #[test]
     fn awk_bitwise_free_fns_match_gawk_semantics() {
-        use crate::awk_host::{awk_compl, awk_fold_and, awk_fold_or, awk_fold_xor, awk_lshift};
-        assert_eq!(awk_fold_and(&[Value::Int(12), Value::Int(10)]), 8);
-        assert_eq!(awk_fold_or(&[Value::Int(12), Value::Int(10)]), 14);
-        assert_eq!(awk_fold_xor(&[Value::Int(12), Value::Int(10)]), 6);
-        assert_eq!(awk_compl(&Value::Int(0)), -1);
-        // shift count is masked to low 6 bits (n & 0x3f)
-        assert_eq!(awk_lshift(&Value::Int(1), &Value::Int(64)), 1);
+        use crate::awk_host::{
+            awk_adjust_uint, awk_compl, awk_fold_and, awk_fold_or, awk_fold_xor, awk_lshift,
+        };
+        assert_eq!(awk_fold_and(&[Value::Int(12), Value::Int(10)]), 8.0);
+        assert_eq!(awk_fold_or(&[Value::Int(12), Value::Int(10)]), 14.0);
+        assert_eq!(awk_fold_xor(&[Value::Int(12), Value::Int(10)]), 6.0);
+        assert_eq!(awk_compl(&Value::Int(0)), 9_007_199_254_740_991.0);
+        // gawk: a shift count of 64 or more yields 0.
+        assert_eq!(awk_lshift(&Value::Int(1), &Value::Int(64)), 0.0);
+        // floatcomp.c's own example: adjust_uint(8 + 2^62) = 8.
+        assert_eq!(awk_adjust_uint(8 + (1 << 62)), 8);
+    }
+
+    /// Each case's expected value is gawk 5.4.1's `printf "%d"` output for the
+    /// same call (`and`/`or`/`xor` and the shifts all narrow through
+    /// `adjust_uint`).
+    #[test]
+    fn awk_bitwise_ops_match_gawk_outputs_without_host() {
+        let p53 = 2f64.powi(53);
+        let p54 = 2f64.powi(54);
+        let p60 = 2f64.powi(60);
+        let cases: Vec<(Vec<f64>, Op, f64)> = vec![
+            (vec![p54, 1.0], Op::AwkOr(2), 1.0),
+            (
+                vec![p53 + p54, p60 + p53],
+                Op::AwkAnd(2),
+                9_007_199_254_740_992.0,
+            ),
+            (vec![p53 + 1.0, 1.0], Op::AwkXor(2), 1.0),
+            (vec![1.0], Op::AwkCompl, 18_014_398_509_481_982.0),
+            (vec![15.0], Op::AwkCompl, 144_115_188_075_855_856.0),
+            (vec![p60], Op::AwkCompl, 9_007_199_254_740_991.0),
+            (vec![1e30], Op::AwkCompl, 0.0),
+            (
+                vec![2f64.powi(52) + 1.0, 2.0],
+                Op::AwkLshift,
+                18_014_398_509_481_988.0,
+            ),
+            (vec![3.0, 52.0], Op::AwkLshift, 13_510_798_882_111_488.0),
+            (vec![1.0, 65.0], Op::AwkLshift, 0.0),
+            (vec![1.0, 1e300], Op::AwkRshift, 0.0),
+            (vec![2f64.powi(63), 63.0], Op::AwkRshift, 1.0),
+        ];
+        for (args, op, want) in cases {
+            let mut b = ChunkBuilder::new();
+            for a in &args {
+                b.emit(Op::LoadFloat(*a), 1);
+            }
+            b.emit(op.clone(), 1);
+            assert_eq!(run_native(b.build()), Value::Float(want), "{op:?}{args:?}");
+        }
+    }
+
+    /// gawk's fatal text (after `fatal: `) for negative operands, verbatim
+    /// from gawk 5.4.1. The folds report the right-most negative argument:
+    /// gawk pops the last argument first.
+    #[test]
+    fn awk_bitwise_negative_operands_raise_gawk_fatal_without_host() {
+        let cases: Vec<(Vec<f64>, Op, &str)> = vec![
+            (
+                vec![1.0, -2.0, -3.0],
+                Op::AwkAnd(3),
+                "and: argument 3 negative value -3 is not allowed",
+            ),
+            (
+                vec![-1.5, 2.0],
+                Op::AwkOr(2),
+                "or: argument 1 negative value -1.5 is not allowed",
+            ),
+            (
+                vec![1.0, 2.0, -0.25],
+                Op::AwkXor(3),
+                "xor: argument 3 negative value -0.25 is not allowed",
+            ),
+            (
+                vec![1.0, -123456789.0],
+                Op::AwkOr(2),
+                "or: argument 2 negative value -1.23457e+08 is not allowed",
+            ),
+            (
+                vec![1.0, -0.00001],
+                Op::AwkXor(2),
+                "xor: argument 2 negative value -1e-05 is not allowed",
+            ),
+            (
+                vec![1.0, f64::NEG_INFINITY],
+                Op::AwkAnd(2),
+                "and: argument 2 negative value -inf is not allowed",
+            ),
+            (
+                vec![-1.0, 2.0],
+                Op::AwkLshift,
+                "lshift(-1.000000, 2.000000): negative values are not allowed",
+            ),
+            (
+                vec![1.0, -2.0],
+                Op::AwkRshift,
+                "rshift(1.000000, -2.000000): negative values are not allowed",
+            ),
+            (
+                vec![-0.5],
+                Op::AwkCompl,
+                "compl(-0.500000): negative value is not allowed",
+            ),
+            (
+                vec![1.0],
+                Op::AwkAnd(1),
+                "and: called with less than two arguments",
+            ),
+        ];
+        for (args, op, want) in cases {
+            let mut b = ChunkBuilder::new();
+            for a in &args {
+                b.emit(Op::LoadFloat(*a), 1);
+            }
+            b.emit(op.clone(), 1);
+            match VM::new(b.build()).run() {
+                VMResult::Error(msg) => assert_eq!(msg, want, "{op:?}{args:?}"),
+                other => panic!("{op:?}{args:?}: expected Error, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -6676,12 +6796,12 @@ mod tests {
 
     #[test]
     fn awk_compl_jit_negates_bits() {
-        // compl(15) ≈ !15 in i64 ≈ -16 ≈ as f64 ≈ -16.0
+        // gawk 5.4.1: compl(15) = 144115188075855856 (~15 narrowed by adjust_uint)
         let chunk = build_unary(Op::AwkComplJit, 15.0);
         let mut vm = VM::new(chunk);
         match vm.run() {
-            VMResult::Ok(v) => assert_eq!(v.to_float(), -16.0, "compl(15) == -16"),
-            other => panic!("expected Ok(-16.0), got {other:?}"),
+            VMResult::Ok(v) => assert_eq!(v.to_float(), 144_115_188_075_855_856.0),
+            other => panic!("expected Ok(144115188075855856), got {other:?}"),
         }
     }
 

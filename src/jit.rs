@@ -445,12 +445,36 @@ pub(crate) extern "C" fn fusevm_jit_awk_div_trap(kind: i64) {
     AWK_DIV_TRAP.with(|c| c.set(kind as u8));
 }
 
-/// Read and clear the pending div/mod trap code (`0` = none, `1` = div,
-/// `2` = mod, `3` = lshift, `4` = rshift, `5` = compl) set by
-/// [`fusevm_jit_awk_div_trap`].
+/// Read and clear the pending trap code (`0` = none, `1` = div, `2` = mod,
+/// `3`..=`8` = the bitwise [`crate::awk_host::bit_code`]s) set by
+/// [`fusevm_jit_awk_div_trap`] or [`fusevm_jit_awk_bit_trap`].
 #[allow(dead_code)] // used by JIT trap-drain path conditionally compiled out
 pub(crate) fn take_awk_div_trap() -> u8 {
     AWK_DIV_TRAP.with(|c| c.replace(0))
+}
+
+thread_local! {
+    /// Operands recorded beside a bitwise trap code by
+    /// [`fusevm_jit_awk_bit_trap`], so the VM can format gawk's fatal text
+    /// (`lshift(-1.000000, 2.000000): …`, `and: argument 3 negative value -3 …`).
+    static AWK_TRAP_ARGS: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
+}
+
+/// Libcall invoked by JIT-compiled `AwkLshiftJit`/`AwkRshiftJit`/`AwkComplJit`/
+/// `AwkAnd`/`AwkOr`/`AwkXor` on a negative operand: records the
+/// [`crate::awk_host::bit_code`] and its two message operands (see
+/// [`crate::awk_host::awk_bit_fatal`]) for the VM to raise after the block
+/// returns.
+#[allow(dead_code)] // referenced by Cranelift via raw function pointer, not Rust call graph
+pub(crate) extern "C" fn fusevm_jit_awk_bit_trap(code: i64, a: f64, b: f64) {
+    AWK_TRAP_ARGS.with(|c| c.set((a, b)));
+    AWK_DIV_TRAP.with(|c| c.set(code as u8));
+}
+
+/// The operands recorded by the last [`fusevm_jit_awk_bit_trap`].
+#[allow(dead_code)] // used by JIT trap-drain path conditionally compiled out
+pub(crate) fn take_awk_trap_args() -> (f64, f64) {
+    AWK_TRAP_ARGS.with(|c| c.replace((0.0, 0.0)))
 }
 
 thread_local! {
@@ -623,6 +647,129 @@ impl DeoptInfo {
             stack_kinds: [0; MAX_DEOPT_STACK],
         }
     }
+}
+
+// ── gawk bitwise codegen shared by the block JIT and the AOT compiler ──
+//
+// Both tiers lower `lshift`/`rshift`/`compl`/`and`/`or`/`xor` to the same
+// instruction sequence as `crate::awk_host`'s interpreter functions: a C
+// `(uintmax_t)` cast of each operand (`fcvt_to_uint_sat`, the saturating cast
+// Rust's `as u64` also performs), 64-bit unsigned arithmetic, then gawk's
+// `adjust_uint` narrowing before the `u64 -> f64` conversion. Each tier emits
+// its own negative-operand guard (the trap/return protocol differs).
+
+/// gawk `adjust_uint` on an `i64` SSA value — see
+/// [`crate::awk_host::awk_adjust_uint`].
+#[cfg(feature = "jit")]
+pub(crate) fn emit_awk_adjust_uint(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    n: JitValue,
+) -> JitValue {
+    use crate::awk_host::AWK_NUM_FRACTION_BITS as FB;
+    use cranelift_codegen::ir::{types, InstBuilder};
+    let marked = b.ins().bor_imm(n, 1i64 << (u64::BITS - FB));
+    let shift = b.ins().ctz(marked);
+    let mask = b.ins().iconst(types::I64, ((1u64 << FB) - 1) as i64);
+    let mask = b.ins().ishl(mask, shift);
+    b.ins().band(n, mask)
+}
+
+/// `adjust_uint(u)` converted to `f64` — the result of every gawk bitwise op.
+#[cfg(feature = "jit")]
+pub(crate) fn emit_awk_uint_result(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    u: JitValue,
+) -> JitValue {
+    use cranelift_codegen::ir::{types, InstBuilder};
+    let adjusted = emit_awk_adjust_uint(b, u);
+    b.ins().fcvt_from_uint(types::F64, adjusted)
+}
+
+/// gawk `lshift`/`rshift` on non-negative `f64` operands: a shift count of 64
+/// or more yields 0 — see [`crate::awk_host::awk_shift_f64`].
+#[cfg(feature = "jit")]
+pub(crate) fn emit_awk_shift(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    left: bool,
+    a: JitValue,
+    n: JitValue,
+) -> JitValue {
+    use cranelift_codegen::ir::condcodes::FloatCC;
+    use cranelift_codegen::ir::{types, InstBuilder};
+    let au = b.ins().fcvt_to_uint_sat(types::I64, a);
+    let nu = b.ins().fcvt_to_uint_sat(types::I64, n);
+    let shifted = if left {
+        b.ins().ishl(au, nu)
+    } else {
+        b.ins().ushr(au, nu)
+    };
+    let limit = b.ins().f64const(u64::BITS as f64);
+    let in_range = b.ins().fcmp(FloatCC::LessThan, n, limit);
+    let zero = b.ins().iconst(types::I64, 0);
+    let r = b.ins().select(in_range, shifted, zero);
+    emit_awk_uint_result(b, r)
+}
+
+/// gawk `compl` on a non-negative `f64` operand — see
+/// [`crate::awk_host::awk_compl_f64`].
+#[cfg(feature = "jit")]
+pub(crate) fn emit_awk_compl(b: &mut cranelift_frontend::FunctionBuilder, a: JitValue) -> JitValue {
+    use cranelift_codegen::ir::{types, InstBuilder};
+    let au = b.ins().fcvt_to_uint_sat(types::I64, a);
+    let inv = b.ins().bnot(au);
+    emit_awk_uint_result(b, inv)
+}
+
+/// One step of gawk `and`/`or`/`xor` (`code` is a
+/// [`crate::awk_host::bit_code`] fold code): fold the non-negative `f64`
+/// operand `v` into the `u64` accumulator `acc`.
+#[cfg(feature = "jit")]
+pub(crate) fn emit_awk_fold_step(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    code: u8,
+    acc: JitValue,
+    v: JitValue,
+) -> JitValue {
+    use crate::awk_host::bit_code;
+    use cranelift_codegen::ir::{types, InstBuilder};
+    let vu = b.ins().fcvt_to_uint_sat(types::I64, v);
+    match code {
+        bit_code::AND => b.ins().band(acc, vu),
+        bit_code::OR => b.ins().bor(acc, vu),
+        _ => b.ins().bxor(acc, vu),
+    }
+}
+
+/// The fold accumulator's starting value: all ones for `and`, zero otherwise.
+#[cfg(feature = "jit")]
+pub(crate) fn emit_awk_fold_init(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    code: u8,
+) -> JitValue {
+    use cranelift_codegen::ir::{types, InstBuilder};
+    let init = if code == crate::awk_host::bit_code::AND {
+        -1
+    } else {
+        0
+    };
+    b.ins().iconst(types::I64, init)
+}
+
+/// The [`crate::awk_host::bit_code`] for a gawk bitwise op, `None` for any
+/// other op.
+#[cfg(feature = "jit")]
+pub(crate) fn awk_bit_code(op: &crate::op::Op) -> Option<u8> {
+    use crate::awk_host::bit_code;
+    use crate::op::Op;
+    Some(match op {
+        Op::AwkLshiftJit => bit_code::LSHIFT,
+        Op::AwkRshiftJit => bit_code::RSHIFT,
+        Op::AwkComplJit => bit_code::COMPL,
+        Op::AwkAnd(_) => bit_code::AND,
+        Op::AwkOr(_) => bit_code::OR,
+        Op::AwkXor(_) => bit_code::XOR,
+        _ => return None,
+    })
 }
 
 // ── Cranelift JIT implementation (feature-gated) ──
@@ -1628,6 +1775,8 @@ mod cranelift_jit_impl {
         /// Strict-numeric integer-overflow trap (see `fusevm_jit_num_overflow_trap`).
         num_ovf_trap: Option<cranelift_module::FuncId>,
         awk_neg_warn: Option<cranelift_module::FuncId>,
+        /// Negative-operand trap for the gawk bitwise ops (`fusevm_jit_awk_bit_trap`).
+        awk_bit_trap: Option<cranelift_module::FuncId>,
         awk_get_field_num: Option<cranelift_module::FuncId>,
     }
 
@@ -1657,6 +1806,7 @@ mod cranelift_jit_impl {
         awk_div_trap: Option<cranelift_codegen::ir::FuncRef>,
         num_ovf_trap: Option<cranelift_codegen::ir::FuncRef>,
         awk_neg_warn: Option<cranelift_codegen::ir::FuncRef>,
+        awk_bit_trap: Option<cranelift_codegen::ir::FuncRef>,
         awk_get_field_num: Option<cranelift_codegen::ir::FuncRef>,
     }
 
@@ -1687,6 +1837,17 @@ mod cranelift_jit_impl {
     ) -> Option<cranelift_module::FuncId> {
         let mut ps = module.make_signature();
         ps.params.push(AbiParam::new(types::I64));
+        ps.params.push(AbiParam::new(types::F64));
+        module.declare_function(name, Linkage::Import, &ps).ok()
+    }
+
+    fn declare_void_i64_f64_f64(
+        module: &mut JITModule,
+        name: &str,
+    ) -> Option<cranelift_module::FuncId> {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::I64));
+        ps.params.push(AbiParam::new(types::F64));
         ps.params.push(AbiParam::new(types::F64));
         module.declare_function(name, Linkage::Import, &ps).ok()
     }
@@ -1808,10 +1969,16 @@ mod cranelift_jit_impl {
                     {
                         m.num_ovf_trap = declare_void_i64(module, "fusevm_jit_num_overflow_trap");
                     }
-                    Op::AwkLshiftJit | Op::AwkRshiftJit | Op::AwkComplJit
-                        if m.awk_div_trap.is_none() =>
+                    Op::AwkLshiftJit
+                    | Op::AwkRshiftJit
+                    | Op::AwkComplJit
+                    | Op::AwkAnd(_)
+                    | Op::AwkOr(_)
+                    | Op::AwkXor(_)
+                        if m.awk_bit_trap.is_none() =>
                     {
-                        m.awk_div_trap = declare_void_i64(module, "fusevm_jit_awk_div_trap");
+                        m.awk_bit_trap =
+                            declare_void_i64_f64_f64(module, "fusevm_jit_awk_bit_trap");
                     }
                     Op::AwkLogJit if m.log.is_none() => {
                         m.log = declare_unary_f64(module, "fusevm_jit_log_f64");
@@ -1871,6 +2038,9 @@ mod cranelift_jit_impl {
                 awk_neg_warn: self
                     .awk_neg_warn
                     .map(|id| module.declare_func_in_func(id, func)),
+                awk_bit_trap: self
+                    .awk_bit_trap
+                    .map(|id| module.declare_func_in_func(id, func)),
                 awk_get_field_num: self
                     .awk_get_field_num
                     .map(|id| module.declare_func_in_func(id, func)),
@@ -1921,6 +2091,10 @@ mod cranelift_jit_impl {
         builder.symbol(
             "fusevm_jit_awk_neg_warn",
             super::fusevm_jit_awk_neg_warn as *const u8,
+        );
+        builder.symbol(
+            "fusevm_jit_awk_bit_trap",
+            super::fusevm_jit_awk_bit_trap as *const u8,
         );
         builder.symbol(
             "fusevm_jit_awk_get_field_num",
@@ -2606,28 +2780,6 @@ mod cranelift_jit_impl {
                 let call = bcx.ins().call(math.atan2?, &[y, x]);
                 stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
             }
-            // awk and/or/xor(v1, v2, ...): variadic bitwise fold. Each operand is
-            // truncated toward zero and saturated to i64 (matching awkrs's
-            // `num_to_u64`), folded with the integer bit-op, and pushed as Int —
-            // its f64 materialization (`fcvt_from_sint`) matches awkrs's final
-            // `… as i64 as f64`. Folding order is irrelevant (and/or/xor are
-            // associative + commutative). The `u8` payload is the arg count
-            // (≥2, guaranteed by the parser); fewer than 2 bails the block JIT.
-            Op::AwkAnd(n) | Op::AwkOr(n) | Op::AwkXor(n) => {
-                if (*n as usize) < 2 {
-                    return None;
-                }
-                let mut acc = pop_as_i64_sat(bcx, stack)?;
-                for _ in 1..*n {
-                    let v = pop_as_i64_sat(bcx, stack)?;
-                    acc = match op {
-                        Op::AwkAnd(_) => bcx.ins().band(acc, v),
-                        Op::AwkOr(_) => bcx.ins().bor(acc, v),
-                        _ => bcx.ins().bxor(acc, v),
-                    };
-                }
-                stack.push((acc, JitTy::Int));
-            }
             // The interpreter is `Value::Int(v.to_int().wrapping_add(1))`
             // (src/vm.rs, `Op::Inc`), and `Value::to_int` on a float is Rust's
             // `f as i64`, which *saturates* (NaN -> 0, ±huge -> i64::MIN/MAX).
@@ -3185,6 +3337,9 @@ mod cranelift_jit_impl {
         pub(crate) const H_MULMOD_I64: u32 = 23;
         /// Fused exact `(a*b + c) % k` libcall (see `Op::MulAddModFloor`).
         pub(crate) const H_MULADDMOD_I64: u32 = 24;
+        /// Negative-operand trap libcall for the JIT-compiled gawk bitwise ops
+        /// (`AwkLshiftJit`/`AwkRshiftJit`/`AwkComplJit`/`AwkAnd`/`AwkOr`/`AwkXor`).
+        pub(crate) const H_AWK_BIT_TRAP: u32 = 25;
 
         // Native-blob tier discriminator. Persisted in the file and verified on
         // load so a block blob can never be transmuted with a linear signature.
@@ -3216,7 +3371,11 @@ mod cranelift_jit_impl {
         // integral-valued constant (±0.0 included) previously lowered as
         // `JitTy::Int`, so cached blobs return Int where the interpreter
         // returns Float; bumped so those stale blobs are rejected on load.
-        const SCHEMA_VERSION: u32 = 16;
+        // 16 -> 17: gawk bitwise codegen — `AwkLshiftJit`/`AwkRshiftJit`/
+        // `AwkComplJit`/`AwkAnd`/`AwkOr`/`AwkXor` now narrow with `adjust_uint`,
+        // treat shift counts >= 64 as 0, trap negative fold operands, and call
+        // the new `fusevm_jit_awk_bit_trap` helper; and/or/xor yield Float.
+        const SCHEMA_VERSION: u32 = 17;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -3252,6 +3411,7 @@ mod cranelift_jit_impl {
                 H_LCM_I64 => super::fusevm_jit_lcm_i64 as *const u8 as usize,
                 H_TIME_I64 => super::fusevm_jit_time_i64 as *const u8 as usize,
                 H_AWK_DIV_TRAP => super::super::fusevm_jit_awk_div_trap as *const u8 as usize,
+                H_AWK_BIT_TRAP => super::super::fusevm_jit_awk_bit_trap as *const u8 as usize,
                 H_NUM_OVF_TRAP => super::super::fusevm_jit_num_overflow_trap as *const u8 as usize,
                 _ => return None,
             })
@@ -3679,6 +3839,7 @@ mod cranelift_jit_impl {
                     awk_div_trap: None,
                     num_ovf_trap: None,
                     awk_neg_warn: None,
+                    awk_bit_trap: None,
                     awk_get_field_num: None,
                 };
 
@@ -5583,11 +5744,13 @@ mod cranelift_jit_impl {
                             stack.push((merged, JitTy::Float));
                         }
 
-                        // awk lshift(a, n) / rshift(a, n) — fatal on either
-                        // operand negative. Stack [a, n]: pop n then a, matching
-                        // the interpreter. Trap codes: 3 = lshift, 4 = rshift.
+                        // gawk lshift(a, n) / rshift(a, n) — fatal on a negative
+                        // operand. Stack [a, n]: pop n then a, matching the
+                        // interpreter. The trap records the bit code and both
+                        // operands (gawk's message prints them).
                         Op::AwkLshiftJit | Op::AwkRshiftJit => {
-                            let trap_ref = math.awk_div_trap?;
+                            let trap_ref = math.awk_bit_trap?;
+                            let code = super::awk_bit_code(op)?;
                             let n = pop_as_f64(&mut bcx, &mut stack)?;
                             let a = pop_as_f64(&mut bcx, &mut stack)?;
                             let zero = bcx.ins().f64const(0.0);
@@ -5599,33 +5762,25 @@ mod cranelift_jit_impl {
                             bcx.ins().brif(any_neg, trap_block, &[], cont_block, &[]);
 
                             bcx.switch_to_block(trap_block);
-                            let code = if matches!(op, Op::AwkLshiftJit) { 3 } else { 4 };
-                            let code_v = bcx.ins().iconst(types::I64, code);
-                            bcx.ins().call(trap_ref, &[code_v]);
+                            let code_v = bcx.ins().iconst(types::I64, code as i64);
+                            bcx.ins().call(trap_ref, &[code_v, a, n]);
                             let sentinel = bcx.ins().iconst(types::I64, 0);
                             bcx.ins().return_(&[sentinel]);
 
-                            // Continue: convert f64 → i64 (saturating), mask
-                            // shift amount to 6 bits to match Rust's
-                            // `wrapping_shl((n as u32) & 0x3f)`, then back to f64.
                             bcx.switch_to_block(cont_block);
-                            let a_i = bcx.ins().fcvt_to_sint_sat(types::I64, a);
-                            let n_i = bcx.ins().fcvt_to_sint_sat(types::I64, n);
-                            let mask = bcx.ins().iconst(types::I64, 0x3f);
-                            let n_masked = bcx.ins().band(n_i, mask);
-                            let shifted = if matches!(op, Op::AwkLshiftJit) {
-                                bcx.ins().ishl(a_i, n_masked)
-                            } else {
-                                bcx.ins().ushr(a_i, n_masked)
-                            };
-                            let res = bcx.ins().fcvt_from_sint(types::F64, shifted);
+                            let res = super::emit_awk_shift(
+                                &mut bcx,
+                                matches!(op, Op::AwkLshiftJit),
+                                a,
+                                n,
+                            );
                             stack.push((res, JitTy::Float));
                         }
 
-                        // awk compl(a) — fatal on negative; otherwise `!(a as i64)`
-                        // then back to f64. Trap code 5.
+                        // gawk compl(a) — fatal on negative, else `~a` narrowed
+                        // by `adjust_uint`.
                         Op::AwkComplJit => {
-                            let trap_ref = math.awk_div_trap?;
+                            let trap_ref = math.awk_bit_trap?;
                             let v = pop_as_f64(&mut bcx, &mut stack)?;
                             let zero = bcx.ins().f64const(0.0);
                             let is_neg = bcx.ins().fcmp(FloatCC::LessThan, v, zero);
@@ -5634,16 +5789,50 @@ mod cranelift_jit_impl {
                             bcx.ins().brif(is_neg, trap_block, &[], cont_block, &[]);
 
                             bcx.switch_to_block(trap_block);
-                            let code_v = bcx.ins().iconst(types::I64, 5);
-                            bcx.ins().call(trap_ref, &[code_v]);
+                            let code_v = bcx
+                                .ins()
+                                .iconst(types::I64, crate::awk_host::bit_code::COMPL as i64);
+                            bcx.ins().call(trap_ref, &[code_v, v, zero]);
                             let sentinel = bcx.ins().iconst(types::I64, 0);
                             bcx.ins().return_(&[sentinel]);
 
                             bcx.switch_to_block(cont_block);
-                            let v_i = bcx.ins().fcvt_to_sint_sat(types::I64, v);
-                            let neg1 = bcx.ins().iconst(types::I64, -1);
-                            let inverted = bcx.ins().bxor(v_i, neg1);
-                            let res = bcx.ins().fcvt_from_sint(types::F64, inverted);
+                            let res = super::emit_awk_compl(&mut bcx, v);
+                            stack.push((res, JitTy::Float));
+                        }
+
+                        // gawk and/or/xor(v1, v2, ...) — variadic fold, fatal on
+                        // a negative argument. gawk pops the last argument first
+                        // and stops at the first negative one, so operands are
+                        // guarded top-down and the trap reports that argument's
+                        // 1-based position. Fewer than 2 args (a gawk fatal of
+                        // its own) bails the block JIT to the interpreter.
+                        Op::AwkAnd(n) | Op::AwkOr(n) | Op::AwkXor(n) => {
+                            if (*n as usize) < 2 {
+                                return None;
+                            }
+                            let trap_ref = math.awk_bit_trap?;
+                            let code = super::awk_bit_code(op)?;
+                            let mut acc = super::emit_awk_fold_init(&mut bcx, code);
+                            let zero = bcx.ins().f64const(0.0);
+                            for argno in (1..=*n).rev() {
+                                let v = pop_as_f64(&mut bcx, &mut stack)?;
+                                let is_neg = bcx.ins().fcmp(FloatCC::LessThan, v, zero);
+                                let trap_block = bcx.create_block();
+                                let cont_block = bcx.create_block();
+                                bcx.ins().brif(is_neg, trap_block, &[], cont_block, &[]);
+
+                                bcx.switch_to_block(trap_block);
+                                let code_v = bcx.ins().iconst(types::I64, code as i64);
+                                let argno_v = bcx.ins().f64const(argno as f64);
+                                bcx.ins().call(trap_ref, &[code_v, argno_v, v]);
+                                let sentinel = bcx.ins().iconst(types::I64, 0);
+                                bcx.ins().return_(&[sentinel]);
+
+                                bcx.switch_to_block(cont_block);
+                                acc = super::emit_awk_fold_step(&mut bcx, code, acc, v);
+                            }
+                            let res = super::emit_awk_uint_result(&mut bcx, acc);
                             stack.push((res, JitTy::Float));
                         }
 
@@ -5775,6 +5964,10 @@ mod cranelift_jit_impl {
                     #[cfg(feature = "jit-disk-cache")]
                     if let Some(fid) = math_ids.awk_div_trap {
                         v.push((fid, disk_cache::H_AWK_DIV_TRAP));
+                    }
+                    #[cfg(feature = "jit-disk-cache")]
+                    if let Some(fid) = math_ids.awk_bit_trap {
+                        v.push((fid, disk_cache::H_AWK_BIT_TRAP));
                     }
                     // Likewise the strict-numeric overflow trap: carrying it here
                     // keeps a strict frontend's arithmetic chunks eligible for the
@@ -5936,7 +6129,8 @@ mod cranelift_jit_impl {
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
     ) -> Option<super::BlockNum> {
-        try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold()).map(|r| decode_block_num(chunk, r))
+        try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold())
+            .map(|r| decode_block_num(chunk, r))
     }
 
     /// Like `try_run_block` but compiles immediately (no warmup). For tests
@@ -8953,5 +9147,149 @@ mod awk_div_trap_tests {
             0,
             "nonzero mod must not trap"
         );
+    }
+}
+
+/// Block-JIT vs interpreter agreement for the gawk bitwise ops: the same
+/// operands produce the same `Float` result, or — on a negative operand — the
+/// JIT trap records the code and operands that format the interpreter's exact
+/// fatal text.
+#[cfg(all(test, feature = "jit"))]
+mod awk_bit_trap_tests {
+    use super::{take_awk_div_trap, take_awk_trap_args, JitCompiler};
+    use crate::{ChunkBuilder, Op, SlotKind, VMResult, Value, VM};
+
+    /// Run `op` over `args` in the block JIT (operands in Float slots); `Ok`
+    /// is the result, `Err` the fatal text the VM would raise from the trap.
+    fn run_block(op: &Op, args: &[f64]) -> Result<f64, String> {
+        let mut b = ChunkBuilder::new();
+        for i in 0..args.len() {
+            b.emit(Op::GetSlot(i as u16), 1);
+        }
+        b.emit(op.clone(), 1);
+        b.emit(Op::Dup, 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::Pop, 1);
+        let chunk = b.build();
+        let jit = JitCompiler::new();
+        assert!(
+            jit.is_block_eligible(&chunk),
+            "{op:?} must be block-eligible"
+        );
+
+        let _ = take_awk_div_trap();
+        let kinds = vec![SlotKind::Float; args.len()];
+        let mut slots: Vec<i64> = args.iter().map(|a| a.to_bits() as i64).collect();
+        jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
+            .unwrap_or_else(|| panic!("{op:?} chunk must compile"));
+        match take_awk_div_trap() {
+            0 => Ok(f64::from_bits(slots[0] as u64)),
+            code => {
+                let (a, b) = take_awk_trap_args();
+                Err(crate::awk_host::awk_bit_fatal(code, a, b).expect("bit trap code"))
+            }
+        }
+    }
+
+    /// The interpreter's answer for the same call.
+    fn run_interp(op: &Op, args: &[f64]) -> Result<f64, String> {
+        let mut b = ChunkBuilder::new();
+        for a in args {
+            b.emit(Op::LoadFloat(*a), 1);
+        }
+        b.emit(op.clone(), 1);
+        match VM::new(b.build()).run() {
+            VMResult::Ok(Value::Float(f)) => Ok(f),
+            VMResult::Error(e) => Err(e),
+            other => panic!("{op:?}{args:?}: unexpected {other:?}"),
+        }
+    }
+
+    fn assert_agree(op: Op, args: &[f64]) {
+        assert_eq!(
+            run_block(&op, args),
+            run_interp(&op, args),
+            "{op:?}{args:?}"
+        );
+    }
+
+    #[test]
+    fn gawk_bitwise_block_jit_matches_interpreter() {
+        let p = |e: i32| 2f64.powi(e);
+        let cases: Vec<(Op, Vec<f64>)> = vec![
+            (Op::AwkComplJit, vec![0.0]),
+            (Op::AwkComplJit, vec![15.0]),
+            (Op::AwkComplJit, vec![3.7]),
+            (Op::AwkComplJit, vec![1e30]),
+            (Op::AwkComplJit, vec![f64::NAN]),
+            (Op::AwkComplJit, vec![-0.5]),
+            (Op::AwkLshiftJit, vec![1.0, 63.0]),
+            (Op::AwkLshiftJit, vec![1.0, 64.0]),
+            (Op::AwkLshiftJit, vec![p(52) + 1.0, 2.0]),
+            (Op::AwkLshiftJit, vec![1.7, 2.9]),
+            (Op::AwkLshiftJit, vec![-1.0, 2.0]),
+            (Op::AwkLshiftJit, vec![1.0, f64::NAN]),
+            (Op::AwkRshiftJit, vec![p(63), 63.0]),
+            (Op::AwkRshiftJit, vec![1.0, 1e300]),
+            (Op::AwkRshiftJit, vec![1.0, -2.0]),
+            (Op::AwkOr(2), vec![p(54), 1.0]),
+            (Op::AwkAnd(2), vec![p(53) + p(54), p(60) + p(53)]),
+            (Op::AwkAnd(2), vec![1e30, 1e30]),
+            (Op::AwkXor(2), vec![p(53) + 1.0, 1.0]),
+            (Op::AwkAnd(3), vec![15.0, 9.0, 5.0]),
+            (Op::AwkAnd(3), vec![1.0, -2.0, -3.0]),
+            (Op::AwkOr(2), vec![-1.5, 2.0]),
+            (Op::AwkXor(3), vec![1.0, 2.0, -0.25]),
+            (Op::AwkOr(2), vec![1.0, -123456789.0]),
+            (Op::AwkAnd(2), vec![1.0, f64::NEG_INFINITY]),
+        ];
+        for (op, args) in cases {
+            assert_agree(op, &args);
+        }
+    }
+
+    /// xorshift64 step.
+    fn next(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// An operand that is sometimes past 2^53 (exercising `adjust_uint`) and
+    /// occasionally negative (exercising the trap).
+    fn operand(s: &mut u64) -> f64 {
+        let shift = next(s) % 40;
+        let v = (next(s) >> shift) as f64;
+        if next(s).is_multiple_of(16) {
+            -v
+        } else {
+            v
+        }
+    }
+
+    #[test]
+    fn gawk_bitwise_block_jit_differential() {
+        let mut s: u64 = 0x5DEE_CE66_D1CE_4E5B;
+        for _ in 0..400 {
+            let (op, args) = match next(&mut s) % 6 {
+                0 => (
+                    Op::AwkLshiftJit,
+                    vec![operand(&mut s), (next(&mut s) % 70) as f64],
+                ),
+                1 => (
+                    Op::AwkRshiftJit,
+                    vec![operand(&mut s), (next(&mut s) % 70) as f64],
+                ),
+                2 => (Op::AwkComplJit, vec![operand(&mut s)]),
+                3 => (
+                    Op::AwkAnd(3),
+                    vec![operand(&mut s), operand(&mut s), operand(&mut s)],
+                ),
+                4 => (Op::AwkOr(2), vec![operand(&mut s), operand(&mut s)]),
+                _ => (Op::AwkXor(2), vec![operand(&mut s), operand(&mut s)]),
+            };
+            assert_agree(op, &args);
+        }
     }
 }

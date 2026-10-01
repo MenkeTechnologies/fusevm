@@ -211,35 +211,40 @@ pub trait AwkHost: Send {
     }
 
     // ── Bitwise builtins (gawk; pure integer math, host-independent) ─────────
+    //
+    // The defaults compute gawk's result (with `adjust_uint` narrowing) but
+    // cannot raise its fatal on a negative operand — there is no error channel
+    // here, so a negative coerces to 0. A host that needs the fatal overrides
+    // these; with no host registered the VM raises it itself.
 
     /// `and(v1, v2, ...)` — bitwise AND of ≥2 operands.
     fn and(&mut self, args: &[Value]) -> Value {
-        Value::Int(awk_fold_and(args))
+        Value::Float(awk_fold_and(args))
     }
 
     /// `or(v1, v2, ...)` — bitwise OR of ≥2 operands.
     fn or(&mut self, args: &[Value]) -> Value {
-        Value::Int(awk_fold_or(args))
+        Value::Float(awk_fold_or(args))
     }
 
     /// `xor(v1, v2, ...)` — bitwise XOR of ≥2 operands.
     fn xor(&mut self, args: &[Value]) -> Value {
-        Value::Int(awk_fold_xor(args))
+        Value::Float(awk_fold_xor(args))
     }
 
     /// `compl(v)` — bitwise complement.
     fn compl(&mut self, v: &Value) -> Value {
-        Value::Int(awk_compl(v))
+        Value::Float(awk_compl(v))
     }
 
-    /// `lshift(v, n)` — left shift by `n & 0x3f` bits.
+    /// `lshift(v, n)` — left shift; a count of 64 or more yields 0.
     fn lshift(&mut self, v: &Value, n: &Value) -> Value {
-        Value::Int(awk_lshift(v, n))
+        Value::Float(awk_lshift(v, n))
     }
 
-    /// `rshift(v, n)` — right shift by `n & 0x3f` bits.
+    /// `rshift(v, n)` — logical right shift; a count of 64 or more yields 0.
     fn rshift(&mut self, v: &Value, n: &Value) -> Value {
-        Value::Int(awk_rshift(v, n))
+        Value::Float(awk_rshift(v, n))
     }
 
     // ── Conversion builtins (gawk; pure string→number parse, host-free) ─────
@@ -448,54 +453,222 @@ pub fn awk_canon_nan(r: f64) -> f64 {
     }
 }
 
-/// Truncate a number to a `u64` bit-pattern, matching gawk's bitwise-operand
-/// coercion (`n.trunc() as i64 as u64`).
+// ── Bitwise builtins (gawk `builtin.c` do_and/do_or/do_xor/do_compl/
+// do_lshift/do_rshift, non-MPFR path) ──────────────────────────────────────
+//
+// gawk converts each operand with a C `(uintmax_t)` cast, computes in 64-bit
+// unsigned arithmetic, and narrows the result with `adjust_uint` before
+// returning it as a double. Every tier (interpreter, block JIT, AOT) computes
+// exactly this; the JIT/AOT codegen inlines the same steps.
+
+/// `AWKNUM_FRACTION_BITS` for IEEE-754 binary64 (`DBL_MANT_DIG`).
+pub const AWK_NUM_FRACTION_BITS: u32 = 53;
+
+/// gawk `adjust_uint` (`floatcomp.c`): strip the high-order bits of `n` that a
+/// double could not hold exactly, keeping the low-order bits. With a 64-bit
+/// `uintmax_t` and a 53-bit significand this is
+/// `n & (((1 << 53) - 1) << ctz(n | 1 << 11))` — so `compl(0)` is `2^53 - 1`
+/// and `or(2^54, 1)` is `1`, not the rounded `2^54`.
 #[inline]
-fn awk_to_u64(n: f64) -> u64 {
-    n.trunc() as i64 as u64
+pub fn awk_adjust_uint(n: u64) -> u64 {
+    let sentinel = 1u64 << (u64::BITS - AWK_NUM_FRACTION_BITS);
+    let shift = (n | sentinel).trailing_zeros();
+    let mask = (1u64 << AWK_NUM_FRACTION_BITS) - 1;
+    n & (mask << shift)
 }
 
-/// `and(args...)` — bitwise AND fold over ≥2 operands. Empty ⇒ 0.
-pub fn awk_fold_and(args: &[Value]) -> i64 {
-    args.iter()
-        .map(|v| awk_to_u64(v.to_float()))
-        .reduce(|a, b| a & b)
-        .unwrap_or(0) as i64
+/// gawk's operand coercion `(uintmax_t) val`. Rust's `as u64` truncates toward
+/// zero and saturates (NaN → 0), which is what the C cast compiles to on the
+/// supported targets for the non-negative operands that reach it (negative
+/// operands are a gawk fatal, checked before this conversion).
+#[inline]
+fn awk_to_uint(v: f64) -> u64 {
+    v as u64
 }
 
-/// `or(args...)` — bitwise OR fold.
-pub fn awk_fold_or(args: &[Value]) -> i64 {
-    args.iter()
-        .map(|v| awk_to_u64(v.to_float()))
-        .reduce(|a, b| a | b)
-        .unwrap_or(0) as i64
+/// Trap/error codes for the bitwise builtins, shared by the interpreter, the
+/// block-JIT trap channel and the AOT error path so all three report the same
+/// gawk fatal. (`1`/`2` are the div/mod zero-divisor codes.)
+pub mod bit_code {
+    /// `lshift(a, n)` with a negative operand.
+    pub const LSHIFT: u8 = 3;
+    /// `rshift(a, n)` with a negative operand.
+    pub const RSHIFT: u8 = 4;
+    /// `compl(a)` with a negative operand.
+    pub const COMPL: u8 = 5;
+    /// `and(...)` with a negative argument.
+    pub const AND: u8 = 6;
+    /// `or(...)` with a negative argument.
+    pub const OR: u8 = 7;
+    /// `xor(...)` with a negative argument.
+    pub const XOR: u8 = 8;
 }
 
-/// `xor(args...)` — bitwise XOR fold.
-pub fn awk_fold_xor(args: &[Value]) -> i64 {
-    args.iter()
-        .map(|v| awk_to_u64(v.to_float()))
-        .reduce(|a, b| a ^ b)
-        .unwrap_or(0) as i64
+/// gawk's fatal text for a negative bitwise operand (the part after
+/// `fatal: `). For the shifts `a`/`b` are the two operands; for `compl` `a` is
+/// the operand; for the folds `a` is the 1-based argument number and `b` the
+/// offending value. Unknown codes yield `None`.
+pub fn awk_bit_fatal(code: u8, a: f64, b: f64) -> Option<String> {
+    Some(match code {
+        bit_code::LSHIFT => format!("lshift({a:.6}, {b:.6}): negative values are not allowed"),
+        bit_code::RSHIFT => format!("rshift({a:.6}, {b:.6}): negative values are not allowed"),
+        bit_code::COMPL => format!("compl({a:.6}): negative value is not allowed"),
+        bit_code::AND | bit_code::OR | bit_code::XOR => format!(
+            "{}: argument {} negative value {} is not allowed",
+            awk_fold_name(code),
+            a as i64,
+            awk_fmt_g(b)
+        ),
+        _ => return None,
+    })
 }
 
-/// `compl(v)` — bitwise complement.
-pub fn awk_compl(v: &Value) -> i64 {
-    (!awk_to_u64(v.to_float())) as i64
+fn awk_fold_name(code: u8) -> &'static str {
+    match code {
+        bit_code::AND => "and",
+        bit_code::OR => "or",
+        _ => "xor",
+    }
 }
 
-/// `lshift(v, n)` — left shift by `n & 0x3f` bits.
-pub fn awk_lshift(v: &Value, n: &Value) -> i64 {
-    let x = awk_to_u64(v.to_float());
-    let s = (awk_to_u64(n.to_float()) & 0x3f) as u32;
-    (x << s) as i64
+/// C `printf("%g", v)` (precision 6), as gawk uses in its fatal messages.
+pub fn awk_fmt_g(v: f64) -> String {
+    if v.is_nan() {
+        return if v.is_sign_negative() { "-nan" } else { "nan" }.to_string();
+    }
+    if v.is_infinite() {
+        return if v < 0.0 { "-inf" } else { "inf" }.to_string();
+    }
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+    fn strip(s: &str) -> &str {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            s
+        }
+    }
+    // Round to 6 significant digits first; the exponent of the *rounded* value
+    // picks fixed vs. scientific notation, as C specifies.
+    let sci = format!("{v:.5e}");
+    let (mant, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let x: i32 = exp.parse().unwrap_or(0);
+    if !(-4..6).contains(&x) {
+        let sign = if x < 0 { '-' } else { '+' };
+        format!("{}e{sign}{:02}", strip(mant), x.unsigned_abs())
+    } else {
+        strip(&format!("{v:.*}", (5 - x) as usize)).to_string()
+    }
 }
 
-/// `rshift(v, n)` — right shift by `n & 0x3f` bits.
-pub fn awk_rshift(v: &Value, n: &Value) -> i64 {
-    let x = awk_to_u64(v.to_float());
-    let s = (awk_to_u64(n.to_float()) & 0x3f) as u32;
-    (x >> s) as i64
+/// gawk `and`/`or`/`xor` over numeric operands (`code` is a [`bit_code`]
+/// fold code), negatives already ruled out. `and` starts from all ones, the
+/// others from zero, exactly as `do_and`/`do_or`/`do_xor`.
+pub fn awk_bit_fold_f64(code: u8, args: &[f64]) -> f64 {
+    let (init, f): (u64, fn(u64, u64) -> u64) = match code {
+        bit_code::AND => (!0, |a, b| a & b),
+        bit_code::OR => (0, |a, b| a | b),
+        _ => (0, |a, b| a ^ b),
+    };
+    let r = args.iter().fold(init, |acc, &v| f(acc, awk_to_uint(v)));
+    awk_adjust_uint(r) as f64
+}
+
+/// gawk `lshift`/`rshift` (`left` selects which), negatives already ruled out.
+/// A shift count of 64 or more yields 0.
+pub fn awk_shift_f64(left: bool, a: f64, n: f64) -> f64 {
+    let r = if n < u64::BITS as f64 {
+        let (x, s) = (awk_to_uint(a), awk_to_uint(n) as u32);
+        if left {
+            x << s
+        } else {
+            x >> s
+        }
+    } else {
+        0
+    };
+    awk_adjust_uint(r) as f64
+}
+
+/// gawk `compl`, negative already ruled out.
+pub fn awk_compl_f64(a: f64) -> f64 {
+    awk_adjust_uint(!awk_to_uint(a)) as f64
+}
+
+/// Checked gawk `and`/`or`/`xor`: `Err` carries gawk's fatal text. gawk pops
+/// the last argument first, so the reported argument is the right-most
+/// negative one; fewer than two arguments is its own fatal.
+pub fn awk_bit_fold_checked(code: u8, args: &[f64]) -> Result<f64, String> {
+    if args.len() < 2 {
+        return Err(format!(
+            "{}: called with less than two arguments",
+            awk_fold_name(code)
+        ));
+    }
+    if let Some(i) = args.iter().rposition(|&v| v < 0.0) {
+        return Err(awk_bit_fatal(code, (i + 1) as f64, args[i]).unwrap_or_default());
+    }
+    Ok(awk_bit_fold_f64(code, args))
+}
+
+/// Checked gawk `lshift`/`rshift`: `Err` carries gawk's fatal text.
+pub fn awk_shift_checked(left: bool, a: f64, n: f64) -> Result<f64, String> {
+    if a < 0.0 || n < 0.0 {
+        let code = if left {
+            bit_code::LSHIFT
+        } else {
+            bit_code::RSHIFT
+        };
+        return Err(awk_bit_fatal(code, a, n).unwrap_or_default());
+    }
+    Ok(awk_shift_f64(left, a, n))
+}
+
+/// Checked gawk `compl`: `Err` carries gawk's fatal text.
+pub fn awk_compl_checked(a: f64) -> Result<f64, String> {
+    if a < 0.0 {
+        return Err(awk_bit_fatal(bit_code::COMPL, a, 0.0).unwrap_or_default());
+    }
+    Ok(awk_compl_f64(a))
+}
+
+fn awk_values_f64(args: &[Value]) -> Vec<f64> {
+    args.iter().map(Value::to_float).collect()
+}
+
+/// `and(args...)` — unchecked (a negative operand coerces to 0; the VM raises
+/// gawk's fatal before reaching this). Empty ⇒ 0.
+pub fn awk_fold_and(args: &[Value]) -> f64 {
+    if args.is_empty() {
+        return 0.0;
+    }
+    awk_bit_fold_f64(bit_code::AND, &awk_values_f64(args))
+}
+
+/// `or(args...)` — unchecked, see [`awk_fold_and`].
+pub fn awk_fold_or(args: &[Value]) -> f64 {
+    awk_bit_fold_f64(bit_code::OR, &awk_values_f64(args))
+}
+
+/// `xor(args...)` — unchecked, see [`awk_fold_and`].
+pub fn awk_fold_xor(args: &[Value]) -> f64 {
+    awk_bit_fold_f64(bit_code::XOR, &awk_values_f64(args))
+}
+
+/// `compl(v)` — unchecked, see [`awk_fold_and`].
+pub fn awk_compl(v: &Value) -> f64 {
+    awk_compl_f64(v.to_float())
+}
+
+/// `lshift(v, n)` — unchecked, see [`awk_fold_and`].
+pub fn awk_lshift(v: &Value, n: &Value) -> f64 {
+    awk_shift_f64(true, v.to_float(), n.to_float())
+}
+
+/// `rshift(v, n)` — unchecked, see [`awk_fold_and`].
+pub fn awk_rshift(v: &Value, n: &Value) -> f64 {
+    awk_shift_f64(false, v.to_float(), n.to_float())
 }
 
 // ── Conversion builtins (gawk; pure string→number parse, host-free) ─────────

@@ -52,6 +52,12 @@ pub enum SchedReq {
     RecvOk { ch: i64 },
     /// `close(ch)` — close channel `ch`.
     Close { ch: i64 },
+    /// `len(ch)` — push the number of values buffered in channel `ch` (never
+    /// blocks; an unknown handle, Go's nil channel, yields `0`).
+    Len { ch: i64 },
+    /// `cap(ch)` — push channel `ch`'s buffer capacity (never blocks; an
+    /// unknown handle, Go's nil channel, yields `0`).
+    Cap { ch: i64 },
     /// A `select` over channel operations: pick a ready case (else the default,
     /// else block until one is ready). Pushes `[recv_value, case_index]`.
     Select {
@@ -281,6 +287,16 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                     self.blocked.insert(gid);
                 }
             }
+            SchedReq::Len { ch } => {
+                let n = self.chan_ref(ch).map_or(0, |c| c.buf.len());
+                self.vms[gid].stack.push(Value::Int(n as i64));
+                self.ready.push_back(gid);
+            }
+            SchedReq::Cap { ch } => {
+                let n = self.chan_ref(ch).map_or(0, |c| c.cap);
+                self.vms[gid].stack.push(Value::Int(n as i64));
+                self.ready.push_back(gid);
+            }
             SchedReq::Close { ch } => {
                 let c = self.chan_mut(ch)?;
                 c.closed = true;
@@ -440,6 +456,12 @@ impl<F: FnMut() -> VM> Scheduler<F> {
     fn wake(&mut self, gid: usize) {
         self.blocked.remove(&gid);
         self.ready.push_back(gid);
+    }
+
+    /// Channel `ch`, or `None` for a handle the scheduler never issued (how a
+    /// Go nil channel reaches `len`/`cap`).
+    fn chan_ref(&self, ch: i64) -> Option<&Channel> {
+        usize::try_from(ch).ok().and_then(|i| self.chans.get(i))
     }
 
     fn chan_mut(&mut self, ch: i64) -> Result<&mut Channel, SchedError> {
@@ -900,5 +922,92 @@ mod tests {
         b.emit(Op::ChanRecv, 1);
         b.emit(Op::Pop, 1);
         assert_eq!(run(b.build(), "x"), Err(SchedError::Deadlock));
+    }
+    /// Emit `out := 1000 * len(ch) + cap(ch)` — one global packs both answers,
+    /// and the `1000 *` operand sits *below* the `len` op on the stack, so the
+    /// test also pins that the halting op preserves live stack data.
+    fn len_cap(b: &mut ChunkBuilder, ch: u16, out: u16) {
+        b.emit(Op::LoadInt(1000), 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanLen, 1);
+        b.emit(Op::Mul, 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanCap, 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetVar(out), 1);
+    }
+
+    #[test]
+    fn len_and_cap_track_the_buffer() {
+        // ch := make(chan int, 3); ch <- 1; ch <- 2  → len 2, cap 3
+        let mut b = ChunkBuilder::new();
+        let (ch, out) = (b.add_name("ch"), b.add_name("out"));
+        make_chan(&mut b, ch, 3);
+        for v in [1, 2] {
+            b.emit(Op::GetVar(ch), 1);
+            b.emit(Op::LoadInt(v), 1);
+            b.emit(Op::ChanSend, 1);
+        }
+        len_cap(&mut b, ch, out);
+        assert_eq!(run(b.build(), "out"), Ok(Some(Value::Int(2003))));
+
+        // ...then one receive drains a slot → len 1; closing keeps the rest.
+        let mut b = ChunkBuilder::new();
+        let (ch, out) = (b.add_name("ch"), b.add_name("out"));
+        make_chan(&mut b, ch, 3);
+        for v in [1, 2] {
+            b.emit(Op::GetVar(ch), 1);
+            b.emit(Op::LoadInt(v), 1);
+            b.emit(Op::ChanSend, 1);
+        }
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanRecv, 1);
+        b.emit(Op::Pop, 1);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanClose, 1);
+        len_cap(&mut b, ch, out);
+        assert_eq!(run(b.build(), "out"), Ok(Some(Value::Int(1003))));
+    }
+
+    #[test]
+    fn len_ignores_a_sender_blocked_on_an_unbuffered_channel() {
+        // ch := make(chan int); go sender(ch) — `go` queues the new goroutine
+        // ahead of main, so it is already parked on its unbuffered send when
+        // main asks: Go counts only buffered values, so len 0, cap 0. The
+        // receive afterwards still gets the parked value.
+        let mut b = ChunkBuilder::new();
+        let sender = b.add_name("sender");
+        let (ch, out, got) = (b.add_name("ch"), b.add_name("out"), b.add_name("got"));
+        make_chan(&mut b, ch, 0);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::Go(sender, 1), 1);
+        len_cap(&mut b, ch, out);
+        b.emit(Op::GetVar(ch), 1);
+        b.emit(Op::ChanRecv, 1);
+        b.emit(Op::SetVar(got), 1);
+        let skip = b.emit(Op::Jump(0), 1);
+        let entry = b.current_pos();
+        b.add_sub_entry(sender, entry);
+        b.emit(Op::SetSlot(0), 2);
+        b.emit(Op::GetSlot(0), 2);
+        b.emit(Op::LoadInt(7), 2);
+        b.emit(Op::ChanSend, 2);
+        b.emit(Op::LoadUndef, 2);
+        b.emit(Op::ReturnValue, 2);
+        b.patch_jump(skip, b.current_pos());
+        let chunk = b.build();
+        assert_eq!(run(chunk.clone(), "out"), Ok(Some(Value::Int(0))));
+        assert_eq!(run(chunk, "got"), Ok(Some(Value::Int(7))));
+    }
+
+    #[test]
+    fn len_and_cap_of_a_nil_channel_are_zero() {
+        // A handle the scheduler never issued stands for Go's nil channel.
+        let mut b = ChunkBuilder::new();
+        let (ch, out) = (b.add_name("ch"), b.add_name("out"));
+        b.emit(Op::LoadInt(-1), 1);
+        b.emit(Op::SetVar(ch), 1);
+        len_cap(&mut b, ch, out);
+        assert_eq!(run(b.build(), "out"), Ok(Some(Value::Int(0))));
     }
 }

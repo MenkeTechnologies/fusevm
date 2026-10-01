@@ -12,7 +12,10 @@ use std::hash::{Hash, Hasher};
 /// Operands: u16 for pool indices (64k names/constants), usize for jump targets.
 /// Language-specific operations use `Extended` with a frontend-registered handler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "rkyv-archive", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv-archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "rkyv-archive", archive(check_bytes))]
 pub enum Op {
     /// No-op; consumed for cycle-counting and as a branch sentinel.
@@ -755,6 +758,20 @@ pub enum Op {
     /// its identity, so a new op is appended rather than grouped with the other
     /// channel ops. Additive; frontends that never emit it are unaffected.
     ChanRecvOk,
+
+    /// Buffered-element count of the popped channel — Go's `len(ch)`: the
+    /// number of values queued in its buffer (a sender blocked on a full or
+    /// unbuffered channel is not counted). Pushes an `Int`. Like the other
+    /// channel ops it raises a scheduling request and halts, since the
+    /// [`crate::sched::Scheduler`] owns the channel table; it never blocks. A
+    /// handle the scheduler never issued (Go's nil channel) yields `0`.
+    ///
+    /// Appended after [`Op::ChanRecvOk`] for the same bincode-index reason.
+    ChanLen,
+    /// Buffer capacity of the popped channel — Go's `cap(ch)` (`0` for an
+    /// unbuffered or nil channel). Pushes an `Int`; same scheduling contract
+    /// as [`Op::ChanLen`].
+    ChanCap,
 }
 
 /// File test opcodes for `TestFile(u8)`
@@ -1132,6 +1149,8 @@ impl Hash for Op {
             | Op::ChanSend
             | Op::ChanRecv
             | Op::ChanRecvOk
+            | Op::ChanLen
+            | Op::ChanCap
             | Op::ChanClose => {}
         }
     }

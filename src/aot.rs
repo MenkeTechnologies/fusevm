@@ -376,6 +376,22 @@ pub extern "C" fn fusevm_aot_set_error(vm: *mut VM, code: u32) {
     unsafe { (*vm).aot_set_error(code) }
 }
 
+/// Store gawk's fatal for a negative bitwise operand from natively-lowered AOT
+/// code: `code` is a [`crate::awk_host::bit_code`], `a`/`b` the message
+/// operands (see [`crate::awk_host::awk_bit_fatal`]). Same early-return
+/// protocol as [`fusevm_aot_set_error`].
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub unsafe extern "C" fn fusevm_aot_set_awk_bit_error(vm: *mut VM, code: u32, a: f64, b: f64) {
+    debug_assert!(!vm.is_null());
+    let msg = crate::awk_host::awk_bit_fatal(code as u8, a, b)
+        .unwrap_or_else(|| "aot: runtime error".to_string());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).aot_set_error_msg(msg) }
+}
+
 /// Deopt writeback: store a register-cached int slot back to the VM frame (see
 /// `VM::aot_store_slot_int`).
 ///
@@ -946,10 +962,7 @@ fn builtin_var_conflict(chunk: &Chunk) -> bool {
     // deopt points, and a deopt writes the registers back before the
     // interpreter runs the handler — so there is nothing to go stale.
     chunk.builtin_argc_is_arity
-        && chunk
-            .ops
-            .iter()
-            .any(|o| matches!(o, Op::CallBuiltin(_, _)))
+        && chunk.ops.iter().any(|o| matches!(o, Op::CallBuiltin(_, _)))
         && (chunk.aot_seeded_slots > 0 || chunk.ops.iter().any(caches_var))
 }
 
@@ -2057,10 +2070,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
 
     // Coverage, for `NativePlan::worth_lowering`: the ops this plan really
     // lowers, and whether any of them jumps backwards (a loop).
-    let native_ops = state
-        .keys()
-        .filter(|ip| !deopt_points.contains(ip))
-        .count();
+    let native_ops = state.keys().filter(|ip| !deopt_points.contains(ip)).count();
     let native_loop = state.keys().any(|&ip| {
         !deopt_points.contains(&ip)
             && native_successors(chunk, ip, &deopt_points)
@@ -2174,6 +2184,16 @@ fn build_entry_native<M: Module>(
     let unary_id = module
         .declare_function("fusevm_aot_unary_math", Linkage::Import, &unary_sig)
         .map_err(|e| format!("aot: declare unary_math: {e}"))?;
+
+    // gawk bitwise negative-operand fatal: fn(vm, u32 code, f64, f64) -> ().
+    let mut berr_sig = module.make_signature();
+    berr_sig.params.push(AbiParam::new(ptr_ty));
+    berr_sig.params.push(AbiParam::new(types::I32));
+    berr_sig.params.push(AbiParam::new(types::F64));
+    berr_sig.params.push(AbiParam::new(types::F64));
+    let berr_id = module
+        .declare_function("fusevm_aot_set_awk_bit_error", Linkage::Import, &berr_sig)
+        .map_err(|e| format!("aot: declare set_awk_bit_error: {e}"))?;
 
     // awk negative-arg warning: fn(u32 code, f64) -> ().
     let mut warn_sig = module.make_signature();
@@ -2351,6 +2371,7 @@ fn build_entry_native<M: Module>(
         let atan2_ref = module.declare_func_in_func(atan2_id, b.func);
         let unary_ref = module.declare_func_in_func(unary_id, b.func);
         let warn_ref = module.declare_func_in_func(warn_id, b.func);
+        let berr_ref = module.declare_func_in_func(berr_id, b.func);
         let exec_ref = module.declare_func_in_func(exec_id, b.func);
         let pushi_ref = module.declare_func_in_func(pushi_id, b.func);
         let pushb_ref = module.declare_func_in_func(pushb_id, b.func);
@@ -3269,9 +3290,10 @@ fn build_entry_native<M: Module>(
                     b.def_var(fvars[ix], r);
                     kinds.push(Kind::Float);
                 }
-                // awk lshift/rshift: error on negative operands, else convert to
-                // int, shift (logical for rshift) with `(n as u32) & 0x3f`, and
-                // convert back to float — mirroring the interpreter exactly.
+                // gawk lshift/rshift: fatal on a negative operand, else the
+                // shared `emit_awk_shift` sequence (`(uintmax_t)` operands, a
+                // count >= 64 yields 0, `adjust_uint`) — the interpreter's
+                // `awk_shift_f64` instruction for instruction.
                 op @ (Op::AwkLshiftJit | Op::AwkRshiftJit) => {
                     let kb = kinds.pop().unwrap();
                     let iy = kinds.len();
@@ -3289,31 +3311,20 @@ fn build_entry_native<M: Module>(
 
                     b.switch_to_block(err_blk);
                     let vm = b.use_var(vm_var);
-                    let code = b.ins().iconst(
-                        types::I32,
-                        if matches!(op, Op::AwkLshiftJit) { 2 } else { 3 },
-                    );
-                    b.ins().call(serr_ref, &[vm, code]);
+                    let code = crate::jit::awk_bit_code(op).unwrap_or(0);
+                    let code = b.ins().iconst(types::I32, code as i64);
+                    b.ins().call(berr_ref, &[vm, code, a, n]);
                     let st0 = b.ins().iconst(types::I64, 0);
                     b.ins().return_(&[st0]);
 
                     b.switch_to_block(ok_blk);
-                    let ai = b.ins().fcvt_to_sint_sat(types::I64, a);
-                    let shift_u32 = b.ins().fcvt_to_uint_sat(types::I32, n);
-                    let shift_u64 = b.ins().uextend(types::I64, shift_u32);
-                    let shift = b.ins().band_imm(shift_u64, 0x3f);
-                    let r = if matches!(op, Op::AwkLshiftJit) {
-                        let sh = b.ins().ishl(ai, shift);
-                        b.ins().fcvt_from_sint(types::F64, sh)
-                    } else {
-                        // logical right shift on the u64 bit pattern → f64
-                        let sh = b.ins().ushr(ai, shift);
-                        b.ins().fcvt_from_uint(types::F64, sh)
-                    };
+                    let r =
+                        crate::jit::emit_awk_shift(&mut b, matches!(op, Op::AwkLshiftJit), a, n);
                     b.def_var(fvars[ix], r);
                     kinds.push(Kind::Float);
                 }
-                // awk compl: error on negative, else `!(a as i64)` as float.
+                // gawk compl: fatal on negative, else `~a` narrowed by
+                // `adjust_uint` (shared `emit_awk_compl`).
                 Op::AwkComplJit => {
                     let ka = kinds.pop().unwrap();
                     let idx = kinds.len();
@@ -3326,15 +3337,15 @@ fn build_entry_native<M: Module>(
 
                     b.switch_to_block(err_blk);
                     let vm = b.use_var(vm_var);
-                    let code = b.ins().iconst(types::I32, 4);
-                    b.ins().call(serr_ref, &[vm, code]);
+                    let code = b
+                        .ins()
+                        .iconst(types::I32, crate::awk_host::bit_code::COMPL as i64);
+                    b.ins().call(berr_ref, &[vm, code, a, zero]);
                     let st0 = b.ins().iconst(types::I64, 0);
                     b.ins().return_(&[st0]);
 
                     b.switch_to_block(ok_blk);
-                    let ai = b.ins().fcvt_to_sint_sat(types::I64, a);
-                    let v = b.ins().bnot(ai);
-                    let r = b.ins().fcvt_from_sint(types::F64, v);
+                    let r = crate::jit::emit_awk_compl(&mut b, a);
                     b.def_var(fvars[idx], r);
                     kinds.push(Kind::Float);
                 }
@@ -3691,7 +3702,15 @@ fn build_entry_native<M: Module>(
                     let k = kinds.pop().unwrap();
                     let idx = kinds.len();
                     let pred = truthy(
-                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, idx, k, true,
+                        &mut b,
+                        vm_var,
+                        truthy_ref,
+                        truthy_keep_ref,
+                        &ivars,
+                        &fvars,
+                        idx,
+                        k,
+                        true,
                     );
                     // !truthy: truthy ⇒ 0, falsy ⇒ 1.
                     let one = b.ins().iconst(types::I64, 1);
@@ -3785,10 +3804,26 @@ fn build_entry_native<M: Module>(
                     let ka = kinds.pop().unwrap();
                     let ix = kinds.len();
                     let ta = truthy(
-                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, ix, ka, true,
+                        &mut b,
+                        vm_var,
+                        truthy_ref,
+                        truthy_keep_ref,
+                        &ivars,
+                        &fvars,
+                        ix,
+                        ka,
+                        true,
                     );
                     let tb = truthy(
-                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, iy, kb, true,
+                        &mut b,
+                        vm_var,
+                        truthy_ref,
+                        truthy_keep_ref,
+                        &ivars,
+                        &fvars,
+                        iy,
+                        kb,
+                        true,
                     );
                     let combined = match op {
                         Op::LogAnd => b.ins().band(ta, tb),
@@ -3853,7 +3888,15 @@ fn build_entry_native<M: Module>(
                     let k = *kinds.last().unwrap();
                     let idx = kinds.len() - 1;
                     let cond = truthy(
-                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, idx, k, false,
+                        &mut b,
+                        vm_var,
+                        truthy_ref,
+                        truthy_keep_ref,
+                        &ivars,
+                        &fvars,
+                        idx,
+                        k,
+                        false,
                     );
                     b.ins()
                         .brif(cond, block_for(ip + 1), &[], block_for(*t), &[]);
@@ -3867,7 +3910,15 @@ fn build_entry_native<M: Module>(
                     let k = kinds.pop().unwrap();
                     let idx = kinds.len();
                     let cond = truthy(
-                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, idx, k, true,
+                        &mut b,
+                        vm_var,
+                        truthy_ref,
+                        truthy_keep_ref,
+                        &ivars,
+                        &fvars,
+                        idx,
+                        k,
+                        true,
                     );
                     b.ins()
                         .brif(cond, block_for(*t), &[], block_for(ip + 1), &[]);
@@ -3877,7 +3928,15 @@ fn build_entry_native<M: Module>(
                     let k = kinds.pop().unwrap();
                     let idx = kinds.len();
                     let cond = truthy(
-                        &mut b, vm_var, truthy_ref, truthy_keep_ref, &ivars, &fvars, idx, k, true,
+                        &mut b,
+                        vm_var,
+                        truthy_ref,
+                        truthy_keep_ref,
+                        &ivars,
+                        &fvars,
+                        idx,
+                        k,
+                        true,
                     );
                     // truthy ⇒ fallthrough; false ⇒ branch to the target.
                     b.ins()
@@ -4170,10 +4229,7 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
 /// run ONE chunk through BOTH lowerings and pin that they agree, which is the
 /// invariant that lets `NativePlan::worth_lowering` choose freely between them.
 #[cfg(test)]
-fn run_chunk_threaded(
-    chunk: &Chunk,
-    register: impl FnOnce(&mut VM),
-) -> Result<VMResult, String> {
+fn run_chunk_threaded(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result<VMResult, String> {
     Ok(run_chunk_with(chunk, register, |m, c| {
         build_entry_threaded(m, c, AOT_ENTRY_SYMBOL)
     })?
@@ -4189,11 +4245,7 @@ fn run_chunk_native_vm(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result<
 
 /// Shared body of the two runners: stand up a JIT module with every runtime shim
 /// registered, lower `chunk` with `build`, and run the result on a fresh VM.
-fn run_chunk_with<F>(
-    chunk: &Chunk,
-    register: impl FnOnce(&mut VM),
-    build: F,
-) -> Result<VM, String>
+fn run_chunk_with<F>(chunk: &Chunk, register: impl FnOnce(&mut VM), build: F) -> Result<VM, String>
 where
     F: FnOnce(&mut JITModule, &Chunk) -> Result<FuncId, String>,
 {
@@ -4223,6 +4275,10 @@ where
     );
     builder.symbol("fusevm_aot_set_error", fusevm_aot_set_error as *const u8);
     builder.symbol("fusevm_aot_awk_warn", fusevm_aot_awk_warn as *const u8);
+    builder.symbol(
+        "fusevm_aot_set_awk_bit_error",
+        fusevm_aot_set_awk_bit_error as *const u8,
+    );
     builder.symbol("fusevm_aot_push_int", fusevm_aot_push_int as *const u8);
     builder.symbol("fusevm_aot_push_float", fusevm_aot_push_float as *const u8);
     builder.symbol("fusevm_aot_push_bool", fusevm_aot_push_bool as *const u8);
@@ -6153,7 +6209,7 @@ mod tests {
 
     #[test]
     fn native_awk_bitwise() {
-        // lshift(3, 4) = 48; rshift(48, 4) = 3; compl(0) = -1.
+        // gawk 5.4.1: lshift(3, 4) = 48; rshift(48, 4) = 3; compl(0) = 2^53 - 1.
         let bin = |a: f64, n: f64, op: Op| {
             let mut b = ChunkBuilder::new();
             b.emit(Op::LoadFloat(a), 1);
@@ -6167,12 +6223,18 @@ mod tests {
         let mut b = ChunkBuilder::new();
         b.emit(Op::LoadFloat(0.0), 1);
         b.emit(Op::AwkComplJit, 1);
-        assert_native_int_or_float(b.build(), -1.0); // !0 == -1
+        assert_native_int_or_float(b.build(), 9_007_199_254_740_991.0);
 
-        // Negative operands error with the exact interpreter message.
+        // Negative operands error with gawk's exact message (operands included).
         for (op, msg) in [
-            (Op::AwkLshiftJit, "lshift: negative values are not allowed"),
-            (Op::AwkRshiftJit, "rshift: negative values are not allowed"),
+            (
+                Op::AwkLshiftJit,
+                "lshift(-1.000000, 2.000000): negative values are not allowed",
+            ),
+            (
+                Op::AwkRshiftJit,
+                "rshift(-1.000000, 2.000000): negative values are not allowed",
+            ),
         ] {
             let mut b = ChunkBuilder::new();
             b.emit(Op::LoadFloat(-1.0), 1);
@@ -6190,7 +6252,7 @@ mod tests {
         b.emit(Op::AwkComplJit, 1);
         let chunk = b.build();
         match run_chunk_native(&chunk, |_| {}).expect("run") {
-            VMResult::Error(e) => assert_eq!(e, "compl: negative value is not allowed"),
+            VMResult::Error(e) => assert_eq!(e, "compl(-1.000000): negative value is not allowed"),
             other => panic!("expected error, got {other:?}"),
         }
         assert_native_matches_interp(chunk);
@@ -6209,8 +6271,14 @@ mod tests {
             z ^ (z >> 31)
         };
         for _ in 0..300 {
-            let a = (next() % 1_000_000) as f64;
-            let n = (next() % 70) as f64; // spans the 0x3f mask boundary
+            // Small operands and operands past 2^53 (where `adjust_uint`
+            // narrowing kicks in).
+            let a = if next() & 4 == 0 {
+                (next() % 1_000_000) as f64
+            } else {
+                (next() >> (next() % 16)) as f64
+            };
+            let n = (next() % 70) as f64; // spans the 64-bit shift boundary
             let mut b = ChunkBuilder::new();
             b.emit(Op::LoadFloat(a), 1);
             if next() & 1 == 0 {
@@ -7497,7 +7565,6 @@ mod tests {
         assert_all_three_agree("under-half", &under, |_| {});
         assert_all_three_agree("over-half", &over, |_| {});
     }
-
 
     #[test]
     fn lowering_for_reports_the_path_each_chunk_takes() {

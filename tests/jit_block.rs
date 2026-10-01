@@ -162,7 +162,7 @@ fn block_jit_awk_div_mod_nonzero_no_trap() {
 fn block_jit_awk_and_or_xor_float_slots_match_scalar() {
     use fusevm::SlotKind;
     // slot0 = OP(slot0, slot1) with Float slots 12.0 and 10.0.
-    // and(12,10)=8, or(12,10)=14, xor(12,10)=6 — pushed Int, stored as f64.
+    // and(12,10)=8, or(12,10)=14, xor(12,10)=6 — pushed Float.
     let run = |op: Op| -> f64 {
         let mut b = ChunkBuilder::new();
         b.emit(Op::GetSlot(0), 1);
@@ -192,11 +192,12 @@ fn block_jit_awk_and_or_xor_float_slots_match_scalar() {
 }
 
 #[test]
-fn block_jit_awk_and_saturates_like_awkrs() {
+fn block_jit_awk_and_saturates_like_gawk() {
     use fusevm::SlotKind;
-    // num_to_u64 = `n.trunc() as i64` saturates: a huge f64 → i64::MAX, and
-    // and(huge, huge) = i64::MAX & i64::MAX = i64::MAX → that as f64. Verifies
-    // the JIT uses `fcvt_to_sint_sat` (no trap on out-of-range).
+    // gawk's `(uintmax_t) 1e30` saturates to all ones (aarch64 cast; Rust's
+    // `as u64` and Cranelift's `fcvt_to_uint_sat` agree), and `adjust_uint`
+    // narrows that to 2^53 - 1: gawk 5.4.1 prints and(1e30, 1e30) as
+    // 9007199254740991. Verifies the JIT uses a saturating (non-trapping) cast.
     let mut b = ChunkBuilder::new();
     b.emit(Op::GetSlot(0), 1);
     b.emit(Op::GetSlot(0), 1);
@@ -211,9 +212,7 @@ fn block_jit_awk_and_saturates_like_awkrs() {
     let mut slots = vec![1e30f64.to_bits() as i64];
     jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
         .expect("saturating and() must compile");
-    // Rust reference: ((1e30_f64.trunc() as i64) & (1e30_f64.trunc() as i64)) as f64
-    let want = ((1e30f64.trunc() as i64) & (1e30f64.trunc() as i64)) as f64;
-    assert_eq!(f64::from_bits(slots[0] as u64), want);
+    assert_eq!(f64::from_bits(slots[0] as u64), 9_007_199_254_740_991.0);
 }
 
 #[test]
@@ -897,7 +896,7 @@ fn block_jit_awk_rshift_jit_computes_shift() {
 #[test]
 fn block_jit_awk_compl_jit_negates_bits() {
     use fusevm::SlotKind;
-    // compl(15) == !15_i64 == -16.
+    // gawk 5.4.1: compl(15) = 144115188075855856 (~15 narrowed by adjust_uint).
     let mut b = ChunkBuilder::new();
     b.emit(Op::GetSlot(0), 1);
     b.emit(Op::AwkComplJit, 1);
@@ -911,7 +910,7 @@ fn block_jit_awk_compl_jit_negates_bits() {
     let mut slots = vec![15.0f64.to_bits() as i64];
     jit.try_run_block_eager_kinded(&chunk, &mut slots, &kinds)
         .expect("AwkComplJit chunk must compile");
-    assert_eq!(f64::from_bits(slots[0] as u64), -16.0);
+    assert_eq!(f64::from_bits(slots[0] as u64), 144_115_188_075_855_856.0);
 }
 
 // ── Block JIT tests for AwkGetFieldNum (the host-hook libcall variant added

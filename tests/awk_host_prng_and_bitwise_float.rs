@@ -12,8 +12,8 @@
 //!   - `awk_srand` returns the previous seed truncated to 32 bits, matching
 //!     gawk's `srand` contract. A refactor that returns the full 64-bit seed
 //!     (or the new seed) silently breaks scripts that snapshot the PRNG.
-//!   - The bitwise helpers truncate their float operand via
-//!     `n.trunc() as i64 as u64`. A refactor that uses `to_int()` instead
+//!   - The bitwise helpers truncate their float operand with gawk's
+//!     `(uintmax_t)` cast (`v as u64`). A refactor that uses `to_int()` instead
 //!     would route Strings through `s.parse::<i64>()` (which fails on
 //!     "3.7", returning 0) vs. the current `to_float() = 3.7 → trunc = 3`.
 //!   - `awk_canon_nan` is an identity for finite results — pin so a refactor
@@ -116,48 +116,36 @@ fn awk_srand_none_path_replaces_seed_with_nonzero_from_clock() {
 // Bitwise float-operand truncation contract
 // ───────────────────────────────────────────────────────────────────────────
 
-/// `awk_compl` on a Float operand routes through `to_float().trunc() as i64
-/// as u64`. Pin so a refactor that uses `to_int()` silently changes the
-/// behavior on string Values that look like fractions (`to_int("3.7")` is
-/// 0 via `s.parse::<i64>().unwrap_or(0)`, but the current path coerces via
-/// `to_float()` → 3.7 → trunc 3).
+/// `awk_compl` coerces its operand via `to_float()` and gawk's `(uintmax_t)`
+/// truncating cast. Pin so a refactor that uses `to_int()` silently changes
+/// the behavior on string Values that look like fractions (`to_int("3.7")` is
+/// 0 via `s.parse::<i64>().unwrap_or(0)`).
 #[test]
 fn awk_compl_truncates_float_operand_toward_zero() {
-    // 3.7 → trunc 3 → !3u64 = 0xFFFF_FFFF_FFFF_FFFC = -4 as i64
-    assert_eq!(awk_compl(&Value::Float(3.7)), -4);
-    // -3.7 → trunc -3 → !(-3 as u64) = !(0xFFFF...FD) = 2
-    assert_eq!(awk_compl(&Value::Float(-3.7)), 2);
+    // gawk 5.4.1: compl(3.7) = compl(3) = 36028797018963964 (~3 narrowed by
+    // adjust_uint: the two low zero bits keep 55 bits of the complement).
+    assert_eq!(awk_compl(&Value::Float(3.7)), 36_028_797_018_963_964.0);
     // String "3.7" must also flow through to_float → 3.7 → 3, NOT
-    // to_int → 0. Catches a refactor that swaps `to_float()` for `to_int()`.
+    // to_int → 0 (which would give compl(0) = 2^53 - 1).
     assert_eq!(
         awk_compl(&Value::str("3.7")),
-        -4,
+        36_028_797_018_963_964.0,
         "compl(\"3.7\") must coerce via to_float, not to_int (which yields 0)"
     );
 }
 
-/// `awk_lshift` shift count is float-truncated then masked. A non-integer
-/// shift count like 2.9 must truncate to 2 (NOT round to 3). Pin so a
-/// refactor that calls `.round()` instead of relying on the `as i64`
-/// truncating cast silently breaks `lshift(1, 2.9)`.
+/// `awk_lshift` shift count is float-truncated. A non-integer shift count like
+/// 2.9 must truncate to 2 (NOT round to 3): gawk `lshift(1, 2.9)` = 4.
 #[test]
 fn awk_lshift_truncates_float_shift_count_toward_zero() {
-    // 2.9 → trunc 2 → 1 << 2 = 4
-    assert_eq!(awk_lshift(&Value::Int(1), &Value::Float(2.9)), 4);
-    // -0.5 → trunc 0 → (0 & 0x3f) = 0 → identity shift
-    assert_eq!(awk_lshift(&Value::Int(42), &Value::Float(-0.5)), 42);
+    assert_eq!(awk_lshift(&Value::Int(1), &Value::Float(2.9)), 4.0);
+    assert_eq!(awk_lshift(&Value::Float(1.7), &Value::Float(2.9)), 4.0);
 }
 
-/// `awk_rshift` on a Float operand. A naive refactor that demotes via
-/// `to_int()` would silently break the awkrs frontend which may pass
-/// numeric-string fields as `Value::Float`.
+/// `awk_rshift` on a Float operand: gawk `rshift(16.9, 2)` = 4.
 #[test]
 fn awk_rshift_truncates_float_operand_then_shifts() {
-    // 16.9 → trunc 16 → 16 >> 2 = 4
-    assert_eq!(awk_rshift(&Value::Float(16.9), &Value::Int(2)), 4);
-    // -1.0 (as float) → trunc -1 → cast i64::MIN_to_MAX_unsigned all-ones
-    // → rshift by 63 = 1 (same as the integer test, but via the float path).
-    assert_eq!(awk_rshift(&Value::Float(-1.0), &Value::Int(63)), 1);
+    assert_eq!(awk_rshift(&Value::Float(16.9), &Value::Int(2)), 4.0);
 }
 
 // ───────────────────────────────────────────────────────────────────────────

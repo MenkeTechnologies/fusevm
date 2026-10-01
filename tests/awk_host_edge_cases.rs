@@ -2,7 +2,7 @@
 //!
 //! These cover concrete bug classes the existing happy-path tests do not:
 //!   - POSIX/gawk semantic edges the doc-comments claim compatibility with:
-//!     negative `m` with `m+n>0` in `substr`, `lshift`/`rshift` mask boundary,
+//!     negative `m` with `m+n>0` in `substr`, `lshift`/`rshift` 64-bit boundary,
 //!     surrogate codepoints in `chr`, multi-byte first char in `ord`.
 //!   - UTF-8 byte-vs-char arithmetic in `substr` and `index` (the helpers use
 //!     Vec<char> / 1-based char position; verify they survive a multi-byte
@@ -61,54 +61,49 @@ fn awk_index_returns_char_position_not_byte_offset() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// awk_lshift / awk_rshift: 0x3f mask + boundary shift
+// awk_lshift / awk_rshift: gawk shift-count boundary
 // ───────────────────────────────────────────────────────────────────────────
 
-/// The mask `& 0x3f` means shift amounts 64, 128, 192 all collapse to 0
-/// (identity shift). This pins the documented "mask to 6 bits" contract — a
-/// future refactor that drops the mask would shift past 63, which is UB in C
-/// and panics in Rust debug.
+/// gawk `do_lshift`: a shift count of 64 or more yields 0 (no `& 0x3f`
+/// wrap-around), and a top-bit result survives `adjust_uint` because its low
+/// bits are zero. Values checked against gawk 5.4.1.
 #[test]
-fn awk_lshift_masks_shift_amount_to_six_bits() {
-    // shift by 64 → masked to 0 → identity
-    assert_eq!(awk_lshift(&Value::Int(1), &Value::Int(64)), 1);
-    // shift by 65 → masked to 1 → double
-    assert_eq!(awk_lshift(&Value::Int(1), &Value::Int(65)), 2);
-    // shift by 0x3f = 63 → top bit only
-    let r = awk_lshift(&Value::Int(1), &Value::Int(63));
-    assert_eq!(r as u64, 1u64 << 63, "shift by 63 sets the top bit");
+fn awk_lshift_count_of_64_or_more_yields_zero() {
+    // gawk: lshift(1, 64) = 0, lshift(1, 65) = 0
+    assert_eq!(awk_lshift(&Value::Int(1), &Value::Int(64)), 0.0);
+    assert_eq!(awk_lshift(&Value::Int(1), &Value::Int(65)), 0.0);
+    // gawk: lshift(1, 63) = 9223372036854775808
+    assert_eq!(awk_lshift(&Value::Int(1), &Value::Int(63)), 2f64.powi(63));
 }
 
-/// `rshift` mirror — masked shift amount + boundary at 63.
+/// `rshift` mirror of the 64-bit boundary.
 #[test]
-fn awk_rshift_masks_shift_amount_to_six_bits() {
-    // -1 as u64 = all-ones; rshift by 63 = 1
-    assert_eq!(awk_rshift(&Value::Int(-1), &Value::Int(63)), 1);
-    // rshift by 64 → masked to 0 → identity
-    assert_eq!(awk_rshift(&Value::Int(-1), &Value::Int(64)), -1);
+fn awk_rshift_count_of_64_or_more_yields_zero() {
+    let top = Value::Float(2f64.powi(63));
+    // gawk: rshift(2^63, 63) = 1, rshift(2^63, 64) = 0
+    assert_eq!(awk_rshift(&top, &Value::Int(63)), 1.0);
+    assert_eq!(awk_rshift(&top, &Value::Int(64)), 0.0);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
 // awk_compl + fold ops: empty fold contract
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Empty-args folds are documented as returning 0 (the `unwrap_or(0)` branch).
-/// Pin so a refactor to `reduce(...).expect(...)` doesn't introduce a panic on
-/// a frontend that emits a zero-arg `and()`/`or()`/`xor()` (degenerate but
-/// reachable from `Op::AwkAnd(0)`).
+/// Empty-args folds are documented as returning 0. Pin so a refactor doesn't
+/// introduce a panic on a frontend that emits a zero-arg `and()`/`or()`/
+/// `xor()` (degenerate but reachable from `Op::AwkAnd(0)` with a host).
 #[test]
 fn awk_fold_ops_return_zero_on_empty_input() {
-    assert_eq!(awk_fold_and(&[]), 0);
-    assert_eq!(awk_fold_or(&[]), 0);
-    assert_eq!(awk_fold_xor(&[]), 0);
+    assert_eq!(awk_fold_and(&[]), 0.0);
+    assert_eq!(awk_fold_or(&[]), 0.0);
+    assert_eq!(awk_fold_xor(&[]), 0.0);
 }
 
-/// `awk_compl(0)` is `!0u64` cast through i64 = -1. Pin so a future refactor
-/// that changes the cast (e.g. `as i32 as i64`) silently truncates.
+/// gawk narrows `compl` with `adjust_uint`: `compl(0)` is `2^53 - 1`
+/// (9007199254740991 in gawk 5.4.1), not the `-1` an `i64` complement gives.
 #[test]
-fn awk_compl_of_zero_is_negative_one() {
-    assert_eq!(awk_compl(&Value::Int(0)), -1);
-    assert_eq!(awk_compl(&Value::Int(-1)), 0);
+fn awk_compl_of_zero_is_two_pow_53_minus_one() {
+    assert_eq!(awk_compl(&Value::Int(0)), 9_007_199_254_740_991.0);
 }
 
 // ───────────────────────────────────────────────────────────────────────────

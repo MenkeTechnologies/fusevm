@@ -48,6 +48,14 @@ pub fn is_awk_op(id: u16) -> bool {
     (AWK_OP_BASE..AWK_OP_END).contains(&id)
 }
 
+/// True for the gawk bitwise builtins (`and`/`or`/`xor`/`compl`/`lshift`/
+/// `rshift`), which the VM computes natively — with gawk's fatal on a negative
+/// operand — when no host is registered.
+#[inline]
+pub fn is_awk_bitwise_op(id: u16) -> bool {
+    (AWK_AND..=AWK_RSHIFT).contains(&id)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Fields & record  (payload = field index for the *_FIELD_* ops)
 // ═══════════════════════════════════════════════════════════════════════════
