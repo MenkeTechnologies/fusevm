@@ -236,7 +236,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
 }));
 ```
 
-strykelang reserves 131 extended-op IDs in two disjoint blocks (38 from `0x0000`, 93 from `0x1000`). awkrs reserves 65 (1000–1213). elisprs reserves 13 (0–12). zshrs and vimlrs take the other route and emit no extended ops: both lower to `CallBuiltin` — zshrs to the IDs in `shell_builtins.rs` plus 160 of its own (263–683), vimlrs to 579 handlers on IDs 3000–3614. They don't conflict — each frontend owns its own ID space.
+strykelang reserves 131 extended-op IDs in two disjoint blocks (38 from `0x0000`, 93 from `0x1000`). awkrs reserves 65 (1000–1213). elisprs reserves 13 (0–12). zshrs and vimlrs take the other route and emit no extended ops: both lower to `CallBuiltin` — zshrs to the IDs in `shell_builtins.rs` plus 177 of its own (263–760), vimlrs to 588 handlers on IDs 3000–3623. They don't conflict — each frontend owns its own ID space.
 
 ### Shell Host (0.10.0+)
 
