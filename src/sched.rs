@@ -3,8 +3,9 @@
 //! fusevm's dispatch loop runs one VM to completion; this module layers a
 //! green-thread scheduler on top so a frontend (e.g. Go) can express
 //! goroutines and channels. Each goroutine is its own [`VM`] instance sharing
-//! the program `Chunk` and the frontend's thread-local heap; the scheduler
-//! owns the channel table and a run queue.
+//! the program `Chunk`, the global (package-level) variable table, and the
+//! frontend's thread-local heap; the scheduler owns the channel table and a
+//! run queue.
 //!
 //! The mechanism reuses the same "op raises a request, halts, driver reads it
 //! after `run()`" pattern as `Op::AwkSignal` — see [`crate::op::Op::Go`] and the
@@ -140,6 +141,12 @@ pub struct Scheduler<F: FnMut() -> VM> {
     /// The zero value a receive yields on a closed, empty channel. Frontends set
     /// this to the element type's zero (`Value::Int(0)` by default).
     recv_zero: Value,
+    /// The program's one package-level variable table, shared by every
+    /// goroutine (Go has a single package namespace). It starts as the main
+    /// VM's table and is moved into whichever VM is running for the duration
+    /// of its `run()` — scheduling is cooperative and single-threaded, so
+    /// exactly one VM holds it at a time and no copying or locking is needed.
+    globals: Vec<Value>,
 }
 
 impl<F: FnMut() -> VM> Scheduler<F> {
@@ -154,6 +161,7 @@ impl<F: FnMut() -> VM> Scheduler<F> {
             chans: Vec::new(),
             select_waiters: Vec::new(),
             recv_zero: Value::Int(0),
+            globals: Vec::new(),
         }
     }
 
@@ -166,7 +174,8 @@ impl<F: FnMut() -> VM> Scheduler<F> {
     /// Drive `main_vm` (goroutine 0) and every goroutine it spawns to completion.
     /// Returns when the main goroutine finishes (Go semantics: the program exits
     /// when `main` returns) or on deadlock / panic.
-    pub fn run(mut self, main_vm: VM) -> Result<(), SchedError> {
+    pub fn run(mut self, mut main_vm: VM) -> Result<(), SchedError> {
+        self.globals = std::mem::take(&mut main_vm.globals);
         self.vms.push(main_vm);
         self.ready.push_back(0);
         self.drive()
@@ -175,17 +184,21 @@ impl<F: FnMut() -> VM> Scheduler<F> {
     /// Like [`Scheduler::run`], but afterward returns the value of `global` from
     /// the main goroutine (`None` if the program has no such global). Lets a
     /// frontend read `main`'s result out of a scheduled run.
-    pub fn run_capturing(mut self, main_vm: VM, global: &str) -> Result<Option<Value>, SchedError> {
+    pub fn run_capturing(
+        mut self,
+        mut main_vm: VM,
+        global: &str,
+    ) -> Result<Option<Value>, SchedError> {
+        self.globals = std::mem::take(&mut main_vm.globals);
         self.vms.push(main_vm);
         self.ready.push_back(0);
         self.drive()?;
-        let main = &self.vms[0];
-        let val = main
+        let val = self.vms[0]
             .chunk
             .names
             .iter()
             .position(|n| n == global)
-            .and_then(|i| main.globals.get(i).cloned());
+            .and_then(|i| self.globals.get(i).cloned());
         Ok(val)
     }
 
@@ -197,7 +210,12 @@ impl<F: FnMut() -> VM> Scheduler<F> {
             // result. When a goroutine/channel op halts the VM mid-expression,
             // that popped value is live data the op left below its operands —
             // capture it and restore it before servicing the park.
-            let popped = match self.vms[gid].run() {
+            // The shared package-level table goes into this VM for the run and
+            // comes back out before anything else can observe it.
+            std::mem::swap(&mut self.vms[gid].globals, &mut self.globals);
+            let result = self.vms[gid].run();
+            std::mem::swap(&mut self.vms[gid].globals, &mut self.globals);
+            let popped = match result {
                 VMResult::Error(e) => return Err(SchedError::Panic(e)),
                 VMResult::Ok(v) => Some(v),
                 VMResult::Halted => None,
@@ -1009,5 +1027,47 @@ mod tests {
         b.emit(Op::SetVar(ch), 1);
         len_cap(&mut b, ch, out);
         assert_eq!(run(b.build(), "out"), Ok(Some(Value::Int(0))));
+    }
+
+    #[test]
+    fn goroutines_share_package_level_globals() {
+        // var n = 7
+        // main: done := make(chan int); go bump(done); <-done
+        // bump(done): n = n * 10 + 30 (reads main's 7, writes 100); done <- 0
+        // Go prints 100: a goroutine reads and writes the one package scope.
+        let mut b = ChunkBuilder::new();
+        let bump = b.add_name("bump");
+        let n = b.add_name("n");
+        let done = b.add_name("done");
+
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::SetVar(n), 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::ChanMake, 1);
+        b.emit(Op::SetVar(done), 1);
+        b.emit(Op::GetVar(done), 1);
+        b.emit(Op::Go(bump, 1), 1);
+        b.emit(Op::GetVar(done), 1);
+        b.emit(Op::ChanRecv, 1);
+        b.emit(Op::Pop, 1);
+        let skip = b.emit(Op::Jump(0), 1);
+
+        let entry = b.current_pos();
+        b.add_sub_entry(bump, entry);
+        b.emit(Op::SetSlot(0), 2);
+        b.emit(Op::GetVar(n), 2);
+        b.emit(Op::LoadInt(10), 2);
+        b.emit(Op::Mul, 2);
+        b.emit(Op::LoadInt(30), 2);
+        b.emit(Op::Add, 2);
+        b.emit(Op::SetVar(n), 2);
+        b.emit(Op::GetSlot(0), 2);
+        b.emit(Op::LoadInt(0), 2);
+        b.emit(Op::ChanSend, 2);
+        b.emit(Op::LoadUndef, 2);
+        b.emit(Op::ReturnValue, 2);
+        b.patch_jump(skip, b.current_pos());
+
+        assert_eq!(run(b.build(), "n"), Ok(Some(Value::Int(100))));
     }
 }
