@@ -925,10 +925,12 @@ self.onmessage = (e) => self.postMessage(run_source(e.data));
 single-VM dispatch loop, so a frontend (e.g. Go) can express `go`, `make(chan)`,
 `<-`, and `close` without a bespoke runtime.
 
-Each goroutine is its own `VM` sharing the program `Chunk` and the frontend's
-thread-local heap. These interpreter-only ops raise a scheduling request in the
-VM and halt the chunk — the same "op stashes a value, halts, driver reads it
-after `run()`" pattern as `Op::AwkSignal`:
+Each goroutine is its own `VM` sharing the program `Chunk`, one global
+(package-level) variable table, and the frontend's thread-local heap. The
+scheduler moves that table into whichever VM is running, so a goroutine reads
+and writes the same package variables `main` does. These interpreter-only ops
+raise a scheduling request in the VM and halt the chunk — the same "op stashes a
+value, halts, driver reads it after `run()`" pattern as `Op::AwkSignal`:
 
 | Op | Meaning |
 |---|---|
@@ -985,6 +987,7 @@ the previous behaviour byte for byte.
 | `VM::set_undef_hook(hook)` | **Strict-undef mode.** A read of an unset variable asks the host instead of yielding `Undef`. The hook takes an `UndefRead` and answers `Ok(Value)` to substitute a value or `Err(String)` to raise. |
 | `VM::is_strict_undef()` | Whether an undef hook is installed. |
 | `VM::set_sited_numeric_hook(hook)` | Like a `NumericHook`, but the callback receives a `NumericCall` carrying the *site* of the arithmetic. Wins over a plain `NumericHook` when both are set; either puts the VM in strict numeric mode. |
+| `ChunkBuilder::set_nan_result_hook(true)` | In strict numeric mode, a native float `Add`/`Sub`/`Mul` whose result is NaN (`inf - inf`, `inf * 0`) goes to the numeric hook instead of being answered; `Err` raises (tclsh: `domain error`), `Ok` answers. Checked only once the result is NaN; block/trace JITs fold the test into the strict overflow accumulator and the AOT tier deopts, so every tier reaches the hook. `Div`/`Mod`/`Pow` are not covered. |
 | `VM::frame_slot_names()` | The current frame's slot names. |
 | `VM::slot_names_at(up)` | The same, `up` frames out from the current one. |
 | `ChunkBuilder::set_sub_slot_names(entry_ip, names)` | Name a sub-chunk's frame slots at build time. |

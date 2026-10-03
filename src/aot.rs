@@ -183,11 +183,11 @@ use std::path::Path;
 /// fusevm, which is what actually happened. Bump the last byte whenever
 /// `Chunk`'s serialized shape changes.
 ///
-/// `FVAOT003` — 001 was the unstamped layout, 002 predates
-/// `Chunk::builtin_argc_is_arity`. Bumped on every `Chunk` layout change so an
-/// object built by an older fusevm is REJECTED with a rebuild message instead of
-/// mis-deserializing.
-pub const AOT_CHUNK_MAGIC: &[u8; 8] = b"FVAOT003";
+/// `FVAOT004` — 001 was the unstamped layout, 002 predates
+/// `Chunk::builtin_argc_is_arity`, 003 predates `Chunk::nan_result_hook`.
+/// Bumped on every `Chunk` layout change so an object built by an older fusevm
+/// is REJECTED with a rebuild message instead of mis-deserializing.
+pub const AOT_CHUNK_MAGIC: &[u8; 8] = b"FVAOT004";
 
 /// Exported symbol of the embedded serialized chunk (defined in the object).
 pub const AOT_CHUNK_BLOB_SYMBOL: &str = "fusevm_aot_chunk_blob";
@@ -2040,8 +2040,11 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     // flag — every integer `Add`/`Sub`/`Mul` (overflow) also deopt but are NOT in
     // `deopt_points`. Compute `may` whenever any of those are present, else the
     // spill set is empty and a slot set natively is lost across the deopt.
+    // `Chunk::nan_result_hook` makes a float `Add`/`Sub`/`Mul` deopt on a NaN
+    // result, so it is a runtime deopt point on the same footing.
+    let arith_deopts = chunk.int_overflow_deopt || chunk.nan_result_hook;
     let has_ovf_arith =
-        chunk.int_overflow_deopt && ops.iter().any(|o| matches!(o, Op::Add | Op::Sub | Op::Mul));
+        arith_deopts && ops.iter().any(|o| matches!(o, Op::Add | Op::Sub | Op::Mul));
     let has_div = ops.iter().any(|o| matches!(o, Op::Div));
     // `CallBuiltin` also deopts at run time — on the cold path where the handler
     // halted the VM or moved `vm.ip` — without being in `deopt_points`.
@@ -2055,7 +2058,7 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     for &ip in state.keys() {
         if deopt_points.contains(&ip)
             || matches!(ops[ip], Op::Div | Op::CallBuiltin(_, _))
-            || (chunk.int_overflow_deopt && matches!(ops[ip], Op::Add | Op::Sub | Op::Mul))
+            || (arith_deopts && matches!(ops[ip], Op::Add | Op::Sub | Op::Mul))
         {
             inits_at.insert(ip, may.get(&ip).cloned().unwrap_or_default());
         }
@@ -2849,6 +2852,30 @@ fn build_entry_native<M: Module>(
                             Op::Sub => b.ins().fsub(x, y),
                             _ => b.ins().fmul(x, y),
                         };
+                        if chunk.nan_result_hook {
+                            // A NaN result deopts with the operands still on the
+                            // abstract stack; the interpreter re-runs the op and
+                            // hands the NaN to the numeric hook.
+                            let nan = b.ins().fcmp(FloatCC::Unordered, r, r);
+                            let deopt_blk = b.create_block();
+                            let ok_blk = b.create_block();
+                            b.ins().brif(nan, deopt_blk, &[], ok_blk, &[]);
+                            b.switch_to_block(deopt_blk);
+                            emit_deopt(
+                                &mut b,
+                                plan,
+                                vm_var,
+                                &ivars,
+                                &fvars,
+                                &slot_vars,
+                                &global_vars,
+                                &deopt_refs,
+                                &kinds,
+                                &plan.inits_at[&ip],
+                                ip,
+                            );
+                            b.switch_to_block(ok_blk);
+                        }
                         kinds.pop();
                         kinds.pop();
                         b.def_var(fvars[ix], r);
@@ -6636,6 +6663,62 @@ mod tests {
         match run_chunk_native(&chunk, sentinel_hook).expect("native run") {
             VMResult::Ok(v) => assert_eq!(v, Value::Int(5), "non-overflow must stay native"),
             other => panic!("expected Ok(5), got {other:?}"),
+        }
+    }
+
+    /// `inf OP rhs`, with `inf` made as `1e308 * 10.0` from finite constants so
+    /// the chunk stays natively lowerable. `rhs: None` uses a second `inf`.
+    fn inf_op(op: Op, rhs: Option<f64>, nan_hook: bool) -> Chunk {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadFloat(1e308), 1);
+        b.emit(Op::LoadFloat(10.0), 1);
+        b.emit(Op::Mul, 1);
+        match rhs {
+            Some(f) => b.emit(Op::LoadFloat(f), 1),
+            None => {
+                b.emit(Op::LoadFloat(1e308), 1);
+                b.emit(Op::LoadFloat(10.0), 1);
+                b.emit(Op::Mul, 1)
+            }
+        };
+        b.emit(op, 1);
+        b.set_nan_result_hook(nan_hook);
+        b.build()
+    }
+
+    #[test]
+    fn native_nan_result_deopts_to_hook_when_flag_set() {
+        // inf - inf and inf * 0 are NaN: with `Chunk::nan_result_hook` native
+        // code deopts and the interpreter hands the op to the hook (-42).
+        for chunk in [
+            inf_op(Op::Sub, None, true),
+            inf_op(Op::Mul, Some(0.0), true),
+        ] {
+            assert!(native_lowerable(&chunk), "must still lower natively");
+            match run_chunk_native(&chunk, sentinel_hook).expect("native run") {
+                VMResult::Ok(v) => assert_eq!(v, Value::Int(-42), "NaN must deopt"),
+                other => panic!("expected Ok(-42), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn native_float_without_nan_stays_native_with_flag() {
+        // inf + 1.0 is inf, not NaN: no deopt, no hook, even with the flag.
+        let chunk = inf_op(Op::Add, Some(1.0), true);
+        match run_chunk_native(&chunk, sentinel_hook).expect("native run") {
+            VMResult::Ok(v) => assert_eq!(v, Value::Float(f64::INFINITY)),
+            other => panic!("expected Ok(inf), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_nan_result_is_answered_without_flag() {
+        // Flag off: unchanged — native answers NaN and never consults the hook.
+        let chunk = inf_op(Op::Mul, Some(0.0), false);
+        match run_chunk_native(&chunk, sentinel_hook).expect("native run") {
+            VMResult::Ok(Value::Float(f)) => assert!(f.is_nan(), "expected NaN, got {f}"),
+            other => panic!("expected Ok(NaN), got {other:?}"),
         }
     }
 

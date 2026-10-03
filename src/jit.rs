@@ -495,6 +495,12 @@ thread_local! {
     static FIXNUM_RANGE: std::cell::Cell<Option<(i64, i64)>> =
         const { std::cell::Cell::new(None) };
 
+    /// Whether the strict VM running on this thread opted in to
+    /// `Chunk::nan_result_hook`. JIT'd float `Add`/`Sub`/`Mul` then fold an
+    /// unordered-compare of their result into the overflow accumulator, so a
+    /// NaN bails to the interpreter, which hands it to the `NumericHook`.
+    static NAN_RESULT_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// Overflow trap channel for strict-mode JIT-compiled integer arithmetic.
     ///
     /// A strict-mode block accumulates the overflow bit of every `Add`/`Sub`/
@@ -511,9 +517,17 @@ thread_local! {
 /// Set the thread's strict-numeric flag. Called by `VM::run` before JIT
 /// dispatch; mirrors whether a [`crate::NumericHook`] is installed.
 #[allow(dead_code)] // called only from the jit-gated dispatch in `VM::run`
-pub(crate) fn set_strict_numeric(on: bool, range: Option<(i64, i64)>) {
+pub(crate) fn set_strict_numeric(on: bool, range: Option<(i64, i64)>, nan_hook: bool) {
     STRICT_NUM.with(|c| c.set(on));
     FIXNUM_RANGE.with(|c| c.set(range));
+    NAN_RESULT_HOOK.with(|c| c.set(on && nan_hook));
+}
+
+/// Whether JIT'd float arithmetic must bail on a NaN result (strict mode with
+/// `Chunk::nan_result_hook`).
+#[allow(dead_code)] // read only from the cranelift impl module
+pub(crate) fn nan_result_hook() -> bool {
+    NAN_RESULT_HOOK.with(|c| c.get())
 }
 
 /// The thread's fixnum range, if the strict VM narrowed it.
@@ -2403,6 +2417,26 @@ mod cranelift_jit_impl {
         bcx.def_var(acc, next);
     }
 
+    /// Push a float `Add`/`Sub`/`Mul` result, and under `Chunk::nan_result_hook`
+    /// fold "is it NaN" into the strict overflow accumulator, so a NaN result
+    /// bails to the interpreter (which hands it to the `NumericHook`) exactly
+    /// as an integer overflow does. Without the flag nothing extra is emitted.
+    fn push_float_result(
+        bcx: &mut FunctionBuilder,
+        stack: &mut Vec<(Value, JitTy)>,
+        ovf: Option<cranelift_frontend::Variable>,
+        r: Value,
+    ) {
+        if let (Some(acc), true) = (ovf, super::nan_result_hook()) {
+            let nan = bcx.ins().fcmp(FloatCC::Unordered, r, r);
+            let bit = bcx.ins().uextend(types::I64, nan);
+            let cur = bcx.use_var(acc);
+            let next = bcx.ins().bor(cur, bit);
+            bcx.def_var(acc, next);
+        }
+        stack.push((r, JitTy::Float));
+    }
+
     /// Emit the check the strict-mode overflow accumulator feeds: if any integer
     /// op in this function overflowed, call the trap libcall and return a
     /// sentinel instead of the (wrapped, wrong) result. `VM::run` sees the trap
@@ -2495,7 +2529,10 @@ mod cranelift_jit_impl {
                         }
                         None => stack.push((bcx.ins().iadd(a, b), JitTy::Int)),
                     },
-                    JitTy::Float => stack.push((bcx.ins().fadd(a, b), JitTy::Float)),
+                    JitTy::Float => {
+                        let r = bcx.ins().fadd(a, b);
+                        push_float_result(bcx, stack, ovf, r);
+                    }
                 }
             }
             Op::Sub => {
@@ -2509,7 +2546,10 @@ mod cranelift_jit_impl {
                         }
                         None => stack.push((bcx.ins().isub(a, b), JitTy::Int)),
                     },
-                    JitTy::Float => stack.push((bcx.ins().fsub(a, b), JitTy::Float)),
+                    JitTy::Float => {
+                        let r = bcx.ins().fsub(a, b);
+                        push_float_result(bcx, stack, ovf, r);
+                    }
                 }
             }
             Op::Mul => {
@@ -2523,7 +2563,10 @@ mod cranelift_jit_impl {
                         }
                         None => stack.push((bcx.ins().imul(a, b), JitTy::Int)),
                     },
-                    JitTy::Float => stack.push((bcx.ins().fmul(a, b), JitTy::Float)),
+                    JitTy::Float => {
+                        let r = bcx.ins().fmul(a, b);
+                        push_float_result(bcx, stack, ovf, r);
+                    }
                 }
             }
             // Always an f64 divide, never `sdiv`, and never with a divisor the
@@ -4972,6 +5015,7 @@ mod cranelift_jit_impl {
             source: chunk.source.clone(),
             int_overflow_deopt: chunk.int_overflow_deopt,
             builtin_argc_is_arity: chunk.builtin_argc_is_arity,
+            nan_result_hook: chunk.nan_result_hook,
             op_hash: 0,
             native_id: 0,
             aot_seeded_slots: 0,
@@ -4994,6 +5038,10 @@ mod cranelift_jit_impl {
         let mut h = DefaultHasher::new();
         sub.ops.hash(&mut h);
         sub.constants.hash(&mut h);
+        // Same rule as `ChunkBuilder::build`.
+        if sub.nan_result_hook {
+            true.hash(&mut h);
+        }
         sub.op_hash = h.finish();
         sub
     }

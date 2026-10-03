@@ -109,6 +109,26 @@ pub struct Chunk {
     /// than mis-read a field that follows.
     #[serde(default)]
     pub builtin_argc_is_arity: bool,
+    /// Opt-in: in strict numeric mode, a native float `Add`, `Sub` or `Mul` whose
+    /// result is NaN is handed to the numeric hook instead of being answered.
+    ///
+    /// IEEE-754 makes `inf - inf`, `inf * 0` and `-inf + inf` NaN, which is the
+    /// right answer for most languages and a refusal for some: tclsh reports
+    /// `domain error: argument not in valid range` at the operation that
+    /// produces the NaN. With this set, the hook receives the op and both
+    /// (native float) operands and decides: `Err` raises, `Ok` answers.
+    ///
+    /// The check runs only on a NaN result, so a chunk that never makes one
+    /// pays nothing for it, and a chunk without the flag compiles exactly as
+    /// before in every tier. With the flag, the block and trace JITs fold an
+    /// unordered-compare into the strict overflow accumulator (one bail, no
+    /// branch per op) and the AOT tier deopts on a NaN result, so every tier
+    /// reaches the hook from the interpreter. Without a numeric hook installed
+    /// the flag has no effect. `Div`, `Mod` and `Pow` are not covered.
+    ///
+    /// Declared last for the same reason as [`Chunk::sub_slot_names`].
+    #[serde(default)]
+    pub nan_result_hook: bool,
 }
 
 impl Chunk {
@@ -222,6 +242,12 @@ impl ChunkBuilder {
     /// arguments, or pops a different number, would desync the operand stack.
     pub fn set_builtin_argc_is_arity(&mut self, on: bool) {
         self.chunk.builtin_argc_is_arity = on;
+    }
+
+    /// Hand a NaN result of a native float `Add`/`Sub`/`Mul` to the numeric hook
+    /// (see [`Chunk::nan_result_hook`]).
+    pub fn set_nan_result_hook(&mut self, on: bool) {
+        self.chunk.nan_result_hook = on;
     }
 
     /// Emit an op at the current position.
@@ -369,6 +395,12 @@ impl ChunkBuilder {
         let mut h = DefaultHasher::new();
         self.chunk.ops.hash(&mut h);
         self.chunk.constants.hash(&mut h);
+        // A NaN-hook chunk compiles to code that bails where the same ops
+        // without the flag answer, so it must never share a JIT cache entry
+        // with them. Hashed only when set: every other chunk keeps its hash.
+        if self.chunk.nan_result_hook {
+            true.hash(&mut h);
+        }
         self.chunk.op_hash = h.finish();
         self.chunk
     }

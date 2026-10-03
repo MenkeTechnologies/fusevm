@@ -1517,7 +1517,20 @@ impl VM {
                     && !f64_would_round(a)
                     && !f64_would_round(b) =>
             {
-                Value::Float(float_op(a.to_float(), b.to_float()))
+                let r = float_op(a.to_float(), b.to_float());
+                // `Chunk::nan_result_hook`: a NaN result goes to the host. The
+                // flag is read only once the result is already NaN.
+                if r.is_nan()
+                    && self.chunk.nan_result_hook
+                    && matches!(op, NumOp::Add | NumOp::Sub | NumOp::Mul)
+                {
+                    match self.call_numeric(op, a, b, ip) {
+                        Ok(v) => v,
+                        Err(e) => return Some(e),
+                    }
+                } else {
+                    Value::Float(r)
+                }
             }
             // Coercing policy: everything else computes in f64, including a
             // non-number (`"a"` becomes `0.0`) and an integer f64 must round.
@@ -1669,7 +1682,11 @@ impl VM {
         // eligibility, salts every cache key, and switches integer arithmetic to
         // its overflow-checked lowering.
         #[cfg(feature = "jit")]
-        crate::jit::set_strict_numeric(self.strict_numeric_mode(), self.fixnum_range);
+        crate::jit::set_strict_numeric(
+            self.strict_numeric_mode(),
+            self.fixnum_range,
+            self.chunk.nan_result_hook,
+        );
 
         #[cfg(feature = "jit")]
         if self.tracing_jit && self.frames.len() == 1 && self.ip == 0 {
