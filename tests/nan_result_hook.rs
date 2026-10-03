@@ -52,9 +52,13 @@ fn inf_op_inf(op: Op, flag: bool) -> Chunk {
 
 fn run(chunk: Chunk, hook: Option<fusevm::NumericHook>, jit: bool) -> Result<Value, String> {
     let mut vm = VM::new(chunk);
+    // Only the jit-gated tests pass `true`.
+    #[cfg(feature = "jit")]
     if jit {
         vm.enable_tracing_jit();
     }
+    #[cfg(not(feature = "jit"))]
+    let _ = jit;
     if let Some(h) = hook {
         vm.set_numeric_hook(h);
     }
