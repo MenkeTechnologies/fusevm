@@ -2088,3 +2088,250 @@ fn a_float_global_round_trips_through_a_trace() {
     assert_eq!(traced.globals[0], plain.globals[0]);
     assert!(matches!(traced.globals[0], Value::Float(_)));
 }
+
+// ── State the i64 buffers cannot carry ──────────────────────────────────
+//
+// The slot and global buffers hold an `i64` and a two-way `SlotKind`; a
+// `Bool`, a string or `Undef` has no faithful encoding there. A trace must
+// neither compute with such a value as an integer (the interpreter coerces a
+// non-native operand through `to_float`, so `true + 1` is `Float(2.0)`) nor
+// overwrite one it never touched when it spills its registers back.
+
+/// `build_counter_loop`, with two extra slots the loop never references.
+#[test]
+fn a_trace_leaves_untouched_non_numeric_slots_alone() {
+    // One chunk per value (the limit changes `op_hash`): this chunk is also
+    // block-eligible, and a second run of the same chunk would go to the block
+    // tier, which is not what this test is about.
+    for (limit, keep) in [
+        (300, Value::str("keep")),
+        (301, Value::Bool(true)),
+        (302, Value::Bool(false)),
+        (303, Value::Undef),
+    ] {
+        let (chunk, anchor) = build_counter_loop(limit);
+        let mut vm = VM::new(chunk.clone());
+        vm.enable_tracing_jit();
+        ensure_slots(&mut vm, 1);
+        vm.frames.last_mut().unwrap().slots.push(keep.clone());
+        match vm.run() {
+            VMResult::Ok(Value::Int(n)) => assert_eq!(n, limit),
+            other => panic!("expected Ok(Int({limit})), got {other:?}"),
+        }
+        assert!(JitCompiler::new().trace_is_compiled(&chunk, anchor));
+        assert_eq!(
+            vm.frames.last().unwrap().slots[1],
+            keep,
+            "a slot the trace never referenced must survive its spill unchanged"
+        );
+    }
+}
+
+/// The same for a global: `build_global_counter_loop` touches only g0.
+#[test]
+fn a_trace_leaves_an_untouched_boolean_global_alone() {
+    let (chunk, anchor) = build_global_counter_loop(300);
+    for keep in [Value::Bool(true), Value::Bool(false)] {
+        let mut vm = VM::new(chunk.clone());
+        vm.enable_tracing_jit();
+        vm.globals.resize(4, Value::Undef);
+        vm.globals[3] = keep.clone();
+        match vm.run() {
+            VMResult::Ok(Value::Int(n)) => assert_eq!(n, 300),
+            other => panic!("expected Ok(Int(300)), got {other:?}"),
+        }
+        assert!(JitCompiler::new().trace_is_compiled(&chunk, anchor));
+        assert_eq!(vm.globals[3], keep);
+    }
+}
+
+/// A loop that *reads* a boolean global and does arithmetic with it.
+///
+/// ```text
+///   LoadInt(0) SetSlot(0)
+/// anchor:
+///   PreIncSlotVoid(0)
+///   GetVar(1) LoadInt(1) Add SetSlot(1)     // slot1 = g1 + 1
+///   GetSlot(0) LoadInt(200) NumLt JumpIfTrue(anchor)
+///   GetSlot(1)
+/// ```
+#[test]
+fn a_boolean_global_operand_agrees_with_the_interpreter() {
+    // A fresh chunk per seed order (the salt changes `op_hash`), so the first
+    // seed of each order is the one the recording sees.
+    let build = |salt: i64| {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(salt), 1);
+        b.emit(Op::Pop, 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let anchor = b.current_pos();
+        b.emit(Op::PreIncSlotVoid(0), 1);
+        b.emit(Op::GetVar(1), 1);
+        b.emit(Op::LoadInt(1), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetSlot(1), 1);
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(200), 1);
+        b.emit(Op::NumLt, 1);
+        let jmp = b.emit(Op::JumpIfTrue(0), 1);
+        b.patch_jump(jmp, anchor);
+        b.emit(Op::GetSlot(1), 1);
+        (b.build(), anchor)
+    };
+
+    // Int first, so a trace is compiled for an integer g1 and then entered
+    // with booleans; and booleans first, so the recording itself sees one.
+    for (salt, seeds) in [
+        (1, [Value::Int(4), Value::Bool(true), Value::Bool(false)]),
+        (2, [Value::Bool(true), Value::Bool(false), Value::Int(4)]),
+    ] {
+        let (chunk, anchor) = build(salt);
+        let mut compiled = false;
+        for g1 in seeds {
+            let run = |tracing: bool| {
+                let mut vm = VM::new(chunk.clone());
+                if tracing {
+                    vm.enable_tracing_jit();
+                }
+                ensure_slots(&mut vm, 2);
+                vm.globals.resize(2, Value::Undef);
+                vm.globals[1] = g1.clone();
+                let r = format!("{:?}", vm.run());
+                (r, vm.globals[1].clone())
+            };
+            let traced = run(true);
+            compiled |= JitCompiler::new().trace_is_compiled(&chunk, anchor);
+            assert_eq!(traced, run(false), "g1 = {g1:?} (order {salt})");
+        }
+        if salt == 1 {
+            assert!(
+                compiled,
+                "the integer seed must compile a trace for the booleans to meet"
+            );
+        }
+    }
+}
+
+/// Side-exits taken every third iteration while a float accumulator is live
+/// in a slot *and* on the abstract stack, so each deopt has to hand both back
+/// to the interpreter with their kinds intact.
+///
+/// ```text
+///   LoadFloat(0.25) SetSlot(2); LoadInt(0) SetSlot(0)
+/// anchor:
+///   PreIncSlotVoid(0)
+///   GetSlot(2) LoadFloat(0.5) Add SetSlot(2)          // acc += 0.5
+///   GetSlot(2)                                        // acc stays on the stack
+///   GetSlot(0) LoadInt(3) Mod JumpIfTrue(skip)        // i % 3 != 0 → skip
+///   LoadFloat(-1.5) Mul                               // acc * -1.5
+/// skip:
+///   SetSlot(2)
+///   GetSlot(0) LoadInt(300) NumLt JumpIfTrue(anchor)
+///   GetSlot(2)
+/// ```
+#[test]
+fn side_exits_with_live_float_state_agree_with_the_interpreter() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadFloat(0.25), 1);
+    b.emit(Op::SetSlot(2), 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::PreIncSlotVoid(0), 1);
+    b.emit(Op::GetSlot(2), 1);
+    b.emit(Op::LoadFloat(0.5), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(2), 1);
+    b.emit(Op::GetSlot(2), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(3), 1);
+    b.emit(Op::Mod, 1);
+    let skip = b.emit(Op::JumpIfTrue(0), 1);
+    b.emit(Op::LoadFloat(-1.5), 1);
+    b.emit(Op::Mul, 1);
+    let skip_target = b.current_pos();
+    b.patch_jump(skip, skip_target);
+    b.emit(Op::SetSlot(2), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(300), 1);
+    b.emit(Op::NumLt, 1);
+    let jmp = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(jmp, anchor);
+    b.emit(Op::GetSlot(2), 1);
+    let chunk = b.build();
+
+    let run = |tracing: bool| {
+        let mut vm = VM::new(chunk.clone());
+        if tracing {
+            vm.enable_tracing_jit();
+        }
+        ensure_slots(&mut vm, 3);
+        let r = vm.run();
+        (format!("{r:?}"), vm.frames.last().unwrap().slots.clone())
+    };
+    let traced = run(true);
+    let jit = JitCompiler::new();
+    assert!(jit.trace_is_compiled(&chunk, anchor), "the loop must trace");
+    let plain = run(false);
+    assert_eq!(traced.0, plain.0, "result");
+    let bits = |s: &[Value]| -> Vec<String> {
+        s.iter()
+            .map(|v| match v {
+                Value::Float(f) => format!("Float({:#x})", f.to_bits()),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(bits(&traced.1), bits(&plain.1), "slot state");
+}
+
+/// A loop that reads a slot past the end of the frame. The interpreter reads
+/// it as `Undef`; the slot buffer is only as long as the frame, so a trace
+/// addressing it would read past the buffer. The entry guard must keep the
+/// trace out instead.
+///
+/// ```text
+///   LoadInt(0) SetSlot(0)                    // frame grows to 1 slot
+/// anchor:
+///   PreIncSlotVoid(0)
+///   GetSlot(9) LoadInt(1) Add SetSlot(1)     // slot 9 never exists
+///   GetSlot(0) LoadInt(200) NumLt JumpIfTrue(anchor)
+///   GetSlot(1)
+/// ```
+#[test]
+fn a_slot_past_the_end_of_the_frame_agrees_with_the_interpreter() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let anchor = b.current_pos();
+    b.emit(Op::PreIncSlotVoid(0), 1);
+    b.emit(Op::GetSlot(9), 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::LoadInt(200), 1);
+    b.emit(Op::NumLt, 1);
+    let jmp = b.emit(Op::JumpIfTrue(0), 1);
+    b.patch_jump(jmp, anchor);
+    b.emit(Op::GetSlot(1), 1);
+    let chunk = b.build();
+
+    let run = |tracing: bool| {
+        let mut vm = VM::new(chunk.clone());
+        if tracing {
+            vm.enable_tracing_jit();
+        }
+        let r = format!("{:?}", vm.run());
+        (r, vm.frames.last().unwrap().slots.clone())
+    };
+    let traced = run(true);
+    assert!(
+        !JitCompiler::new().trace_is_compiled(&chunk, anchor)
+            || JitCompiler::new().trace_is_blacklisted(&chunk, anchor)
+            || JitCompiler::new().trace_deopt_count(&chunk, anchor) > 0,
+        "a compiled trace must have met the guard, not run"
+    );
+    assert_eq!(traced, run(false));
+}

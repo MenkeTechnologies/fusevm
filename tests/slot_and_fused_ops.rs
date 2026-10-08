@@ -583,3 +583,65 @@ fn for_each_block_stub_is_noop() {
     b.emit(Op::ForEachBlock(0), 1);
     assert_eq!(run(b), Value::Int(11));
 }
+
+// ── Fused slot ops wrap at the i64 edges ──
+//
+// `Op::Inc`/`Op::Dec` wrap (`wrapping_add`), and every native tier lowers the
+// fused slot ops with a wrapping `iadd`. The interpreter's fused slot ops used a
+// bare `+`/`-`, which panics on overflow in a debug build and wraps in release —
+// so the interpreter's own answer depended on the build profile.
+
+fn slot_op_result(seed: i64, op: Op, read_back: bool) -> Value {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::PushFrame, 1);
+    b.emit(Op::LoadInt(seed), 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(op, 1);
+    if read_back {
+        b.emit(Op::GetSlot(0), 1);
+    }
+    run(b)
+}
+
+#[test]
+fn fused_slot_inc_dec_wrap_at_the_edges() {
+    assert_eq!(slot_op_result(i64::MAX, Op::PreIncSlot(0), false), Value::Int(i64::MIN));
+    assert_eq!(slot_op_result(i64::MAX, Op::PreIncSlotVoid(0), true), Value::Int(i64::MIN));
+    assert_eq!(slot_op_result(i64::MIN, Op::PreDecSlot(0), false), Value::Int(i64::MAX));
+    assert_eq!(slot_op_result(i64::MAX, Op::PostIncSlot(0), true), Value::Int(i64::MIN));
+    assert_eq!(slot_op_result(i64::MIN, Op::PostDecSlot(0), true), Value::Int(i64::MAX));
+}
+
+#[test]
+fn fused_slot_add_assign_wraps() {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::PushFrame, 1);
+    b.emit(Op::LoadInt(i64::MAX), 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::LoadInt(2), 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::AddAssignSlotVoid(0, 1), 1);
+    b.emit(Op::GetSlot(0), 1);
+    assert_eq!(run(b), Value::Int(i64::MIN + 1));
+}
+
+#[test]
+fn fused_slot_loops_wrap() {
+    // SlotIncLtIntJumpBack: one increment past i64::MAX wraps to i64::MIN, which
+    // is below any i32 limit, so the jump is taken. Its target is the very next
+    // instruction (ip 4, the read-back), so taken and not-taken land alike.
+    assert_eq!(
+        slot_op_result(i64::MAX, Op::SlotIncLtIntJumpBack(0, 0, 4), true),
+        Value::Int(i64::MIN)
+    );
+    // AccumSumLoop: sum starts at i64::MAX, i runs 0..3 → sum wraps by 0+1+2.
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::PushFrame, 1);
+    b.emit(Op::LoadInt(i64::MAX), 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::AccumSumLoop(0, 1, 3), 1);
+    b.emit(Op::GetSlot(0), 1);
+    assert_eq!(run(b), Value::Int(i64::MAX.wrapping_add(3)));
+}

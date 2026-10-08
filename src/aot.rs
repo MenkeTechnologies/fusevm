@@ -1557,14 +1557,16 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
-            // Fused exact `(a * b) % k` → Int. Int-like operands only: a float
-            // operand would take the interpreter's unfused `Mul`/`Mod` path, so
-            // it deopts instead of silently truncating.
+            // Fused exact `(a * b) % k` → Int. `Int` operands only: the
+            // interpreter takes the fused path only when every operand is a
+            // `Value::Int`, and replays the unfused `Mul`/`Mod` otherwise — where
+            // a `Bool` (not just a `Float`) float-promotes and the result is a
+            // `Float`. So any other kind deopts rather than answering `Int`.
             Op::MulModFloor => {
                 let k = st.pop()?;
                 let b = st.pop()?;
                 let a = st.pop()?;
-                deopt_unless!(a.is_intlike() && b.is_intlike() && k.is_intlike());
+                deopt_unless!([a, b, k].iter().all(|&x| x == Kind::Int));
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }
@@ -1573,7 +1575,8 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 let c = st.pop()?;
                 let b = st.pop()?;
                 let a = st.pop()?;
-                deopt_unless!(a.is_intlike() && b.is_intlike() && c.is_intlike() && k.is_intlike());
+                // Same `Value::Int`-only fused path as `MulModFloor`.
+                deopt_unless!([a, b, c, k].iter().all(|&x| x == Kind::Int));
                 st.push(Kind::Int);
                 succs.push((ip + 1, st, inits));
             }

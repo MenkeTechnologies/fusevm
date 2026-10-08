@@ -228,6 +228,13 @@ pub struct VM {
     /// Reusable scratch slot-kind snapshot for the trace entry guard.
     #[cfg(feature = "jit")]
     slot_kinds_buf: Vec<SlotKind>,
+    /// Whether each slot held a native `Int`/`Float` at the last
+    /// `refresh_slot_buffers`, beside [`VM::slot_kinds_buf`]. The kind cannot
+    /// say it: a `Bool`, string or `Undef` is filed as `SlotKind::Int`. The
+    /// trace entry guard reads this for the slots a trace references, and the
+    /// trace spill leaves the others untouched.
+    #[cfg(feature = "jit")]
+    slot_native_buf: Vec<bool>,
     /// Reusable scratch i64 buffer of *global* values, passed to compiled
     /// traces beside [`VM::slot_buf`]. A trace that reads or writes a global
     /// addresses it here, at `index * 8`, exactly as it addresses a slot.
@@ -237,14 +244,17 @@ pub struct VM {
     /// Meaningful only where [`VM::global_numeric`] is true.
     #[cfg(feature = "jit")]
     global_kinds_buf: Vec<SlotKind>,
-    /// Whether each global held an `Int`/`Float`/`Bool` at the last
-    /// `refresh_global_buffers`.
+    /// Whether each global held a native `Int`/`Float` at the last
+    /// `refresh_global_buffers`. A `Bool` is not one: the buffer would carry it
+    /// as an `Int` the interpreter never computes with (see
+    /// `fill_global_buffers` in `src/jit.rs`).
     ///
-    /// Slots have one flag for the whole frame ([`VM::slots_all_numeric`]),
-    /// because a frame's slots are a procedure's own locals and a hot loop's
-    /// frame is usually all numbers. The global table is not: a frontend seeds
-    /// it with strings (`argv`, `argv0`, an environment) that no loop touches,
-    /// so one flag for the table would keep every trace out. This is per index,
+    /// The strict-mode gate for slots is one flag for the whole frame
+    /// ([`VM::slots_all_numeric`]) because a frame's slots are a procedure's
+    /// own locals and a hot loop's frame is usually all numbers. The global
+    /// table is not: a frontend seeds it with strings (`argv`, `argv0`, an
+    /// environment) that no loop touches, so one flag for the table would keep
+    /// every trace out. This is per index,
     /// and the entry guard reads only the indices the trace referenced.
     #[cfg(feature = "jit")]
     global_numeric: Vec<bool>,
@@ -585,6 +595,8 @@ impl VM {
             #[cfg(feature = "jit")]
             slot_kinds_buf: Vec::new(),
             #[cfg(feature = "jit")]
+            slot_native_buf: Vec::new(),
+            #[cfg(feature = "jit")]
             global_buf: Vec::new(),
             #[cfg(feature = "jit")]
             global_kinds_buf: Vec::new(),
@@ -912,6 +924,7 @@ impl VM {
             self.recorder = None;
             self.slot_buf.clear();
             self.slot_kinds_buf.clear();
+            self.slot_native_buf.clear();
             self.global_buf.clear();
             self.global_kinds_buf.clear();
             self.global_numeric.clear();
@@ -1011,12 +1024,30 @@ impl VM {
 
     // ── Tracing JIT integration helpers ──
 
+    /// Encode one slot for the native buffers: `(bits, kind, native)`.
+    ///
+    /// `native` is true only for `Value::Int` and `Value::Float`, the two kinds
+    /// the buffer carries faithfully. A `Bool` rides as `0|1` and anything else
+    /// as `0`, both `Int`-kinded — and both wrong to compute with, because the
+    /// interpreter coerces them (`true + 1` is `Float(2.0)`, not `Int(2)`).
+    #[cfg(feature = "jit")]
+    #[inline]
+    fn encode_slot(v: &Value) -> (i64, SlotKind, bool) {
+        match v {
+            Value::Int(n) => (*n, SlotKind::Int, true),
+            Value::Float(f) => (f.to_bits() as i64, SlotKind::Float, true),
+            Value::Bool(b) => (*b as i64, SlotKind::Int, false),
+            _ => (0, SlotKind::Int, false),
+        }
+    }
+
     /// Snapshot the current frame's slots into the i64 + slot-kind buffers.
     ///
-    /// Slots that don't fit cleanly into i64 (Array/Hash/String/etc) are
-    /// reported as `SlotKind::Int` with i64 value 0 — they will fail the
-    /// trace's entry guard if the recorded trace expected Int there, which
-    /// is the desired behavior (skip the trace, fall back to interpreter).
+    /// Slots that don't fit cleanly into i64 (Bool/String/Undef/Array/etc) are
+    /// reported as `SlotKind::Int` with their `0|1`/`0` encoding and flagged in
+    /// [`VM::slot_native_buf`]. The kind alone cannot tell them from an
+    /// integer, so the trace entry guard reads that flag for every slot the
+    /// trace references (skip the trace, fall back to interpreter).
     ///
     /// Specialized fast paths for 0-slot and 1-slot frames (the common
     /// case for tight inner loops) — these skip Vec resize bookkeeping
@@ -1034,44 +1065,38 @@ impl VM {
             0 => {
                 self.slot_buf.clear();
                 self.slot_kinds_buf.clear();
+                self.slot_native_buf.clear();
             }
             1 => {
-                let (i, kind) = match &frame.slots[0] {
-                    Value::Int(v) => (*v, SlotKind::Int),
-                    Value::Float(f) => (f.to_bits() as i64, SlotKind::Float),
-                    Value::Bool(b) => (*b as i64, SlotKind::Int),
-                    _ => {
-                        all_num = false;
-                        (0, SlotKind::Int)
-                    }
-                };
+                let (i, kind, native) = Self::encode_slot(&frame.slots[0]);
+                // `slots_all_numeric` keeps its historical meaning (Bool counts).
+                all_num = native || matches!(frame.slots[0], Value::Bool(_));
                 if self.slot_buf.is_empty() {
                     self.slot_buf.push(i);
                     self.slot_kinds_buf.push(kind);
+                    self.slot_native_buf.push(native);
                 } else {
                     self.slot_buf.truncate(1);
                     self.slot_buf[0] = i;
                     self.slot_kinds_buf.truncate(1);
                     self.slot_kinds_buf[0] = kind;
+                    self.slot_native_buf.truncate(1);
+                    self.slot_native_buf[0] = native;
                 }
             }
             _ => {
                 self.slot_buf.clear();
                 self.slot_kinds_buf.clear();
+                self.slot_native_buf.clear();
                 self.slot_buf.reserve(n);
                 self.slot_kinds_buf.reserve(n);
+                self.slot_native_buf.reserve(n);
                 for v in &frame.slots {
-                    let (i, kind) = match v {
-                        Value::Int(n) => (*n, SlotKind::Int),
-                        Value::Float(f) => (f.to_bits() as i64, SlotKind::Float),
-                        Value::Bool(b) => (*b as i64, SlotKind::Int),
-                        _ => {
-                            all_num = false;
-                            (0, SlotKind::Int)
-                        }
-                    };
+                    let (i, kind, native) = Self::encode_slot(v);
+                    all_num &= native || matches!(v, Value::Bool(_));
                     self.slot_buf.push(i);
                     self.slot_kinds_buf.push(kind);
+                    self.slot_native_buf.push(native);
                 }
             }
         }
@@ -1080,21 +1105,29 @@ impl VM {
 
     /// Copy the i64 slot buffer back into the current frame's slots,
     /// materializing Int and Float kinds. Float slots are stored as i64
-    /// bit patterns in the buffer; recover via `f64::from_bits`. Slots of
-    /// other kinds (Array, Hash, etc.) are left untouched — those slots
-    /// would have prevented trace install if referenced.
+    /// bit patterns in the buffer; recover via `f64::from_bits`.
+    ///
+    /// `keep_non_native` leaves every slot that did not hold an `Int`/`Float`
+    /// at the last refresh untouched. The trace tier passes `true`: its entry
+    /// guard refuses any trace that references such a slot, so the buffer
+    /// entry is still the `0|1`/`0` placeholder and writing it back would
+    /// flatten a string, `Undef` or `Bool` the loop never touched into an
+    /// `Int`. The block tier passes `false` — its native code may legitimately
+    /// have stored over such a slot.
     ///
     /// Specialized for 0/1-slot frames (common case).
     #[cfg(feature = "jit")]
     #[inline]
-    fn write_slots_back(&mut self) {
+    fn write_slots_back(&mut self, keep_non_native: bool) {
         let frame = match self.frames.last_mut() {
             Some(f) => f,
             None => return,
         };
         let n = frame.slots.len().min(self.slot_buf.len());
+        let write = |i: usize| !keep_non_native || self.slot_native_buf.get(i) == Some(&true);
         match n {
             0 => {}
+            1 if !write(0) => {}
             1 => match self.slot_kinds_buf.first() {
                 Some(SlotKind::Int) => frame.slots[0] = Value::Int(self.slot_buf[0]),
                 Some(SlotKind::Float) => {
@@ -1104,6 +1137,9 @@ impl VM {
             },
             _ => {
                 for i in 0..n {
+                    if !write(i) {
+                        continue;
+                    }
                     match self.slot_kinds_buf.get(i) {
                         Some(SlotKind::Int) => {
                             frame.slots[i] = Value::Int(self.slot_buf[i]);
@@ -1161,11 +1197,12 @@ impl VM {
         if self.strict_values() && !self.slots_all_numeric {
             return anchor_ip;
         }
-        let lookup = self.jit.trace_lookup(
+        let lookup = self.jit.trace_lookup_in_frame(
             &self.chunk,
             anchor_ip,
             &mut self.slot_buf,
             &self.slot_kinds_buf,
+            Some(&self.slot_native_buf),
             &self.globals,
             &mut self.global_buf,
             &mut self.global_kinds_buf,
@@ -1185,7 +1222,7 @@ impl VM {
                     self.jit.trace_overflow_bail(&self.chunk, anchor_ip);
                     return anchor_ip;
                 }
-                self.write_slots_back();
+                self.write_slots_back(true);
                 self.write_globals_back();
                 self.materialize_deopt_frames();
                 // Phase 9: if the trace deopted (returned non-fallthrough),
@@ -1256,11 +1293,12 @@ impl VM {
             if self.strict_values() && !self.slots_all_numeric {
                 return current;
             }
-            let lookup = self.jit.trace_lookup(
+            let lookup = self.jit.trace_lookup_in_frame(
                 &self.chunk,
                 current,
                 &mut self.slot_buf,
                 &self.slot_kinds_buf,
+                Some(&self.slot_native_buf),
                 &self.globals,
                 &mut self.global_buf,
                 &mut self.global_kinds_buf,
@@ -1275,7 +1313,7 @@ impl VM {
                         self.jit.trace_overflow_bail(&self.chunk, current);
                         return current;
                     }
-                    self.write_slots_back();
+                    self.write_slots_back(true);
                     self.write_globals_back();
                     self.materialize_deopt_frames();
                     current = resume_ip;
@@ -1693,12 +1731,30 @@ impl VM {
             let eligible = match self.block_eligible_cached {
                 Some(v) => v,
                 None => {
-                    let v = self.jit.is_block_eligible(&self.chunk);
+                    // The block tier's one slot buffer is the frame active at
+                    // entry. After `Op::PushFrame` the interpreter's slot ops
+                    // address a fresh, empty frame instead — a read there is
+                    // `Undef`, not the entry frame's value — so a chunk that
+                    // pushes a frame stays in the interpreter.
+                    let v = self.jit.is_block_eligible(&self.chunk)
+                        && !self.chunk.ops.iter().any(|op| matches!(op, Op::PushFrame));
                     self.block_eligible_cached = Some(v);
                     v
                 }
             };
-            if eligible {
+            // Only `Int` and `Float` slots survive the `i64` slot buffer. A
+            // `Bool` would be read as `Int(0|1)` and written back as one, and
+            // anything else (a string, `Undef`) as `Int(0)` — whether or not
+            // the chunk touches it, because `write_slots_back` rewrites every
+            // slot. The interpreter runs those frames.
+            let slots_fit_block = || {
+                self.frames.last().is_some_and(|f| {
+                    f.slots
+                        .iter()
+                        .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
+                })
+            };
+            if eligible && slots_fit_block() {
                 self.refresh_slot_buffers();
                 // Strict numeric mode: a non-numeric slot reaches native code as
                 // the integer 0 (`refresh_slot_buffers` has no richer encoding),
@@ -1707,7 +1763,7 @@ impl VM {
                 // interpreter, where the hook sees the real value.
                 let strict_blocked = self.strict_values() && !self.slots_all_numeric;
                 if !strict_blocked {
-                    if let Some(result) = self.jit.try_run_block_typed_kinded(
+                    if let Some(result) = self.jit.try_run_block_vm(
                         &self.chunk,
                         &mut self.slot_buf,
                         &self.slot_kinds_buf,
@@ -1745,8 +1801,13 @@ impl VM {
                                 }
                                 _ => {}
                             }
-                            self.write_slots_back();
+                            self.write_slots_back(false);
                             self.halted = true;
+                            // Leave the VM where the interpreter would: past the
+                            // last op. Left at 0, a second `run()` on this VM
+                            // re-entered the block and executed the chunk again,
+                            // where the interpreter answers `Halted`.
+                            self.ip = self.chunk.ops.len();
                             // The block tier returns its result in an i64 register, with a
                             // float riding back as its raw bit pattern. Decode through
                             // `BlockNum` — wrapping the register in `Value::Int`
@@ -1754,6 +1815,13 @@ impl VM {
                             // chunk result to an integer on the second and later runs of
                             // a chunk, once the block cache was warm: `LoadFloat(2.5)`
                             // returned `Int(2)`.
+                            //
+                            // `None` is a chunk that left nothing on the stack:
+                            // the interpreter answers `Halted` for it, not a
+                            // value.
+                            let Some(result) = result else {
+                                return VMResult::Halted;
+                            };
                             return VMResult::Ok(match result {
                                 crate::jit::BlockNum::Int(n) => Value::Int(n),
                                 crate::jit::BlockNum::Float(f) => Value::Float(f),
@@ -2571,13 +2639,15 @@ impl VM {
             }
 
             // ── Fused superinstructions ──
+            // Integer arithmetic here wraps, as `Op::Inc`/`Op::Dec` and every native
+            // tier's lowering of these ops do — a bare `+` would panic in a debug build.
             Op::PreIncSlot(slot) => {
-                let val = self.get_slot(*slot).to_int() + 1;
+                let val = self.get_slot(*slot).to_int().wrapping_add(1);
                 self.set_slot(*slot, Value::Int(val));
                 self.push(Value::Int(val));
             }
             Op::PreIncSlotVoid(slot) => {
-                let val = self.get_slot(*slot).to_int() + 1;
+                let val = self.get_slot(*slot).to_int().wrapping_add(1);
                 self.set_slot(*slot, Value::Int(val));
             }
             Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
@@ -2586,7 +2656,7 @@ impl VM {
                 }
             }
             Op::SlotIncLtIntJumpBack(slot, limit, target) => {
-                let val = self.get_slot(*slot).to_int() + 1;
+                let val = self.get_slot(*slot).to_int().wrapping_add(1);
                 self.set_slot(*slot, Value::Int(val));
                 if val < *limit as i64 {
                     self.ip = *target;
@@ -2597,29 +2667,29 @@ impl VM {
                 let mut i = self.get_slot(*i_slot).to_int();
                 let lim = *limit as i64;
                 while i < lim {
-                    sum += i;
+                    sum = sum.wrapping_add(i);
                     i += 1;
                 }
                 self.set_slot(*sum_slot, Value::Int(sum));
                 self.set_slot(*i_slot, Value::Int(i));
             }
             Op::AddAssignSlotVoid(a, b) => {
-                let sum = self.get_slot(*a).to_int() + self.get_slot(*b).to_int();
+                let sum = self.get_slot(*a).to_int().wrapping_add(self.get_slot(*b).to_int());
                 self.set_slot(*a, Value::Int(sum));
             }
             Op::PreDecSlot(slot) => {
-                let val = self.get_slot(*slot).to_int() - 1;
+                let val = self.get_slot(*slot).to_int().wrapping_sub(1);
                 self.set_slot(*slot, Value::Int(val));
                 self.push(Value::Int(val));
             }
             Op::PostIncSlot(slot) => {
                 let old = self.get_slot(*slot).to_int();
-                self.set_slot(*slot, Value::Int(old + 1));
+                self.set_slot(*slot, Value::Int(old.wrapping_add(1)));
                 self.push(Value::Int(old));
             }
             Op::PostDecSlot(slot) => {
                 let old = self.get_slot(*slot).to_int();
-                self.set_slot(*slot, Value::Int(old - 1));
+                self.set_slot(*slot, Value::Int(old.wrapping_sub(1)));
                 self.push(Value::Int(old));
             }
 

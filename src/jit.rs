@@ -854,9 +854,81 @@ mod cranelift_jit_impl {
         /// from the returned bits — `Int(1)` and `Bool(true)` are the same
         /// register value and different `Value`s.
         ret_is_bool: bool,
+        /// Which frame slots the native code touches. Checked against the
+        /// caller's slice on every call — see [`CompiledLinear::run`].
+        slot_use: LinearSlotUse,
+    }
+
+    /// The frame-slot footprint of a linear sequence: how many slots it
+    /// addresses (`len` = highest slot index + 1) and whether it writes any.
+    #[derive(Clone, Copy)]
+    pub(crate) struct LinearSlotUse {
+        len: usize,
+        writes: bool,
+    }
+
+    impl LinearSlotUse {
+        pub(crate) fn of(seq: &[Op]) -> Self {
+            let mut slot_use = LinearSlotUse {
+                len: 0,
+                writes: false,
+            };
+            let mut touch = |slot: u16, writes: bool| {
+                slot_use.len = slot_use.len.max(slot as usize + 1);
+                slot_use.writes |= writes;
+            };
+            for op in seq {
+                match op {
+                    Op::GetSlot(s) | Op::SlotLtIntJumpIfFalse(s, _, _) => touch(*s, false),
+                    Op::SetSlot(s)
+                    | Op::PreIncSlot(s)
+                    | Op::PreIncSlotVoid(s)
+                    | Op::PreDecSlot(s)
+                    | Op::PostIncSlot(s)
+                    | Op::PostDecSlot(s)
+                    | Op::SlotIncLtIntJumpBack(s, _, _) => touch(*s, true),
+                    Op::AccumSumLoop(a, b, _) | Op::AddAssignSlotVoid(a, b) => {
+                        touch(*a, true);
+                        touch(*b, true);
+                    }
+                    _ => {}
+                }
+            }
+            slot_use
+        }
     }
 
     impl CompiledLinear {
+        /// Run against the caller's slots, or decline.
+        ///
+        /// Native code addresses slots by raw offset with no bounds check, so
+        /// a slice shorter than the sequence's footprint declines (the
+        /// interpreter reads a missing slot as `Undef`, which native code
+        /// cannot produce) instead of reading past its end — or through the
+        /// null pointer that `&[]` used to be passed as.
+        ///
+        /// `slots` is a *shared* borrow, so the writes a sequence makes
+        /// (`SetSlot`, `PreIncSlot`, ...) go to a private copy: storing
+        /// through `slots.as_ptr()` is undefined behaviour, and for a promoted
+        /// constant such as `&[0; 4]` (read-only memory) it was a SIGBUS. The
+        /// writes stay visible to later reads in the same chunk, which is all
+        /// the returned value depends on.
+        pub(crate) fn run(&self, slots: &[i64]) -> Option<FuseValue> {
+            let LinearSlotUse { len, writes } = self.slot_use;
+            if slots.len() < len {
+                return None;
+            }
+            let result = if writes {
+                let mut scratch = slots[..len].to_vec();
+                self.invoke(scratch.as_mut_ptr())
+            } else if len == 0 {
+                self.invoke(std::ptr::null())
+            } else {
+                self.invoke(slots.as_ptr())
+            };
+            Some(self.result_to_value(result))
+        }
+
         pub(crate) fn invoke(&self, slots: *const i64) -> JitResult {
             match &self.run {
                 LinearRun::Nullary(f) => JitResult::Int(unsafe { f() }),
@@ -937,6 +1009,15 @@ mod cranelift_jit_impl {
     fn pop_num(stack: &mut Vec<Cell>) -> Option<Cell> {
         match stack.pop()? {
             c if c.is_bool() => None,
+            c => Some(c),
+        }
+    }
+
+    /// Pop one operand for an op whose native lowering takes a raw `i64`:
+    /// declines a boolean (see [`pop_num`]) and a float alike.
+    fn pop_int(stack: &mut Vec<Cell>) -> Option<Cell> {
+        match pop_num(stack)? {
+            c if c.is_float() => None,
             c => Some(c),
         }
     }
@@ -1307,23 +1388,29 @@ mod cranelift_jit_impl {
             // Fused exact `(a*b) % k` — three ints in, one int out. Never
             // const-folded here: the point of the op is the i128 product, and
             // the abstract cell model is i64.
+            //
+            // These four ops lower to an `i64` libcall that `emit_data_op`
+            // feeds the raw operand registers, so every operand must be an
+            // integer cell. A float operand used to reach that call as an
+            // `f64` value and was turned away only by the Cranelift verifier's
+            // signature check; declining here makes the contract explicit.
+            // (The interpreter's answer for a float operand is the unfused
+            // `Mul`/`Mod` replay, or `to_int` for gcd/lcm.)
             Op::MulModFloor => {
-                let _ = pop2_strict(stack)?;
-                pop_num(stack)?;
+                for _ in 0..3 {
+                    pop_int(stack)?;
+                }
                 stack.push(Cell::Dyn);
             }
             Op::MulAddModFloor => {
-                let _ = pop2_strict(stack)?;
-                pop_num(stack)?;
-                pop_num(stack)?;
+                for _ in 0..4 {
+                    pop_int(stack)?;
+                }
                 stack.push(Cell::Dyn);
             }
-            Op::GcdInt => {
-                let (_, _) = pop2_strict(stack)?;
-                stack.push(Cell::Dyn);
-            }
-            Op::LcmInt => {
-                let (_, _) = pop2_strict(stack)?;
+            Op::GcdInt | Op::LcmInt => {
+                pop_int(stack)?;
+                pop_int(stack)?;
                 stack.push(Cell::Dyn);
             }
             Op::TimeInt => {
@@ -3246,6 +3333,7 @@ mod cranelift_jit_impl {
             backing: LinearBacking::Jit(module),
             run,
             ret_is_bool: ret_cell.is_bool(),
+            slot_use: LinearSlotUse::of(seq),
         })
     }
 
@@ -3266,22 +3354,14 @@ mod cranelift_jit_impl {
             return None;
         }
         let key = chunk.op_hash;
-        let slot_ptr = if slots.is_empty() {
-            std::ptr::null()
-        } else {
-            slots.as_ptr()
-        };
 
         // Cache hit: invoke and return
         let cached = LINEAR_CACHE_TLS.with(|cache_cell| {
             let cache = cache_cell.borrow();
-            cache.get(&key).map(|c| {
-                let result = c.invoke(slot_ptr);
-                c.result_to_value(result)
-            })
+            cache.get(&key).map(|c| c.run(slots))
         });
         if let Some(v) = cached {
-            return Some(v);
+            return v;
         }
 
         // Disk-cache path (opt-in): reuse or build relocatable native code
@@ -3290,12 +3370,11 @@ mod cranelift_jit_impl {
         {
             if let Some(dir) = disk_cache::cache_dir() {
                 if let Some(compiled) = disk_cache::try_load_or_build(chunk, &dir) {
-                    let result = compiled.invoke(slot_ptr);
-                    let value = compiled.result_to_value(result);
+                    let value = compiled.run(slots);
                     LINEAR_CACHE_TLS.with(|cache_cell| {
                         cache_cell.borrow_mut().insert(key, Box::new(compiled));
                     });
-                    return Some(value);
+                    return value;
                 }
                 // Native caching rejected this chunk (e.g. an unsupported
                 // relocation): fall through to the in-memory JIT path.
@@ -3304,14 +3383,13 @@ mod cranelift_jit_impl {
 
         // Cache miss: compile, invoke, store
         let compiled = compile_linear(chunk)?;
-        let result = compiled.invoke(slot_ptr);
-        let value = compiled.result_to_value(result);
+        let value = compiled.run(slots);
 
         LINEAR_CACHE_TLS.with(|cache_cell| {
             cache_cell.borrow_mut().insert(key, Box::new(compiled));
         });
 
-        Some(value)
+        value
     }
 
     /// Check if a chunk is eligible for linear JIT compilation.
@@ -3418,7 +3496,10 @@ mod cranelift_jit_impl {
         // `AwkComplJit`/`AwkAnd`/`AwkOr`/`AwkXor` now narrow with `adjust_uint`,
         // treat shift counts >= 64 as 0, trap negative fold operands, and call
         // the new `fusevm_jit_awk_bit_trap` helper; and/or/xor yield Float.
-        const SCHEMA_VERSION: u32 = 17;
+        // 17 -> 18: block blobs carry a `ret_is_void` flag (bit 2). A blob
+        // written before it reads back as an integer result for a chunk that
+        // leaves no value, so it must be rebuilt rather than trusted.
+        const SCHEMA_VERSION: u32 = 18;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -3653,6 +3734,8 @@ mod cranelift_jit_impl {
             entry: u32,
             ret_is_float: bool,
             need_slots: bool,
+            /// Block blobs only: the chunk leaves no value (`BlockRet::Void`).
+            ret_is_void: bool,
             /// Extra verification word: for traces this is a content hash of the
             /// recording (recorded path + slot types + fallthrough); 0 otherwise.
             aux: u64,
@@ -3667,7 +3750,9 @@ mod cranelift_jit_impl {
                 b.extend_from_slice(&op_hash.to_le_bytes());
                 b.extend_from_slice(&self.aux.to_le_bytes());
                 b.push(self.kind);
-                let flags = (self.ret_is_float as u8) | ((self.need_slots as u8) << 1);
+                let flags = (self.ret_is_float as u8)
+                    | ((self.need_slots as u8) << 1)
+                    | ((self.ret_is_void as u8) << 2);
                 b.push(flags);
                 b.extend_from_slice(&self.entry.to_le_bytes());
                 b.extend_from_slice(&(self.code.len() as u32).to_le_bytes());
@@ -3715,6 +3800,7 @@ mod cranelift_jit_impl {
                     entry,
                     ret_is_float: flags & 1 != 0,
                     need_slots: flags & 2 != 0,
+                    ret_is_void: flags & 4 != 0,
                     aux: expect_aux,
                 })
             }
@@ -3931,6 +4017,7 @@ mod cranelift_jit_impl {
                 entry: 0,
                 ret_is_float: matches!(ret_ty, JitTy::Float),
                 need_slots,
+                ret_is_void: false,
                 aux: 0,
             })
         }
@@ -4033,7 +4120,11 @@ mod cranelift_jit_impl {
         /// Map the blob's code into executable memory, apply relocations, and
         /// build a [`CompiledLinear`] that calls into it. `None` on any mapping,
         /// protection, or relocation-resolution failure.
-        pub(crate) fn load_native(blob: &NativeBlob, ret_is_bool: bool) -> Option<CompiledLinear> {
+        pub(crate) fn load_native(
+            blob: &NativeBlob,
+            ret_is_bool: bool,
+            slot_use: LinearSlotUse,
+        ) -> Option<CompiledLinear> {
             if blob.kind != KIND_LINEAR {
                 return None;
             }
@@ -4058,6 +4149,7 @@ mod cranelift_jit_impl {
                 backing: LinearBacking::Native(loaded),
                 run,
                 ret_is_bool,
+                slot_use,
             })
         }
 
@@ -4073,7 +4165,11 @@ mod cranelift_jit_impl {
             Some(CompiledBlock {
                 backing: BlockBacking::Native(loaded),
                 run,
-                ret_is_float: blob.ret_is_float,
+                ret: match (blob.ret_is_float, blob.ret_is_void) {
+                    (true, _) => BlockRet::Float,
+                    (false, true) => BlockRet::Void,
+                    (false, false) => BlockRet::Int,
+                },
             })
         }
 
@@ -4352,14 +4448,15 @@ mod cranelift_jit_impl {
             let ret_is_bool = linear_result_cell(&chunk.ops, &chunk.constants)
                 .map(Cell::is_bool)
                 .unwrap_or(false);
+            let slot_use = LinearSlotUse::of(&chunk.ops);
             if let Some(blob) = read_blob(dir, "lin", chunk.op_hash, 0, 0) {
-                if let Some(compiled) = load_native(&blob, ret_is_bool) {
+                if let Some(compiled) = load_native(&blob, ret_is_bool, slot_use) {
                     return Some(compiled);
                 }
             }
             let blob = compile_linear_native(chunk)?;
             write_blob(dir, "lin", chunk.op_hash, 0, &blob);
-            load_native(&blob, ret_is_bool)
+            load_native(&blob, ret_is_bool, slot_use)
         }
 
         /// Block-tier equivalent of [`try_load_or_build`]. Keyed by `op_hash`.
@@ -4441,7 +4538,7 @@ mod cranelift_jit_impl {
                     helper_ids,
                     ext_helpers,
                 },
-                ret_is_float,
+                ret,
             ) = build_block_function(chunk, slot_kinds)?;
             let (code, relocs) = {
                 let isa = module.isa();
@@ -4454,8 +4551,9 @@ mod cranelift_jit_impl {
                 code,
                 relocs,
                 entry: 0,
-                ret_is_float,
+                ret_is_float: ret == BlockRet::Float,
                 need_slots: true,
+                ret_is_void: ret == BlockRet::Void,
                 aux: slot_kinds_hash(slot_kinds),
             })
         }
@@ -4499,6 +4597,7 @@ mod cranelift_jit_impl {
                 entry: 0,
                 ret_is_float: false,
                 need_slots: true,
+                ret_is_void: false,
                 aux: meta_hash,
             })
         }
@@ -4538,11 +4637,23 @@ mod cranelift_jit_impl {
         #[allow(dead_code)]
         backing: BlockBacking,
         run: BlockRun,
-        /// Whether the chunk's result is a float, returned as its raw `f64` bit
-        /// pattern in the `i64` register (the block signature is always
+        /// How to read the `i64` return register (the block signature is always
         /// `fn(*mut i64) -> i64`; float results are `bitcast`, not truncated, so a
         /// typed caller can recover the exact value via [`f64::from_bits`]).
-        ret_is_float: bool,
+        ret: BlockRet,
+    }
+
+    /// How a compiled block's `i64` return register is read.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum BlockRet {
+        /// A plain integer.
+        Int,
+        /// The bit pattern of an `f64`.
+        Float,
+        /// No value: the chunk leaves its operand stack empty, so the
+        /// interpreter answers `VMResult::Halted` rather than a value. The
+        /// register holds `0`.
+        Void,
     }
 
     impl CompiledBlock {
@@ -4551,18 +4662,18 @@ mod cranelift_jit_impl {
         /// exact same value they did before float returns were bit-encoded).
         #[allow(dead_code)]
         pub(crate) fn invoke(&self, slots: &mut [i64]) -> i64 {
-            let (bits, is_float) = self.invoke_typed(slots);
-            if is_float {
+            let (bits, ret) = self.invoke_typed(slots);
+            if ret == BlockRet::Float {
                 f64::from_bits(bits as u64) as i64
             } else {
                 bits
             }
         }
 
-        /// Invoke and return `(raw_bits, ret_is_float)`. For a float result
-        /// `raw_bits` is the `f64` bit pattern (recover via `f64::from_bits`); for an
-        /// integer result it is the plain `i64`.
-        pub(crate) fn invoke_typed(&self, slots: &mut [i64]) -> (i64, bool) {
+        /// Invoke and return `(raw_bits, ret)`. For a float result `raw_bits` is
+        /// the `f64` bit pattern (recover via `f64::from_bits`); for an integer
+        /// result it is the plain `i64`.
+        pub(crate) fn invoke_typed(&self, slots: &mut [i64]) -> (i64, BlockRet) {
             let ptr = if slots.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -4574,7 +4685,7 @@ mod cranelift_jit_impl {
                 BlockRun::SlotsF(f) => (unsafe { f(ptr) }).to_bits() as i64,
                 BlockRun::NoSlotsF(f) => (unsafe { f() }).to_bits() as i64,
             };
-            (raw, self.ret_is_float)
+            (raw, self.ret)
         }
     }
 
@@ -4942,8 +5053,14 @@ mod cranelift_jit_impl {
         }
         // Slow path: scan ops, cache result.
         let ops = &chunk.ops;
-        let result =
-            !ops.is_empty() && (0..ops.len()).all(|ip| is_block_eligible_op_at(ops, ip, true));
+        // `Op::PopFrame` is admitted per op (a trace or region may carry one) but
+        // never in a whole block chunk: the interpreter truncates the operand
+        // stack to the popped frame's base and switches slot ops to the outer
+        // frame, and this tier lowers it as a no-op — `7; PushFrame; 1;
+        // PopFrame` answered `Int(1)` where the interpreter answers `Int(7)`.
+        let result = !ops.is_empty()
+            && !ops.iter().any(|op| matches!(op, Op::PopFrame))
+            && (0..ops.len()).all(|ip| is_block_eligible_op_at(ops, ip, true));
         BLOCK_ELIGIBLE_TLS.with(|c| c.borrow_mut().insert(key, result));
         result
     }
@@ -5155,16 +5272,16 @@ mod cranelift_jit_impl {
     }
 
     /// Build the block-JIT Cranelift function for `chunk`. Returns the built
-    /// function plus `ret_is_float`: whether the chunk's result is a float, which
-    /// the function returns as the raw `f64` bit pattern in its `i64` return
-    /// register (the signature is always `fn(*mut i64) -> i64`). Returns `None` if
-    /// the chunk is block-ineligible, or if two distinct return points disagree on
-    /// the result's int/float-ness (an inconsistent ABI the caller can't decode) —
-    /// in which case the caller falls back to the interpreter.
+    /// function plus its [`BlockRet`]: whether the chunk's result is an integer,
+    /// a float (returned as the raw `f64` bit pattern in the `i64` return
+    /// register — the signature is always `fn(*mut i64) -> i64`), or absent.
+    /// Returns `None` if the chunk is block-ineligible, or if two distinct return
+    /// points disagree on that kind (an inconsistent ABI the caller can't decode)
+    /// — in which case the caller falls back to the interpreter.
     pub(crate) fn build_block_function(
         chunk: &Chunk,
         slot_kinds: &[super::SlotKind],
-    ) -> Option<(BuiltFn, bool)> {
+    ) -> Option<(BuiltFn, BlockRet)> {
         let ops = &chunk.ops;
         if !is_block_eligible(chunk) {
             return None;
@@ -5264,8 +5381,8 @@ mod cranelift_jit_impl {
 
         let mut fctx = FunctionBuilderContext::new();
         // Set inside the builder block at the chunk's return point(s); read after
-        // the block closes to tag the built function as float- or int-returning.
-        let ret_is_float_final: bool;
+        // the block closes to tag the built function's result kind.
+        let ret_final: BlockRet;
         {
             let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut fctx);
 
@@ -5327,10 +5444,10 @@ mod cranelift_jit_impl {
             let mut block_param_tys: HashMap<cranelift_codegen::ir::Block, Vec<JitTy>> =
                 HashMap::new();
 
-            // Whether the chunk's result is a float, decided at the (one or more)
-            // return points. All return points must agree; a disagreement makes the
+            // The chunk's result kind, decided at the (one or more) return
+            // points. All return points must agree; a disagreement makes the
             // i64-encoded result undecodable, so we bail to the interpreter.
-            let mut ret_is_float: Option<bool> = None;
+            let mut ret: Option<BlockRet> = None;
 
             for (block_idx, &leader_ip) in leader_vec.iter().enumerate() {
                 let block_end = if block_idx + 1 < leader_vec.len() {
@@ -5457,17 +5574,23 @@ mod cranelift_jit_impl {
                             let var = *slot_vars.get(slot)?;
                             let (v, ty) = stack.pop()?;
                             let v_i = if slot_is_float(*slot) {
-                                // Store the f64 bit pattern. Coerce an Int
-                                // operand to f64 first (integer-valued result of
-                                // e.g. a comparison or AwkInt), then bit-cast.
-                                let f = match ty {
-                                    JitTy::Float => v,
-                                    JitTy::Int => i64_to_f64(&mut bcx, v),
-                                };
+                                // Float-kinded slot, integer value: the mirror
+                                // of the case below. The slot's kind is fixed
+                                // for the whole compiled chunk, so the only
+                                // encoding on offer is the value converted to
+                                // an f64 — which is what this did, and it made
+                                // `x = 3` into a slot that entered holding
+                                // `1.5` read back as `Float(3.0)` once warm
+                                // (in the chunk and in the frame afterwards)
+                                // where the interpreter stores `Int(3)`.
+                                // Decline and let the interpreter run it.
+                                if matches!(ty, JitTy::Int) {
+                                    return None;
+                                }
                                 bcx.ins().bitcast(
                                     types::I64,
                                     cranelift_codegen::ir::MemFlags::new(),
-                                    f,
+                                    v,
                                 )
                             } else {
                                 // Int-kinded slot, float value: there is no
@@ -5920,7 +6043,7 @@ mod cranelift_jit_impl {
                 if !block_terminated {
                     if block_end == ops.len() {
                         // Final block: spill promoted slot variables to memory, then return
-                        let (ret_val, is_f) = if let Some((v, ty)) = stack.pop() {
+                        let (ret_val, kind) = if let Some((v, ty)) = stack.pop() {
                             match ty {
                                 // A float result is returned as its raw f64 bit
                                 // pattern (bit-cast, NOT truncated), so a typed
@@ -5932,17 +6055,19 @@ mod cranelift_jit_impl {
                                         cranelift_codegen::ir::MemFlags::new(),
                                         v,
                                     );
-                                    (bits, true)
+                                    (bits, BlockRet::Float)
                                 }
-                                JitTy::Int => (v, false),
+                                JitTy::Int => (v, BlockRet::Int),
                             }
                         } else {
-                            (bcx.ins().iconst(types::I64, 0), false)
+                            // Nothing left on the stack: the interpreter answers
+                            // `Halted`, not `Int(0)`. The kind says so.
+                            (bcx.ins().iconst(types::I64, 0), BlockRet::Void)
                         };
-                        // All return points must agree on int vs float.
-                        match ret_is_float {
-                            Some(prev) if prev != is_f => return None,
-                            _ => ret_is_float = Some(is_f),
+                        // All return points must agree on the result kind.
+                        match ret {
+                            Some(prev) if prev != kind => return None,
+                            _ => ret = Some(kind),
                         }
                         // Strict numeric mode: if any integer op overflowed,
                         // trap and return the sentinel WITHOUT writing slots
@@ -5977,7 +6102,7 @@ mod cranelift_jit_impl {
 
             bcx.seal_all_blocks();
             bcx.finalize();
-            ret_is_float_final = ret_is_float.unwrap_or(false);
+            ret_final = ret.unwrap_or(BlockRet::Int);
         }
 
         Some((
@@ -6090,7 +6215,7 @@ mod cranelift_jit_impl {
                     v
                 },
             },
-            ret_is_float_final,
+            ret_final,
         ))
     }
 
@@ -6108,20 +6233,20 @@ mod cranelift_jit_impl {
                 helper_ids: _,
                 ext_helpers: _,
             },
-            ret_is_float,
+            ret,
         ) = build_block_function(chunk, slot_kinds)?;
         module.define_function(fid, &mut ctx).ok()?;
         module.clear_context(&mut ctx);
         module.finalize_definitions().ok()?;
         let ptr = module.get_finalized_function(fid);
         // Always SlotsI: signature is fn(*mut i64) -> i64. A float result rides
-        // back in the i64 register as its f64 bit pattern; `ret_is_float` tells a
-        // typed caller to decode it.
+        // back in the i64 register as its f64 bit pattern; `ret` tells a typed
+        // caller to decode it.
         let run = BlockRun::SlotsI(unsafe { std::mem::transmute::<*const u8, BlockFnSlotsI>(ptr) });
         Some(CompiledBlock {
             backing: BlockBacking::Jit(module),
             run,
-            ret_is_float,
+            ret,
         })
     }
 
@@ -6138,6 +6263,10 @@ mod cranelift_jit_impl {
         hot_count: u32,
         /// Compiled native code (set after threshold).
         compiled: Option<Box<CompiledBlock>>,
+        /// One past the highest slot index the chunk addresses. Compiled code
+        /// loads and stores every such slot through the caller's buffer
+        /// unchecked, so a shorter buffer is declined instead of overrun.
+        slots_needed: usize,
     }
 
     thread_local! {
@@ -6205,25 +6334,41 @@ mod cranelift_jit_impl {
         try_run_block_inner(chunk, slots, slot_kinds, 0).map(|r| decode_block_num(chunk, r))
     }
 
-    /// Decode a `(raw_bits, ret_is_float)` block result to an i64, truncating a
-    /// float result (preserving the historical integer contract).
-    fn decode_block_i64((raw, is_float): (i64, bool)) -> i64 {
-        if is_float {
+    /// Decode a `(raw_bits, ret)` block result to an i64, truncating a float
+    /// result (preserving the historical integer contract). A chunk that leaves
+    /// no value reads as `0`, as it always has on these entry points.
+    fn decode_block_i64((raw, ret): (i64, BlockRet)) -> i64 {
+        if ret == BlockRet::Float {
             f64::from_bits(raw as u64) as i64
         } else {
             raw
         }
     }
 
-    /// Decode a `(raw_bits, ret_is_float)` block result to a typed [`BlockNum`].
-    fn decode_block_num(chunk: &Chunk, (raw, is_float): (i64, bool)) -> super::BlockNum {
-        if is_float {
+    /// Decode a `(raw_bits, ret)` block result to a typed [`BlockNum`]. A chunk
+    /// that leaves no value reads as `Int(0)` here; [`try_run_block_vm`] is the
+    /// entry point that tells the two apart.
+    fn decode_block_num(chunk: &Chunk, (raw, ret): (i64, BlockRet)) -> super::BlockNum {
+        if ret == BlockRet::Float {
             super::BlockNum::Float(f64::from_bits(raw as u64))
         } else if chunk_result_is_bool(chunk) {
             super::BlockNum::Bool(raw != 0)
         } else {
             super::BlockNum::Int(raw)
         }
+    }
+
+    /// The `VM::run` entry point: [`try_run_block_typed_kinded`], except that a
+    /// chunk which leaves its operand stack empty answers `Some(None)` — the
+    /// interpreter's `VMResult::Halted` — instead of `Some(Int(0))`, which is a
+    /// value the interpreter never produced.
+    pub(crate) fn try_run_block_vm(
+        chunk: &Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[super::SlotKind],
+    ) -> Option<Option<super::BlockNum>> {
+        let (raw, ret) = try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold())?;
+        Some((ret != BlockRet::Void).then(|| decode_block_num(chunk, (raw, ret))))
     }
 
     /// Whether a chunk's result is a `Value::Bool`.
@@ -6242,7 +6387,7 @@ mod cranelift_jit_impl {
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
         threshold: u32,
-    ) -> Option<(i64, bool)> {
+    ) -> Option<(i64, BlockRet)> {
         // Salt the key with the numeric policy: strict-mode native code traps on
         // integer overflow, coercing-mode native code wraps. Sharing one cache
         // entry between them would hand a strict VM code that silently wraps.
@@ -6255,10 +6400,22 @@ mod cranelift_jit_impl {
 
         BLOCK_CACHE_TLS.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
-            let entry = cache.entry(key).or_insert(BlockCacheEntry {
+            let entry = cache.entry(key).or_insert_with(|| BlockCacheEntry {
                 hot_count: 0,
                 compiled: None,
+                slots_needed: collect_slots(&chunk.ops)
+                    .last()
+                    .map_or(0, |&s| s as usize + 1),
             });
+
+            // A slot past the end of the buffer has no `i64` to load from or
+            // store to — the native code would read and write out of bounds
+            // (a null pointer for an empty buffer: `VM::run` on a frame with no
+            // slots crashed with SIGSEGV once warm). The interpreter reads such
+            // a slot as `Undef` and grows the frame on a write; run it there.
+            if slots.len() < entry.slots_needed {
+                return None;
+            }
 
             if let Some(ref compiled) = entry.compiled {
                 return Some(compiled.invoke_typed(slots));
@@ -6543,10 +6700,16 @@ mod cranelift_jit_impl {
         kinds.reserve(globals.len());
         numeric.reserve(globals.len());
         for v in globals {
+            // A `Bool` rides the buffer as `0|1` but is not a native number:
+            // the interpreter coerces it through `to_float` (`true + 1` is
+            // `Float(2.0)`), a trace would compute with it as an `Int`, and the
+            // spill would hand it back as `Int(0|1)`. Flagged non-numeric, the
+            // entry guard keeps out every trace that reads it and
+            // `write_globals_back` leaves it alone when no trace did.
             let (i, kind, is_num) = match v {
                 FuseValue::Int(n) => (*n, super::SlotKind::Int, true),
                 FuseValue::Float(f) => (f.to_bits() as i64, super::SlotKind::Float, true),
-                FuseValue::Bool(b) => (*b as i64, super::SlotKind::Int, true),
+                FuseValue::Bool(b) => (*b as i64, super::SlotKind::Int, false),
                 _ => (0, super::SlotKind::Int, false),
             };
             buf.push(i);
@@ -6561,6 +6724,7 @@ mod cranelift_jit_impl {
         anchor_ip: usize,
         slots: *mut i64,
         slot_kinds_at_anchor: &[super::SlotKind],
+        slot_native: Option<&[bool]>,
         globals: &[FuseValue],
         global_buf: &mut Vec<i64>,
         global_kinds: &mut Vec<super::SlotKind>,
@@ -6583,8 +6747,22 @@ mod cranelift_jit_impl {
                     // guard below can read it and the trace can address it.
                     fill_global_buffers(globals, global_buf, global_kinds, global_numeric);
                     // Entry guard: verify referenced slots still match
-                    // recorded types.
+                    // recorded types and — when the caller can say — that each
+                    // still holds a native `Int`/`Float` inside the frame. A
+                    // `Bool`, string or `Undef` reaches the slot buffer as an
+                    // `Int`-kinded `0|1`/`0` and would be computed with as one
+                    // where the interpreter coerces it; a slot past the end of
+                    // the frame has no buffer entry for the trace to address.
                     for &(slot, ty) in &entry.slot_types {
+                        let native = slot_native
+                            .map_or(true, |n| n.get(slot as usize).copied().unwrap_or(false));
+                        if !native {
+                            entry.deopt_count = entry.deopt_count.saturating_add(1);
+                            if entry.deopt_count >= 5 {
+                                entry.blacklisted = true;
+                            }
+                            return super::TraceLookup::GuardMismatch;
+                        }
                         let actual = slot_kinds_at_anchor
                             .get(slot as usize)
                             .copied()
@@ -7773,6 +7951,23 @@ mod cranelift_jit_impl {
                     Op::SetSlot(slot) => {
                         let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
                         let (v, ty) = stack.pop()?;
+                        // A caller slot's kind is fixed for the trace by the
+                        // entry guard: every later `GetSlot` reinterprets the
+                        // register under it and the spill hands it back to the
+                        // interpreter under it. A store of the other kind is
+                        // then read back as a bit pattern (`Int(2)` stored into a
+                        // Float-kinded slot came back `Float(1e-323)`), so refuse
+                        // the compile, as `Op::SetVar` does. Inlined callee
+                        // slots are always read back as `Int` (`Op::GetSlot`
+                        // above), so a float may not land in one either.
+                        let want = if frames.len() == 1 {
+                            slot_kind_of.get(slot).copied().unwrap_or(JitTy::Int)
+                        } else {
+                            JitTy::Int
+                        };
+                        if ty != want {
+                            return None;
+                        }
                         // Coerce stored value to i64 bit pattern. For Int
                         // values this is identity; for Float values we
                         // bit-cast (preserving the f64's bit pattern).
@@ -8428,6 +8623,10 @@ impl JitCompiler {
 
     /// Try to compile and run a chunk via the linear JIT.
     /// Returns `Some(Value)` on success, `None` if not eligible or JIT feature disabled.
+    ///
+    /// `slots` is read-only: a chunk that addresses a slot past `slots.len()`
+    /// declines, and slot writes made by the chunk land in a private copy that
+    /// is discarded after the run.
     #[cfg(feature = "jit")]
     /// Public method `try_run_linear` — see the implementing block's surrounding context for the call contract.
     pub fn try_run_linear(&self, chunk: &crate::Chunk, slots: &[i64]) -> Option<crate::Value> {
@@ -8595,6 +8794,19 @@ impl JitCompiler {
         cranelift_jit_impl::try_run_block_eager_kinded(chunk, slots, slot_kinds)
     }
 
+    /// `VM::run`'s block entry point: [`Self::try_run_block_typed_kinded`], except
+    /// that a chunk which leaves no value answers `Some(None)` (the
+    /// interpreter's `VMResult::Halted`) rather than `Some(BlockNum::Int(0))`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn try_run_block_vm(
+        &self,
+        chunk: &crate::Chunk,
+        slots: &mut [i64],
+        slot_kinds: &[SlotKind],
+    ) -> Option<Option<BlockNum>> {
+        cranelift_jit_impl::try_run_block_vm(chunk, slots, slot_kinds)
+    }
+
     /// Typed slot-kind-aware [`Self::try_run_block_kinded`]: returns the chunk result
     /// as a [`BlockNum`], preserving float results exactly instead of truncating
     /// them to `i64`. Use this when the chunk's result may be a float value (the
@@ -8739,6 +8951,42 @@ impl JitCompiler {
         global_numeric: &mut Vec<bool>,
         deopt_info: &mut DeoptInfo,
     ) -> TraceLookup {
+        self.trace_lookup_in_frame(
+            chunk,
+            anchor_ip,
+            slots,
+            slot_kinds_at_anchor,
+            None,
+            globals,
+            global_buf,
+            global_kinds,
+            global_numeric,
+            deopt_info,
+        )
+    }
+
+    /// [`JitCompiler::trace_lookup`] with the frame's per-slot nativeness:
+    /// `slot_native[i]` is true when slot `i` holds a `Value::Int` or
+    /// `Value::Float`. The entry guard then also refuses a trace that
+    /// references a slot holding anything else (a `Bool`, a string, `Undef`)
+    /// or a slot past the end of `slot_native` — the buffer encodes those as
+    /// an `Int` the interpreter would not have computed with. `None` skips
+    /// that half of the guard (the public entry point's contract).
+    #[cfg(feature = "jit")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn trace_lookup_in_frame(
+        &self,
+        chunk: &crate::Chunk,
+        anchor_ip: usize,
+        slots: &mut [i64],
+        slot_kinds_at_anchor: &[SlotKind],
+        slot_native: Option<&[bool]>,
+        globals: &[crate::Value],
+        global_buf: &mut Vec<i64>,
+        global_kinds: &mut Vec<SlotKind>,
+        global_numeric: &mut Vec<bool>,
+        deopt_info: &mut DeoptInfo,
+    ) -> TraceLookup {
         let ptr = if slots.is_empty() {
             std::ptr::null_mut()
         } else {
@@ -8749,6 +8997,7 @@ impl JitCompiler {
             anchor_ip,
             ptr,
             slot_kinds_at_anchor,
+            slot_native,
             globals,
             global_buf,
             global_kinds,

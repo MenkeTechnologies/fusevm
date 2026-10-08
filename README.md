@@ -325,6 +325,8 @@ if jit.is_linear_eligible(&chunk) {
 | Stack | `Pop`, `Dup`, `Swap`, `Rot` |
 | Slots | `GetSlot`, `SetSlot`, `PreIncSlot`, `PreIncSlotVoid`, `AddAssignSlotVoid` |
 
+The `slots` argument is read-only. A chunk that addresses a slot past `slots.len()` declines (`None`); slot writes the chunk makes go to a private copy and are visible only to later reads in the same run.
+
 Int/float promotion: when either operand is float, both are promoted to `f64`. Cranelift emits `iadd`/`fadd`/`fcvt_from_sint` as needed. Runtime helpers for `Pow` (wrapping integer + `f64::powf`) and `Mod` (float `fmod`).
 
 ### JIT tier ladder
@@ -354,7 +356,7 @@ The block (default **1**) and tracing (default **50**) warmup thresholds are how
 
 For workloads that run the same scripts over and over, combine a low warmup with the **`jit-disk-cache`** feature (on by default): the warmup decides *when* a tier engages, and the disk cache makes the resulting native code free to reload on the next run — so you get AOT-like speed without explicitly AOT-compiling. Setting `FUSEVM_JIT_BLOCK_THRESHOLD=0` is the most aggressive: every block-eligible chunk is compiled to native on its first invocation and reloaded from `~/.cache/fusevm-jit` on subsequent runs. The trade-off is a one-time codegen cost the very first time a chunk is ever seen (paid once, then cached), so raise the thresholds again for scripts that genuinely run only once.
 
-Tracing JIT is opt-in per VM (`vm.enable_tracing_jit()`). The recorder anchors at backward branches, captures the executed op sequence on the next iteration through the header, and installs a compiled trace that runs the loop body in native code until the loop's exit condition becomes false. Slot type changes between invocations cause the entry guard to refuse the trace; after 5 such guard mismatches the trace is blacklisted and never retried.
+Tracing JIT is opt-in per VM (`vm.enable_tracing_jit()`). The recorder anchors at backward branches, captures the executed op sequence on the next iteration through the header, and installs a compiled trace that runs the loop body in native code until the loop's exit condition becomes false. Slot type changes between invocations, and a referenced slot that no longer holds a native `Int`/`Float` (a `Bool`, string, `Undef`, or a slot past the end of the frame), cause the entry guard to refuse the trace; a recorded body that stores a value of the other kind into a slot (an `Int` slot holding a float mid-iteration) is refused at compile time, since every read and the spill reinterpret the register under the anchor kind; after 5 such guard mismatches the trace is blacklisted and never retried.
 
 **Cross-call inlining (phase 2).** `Op::Call` to a sub-entry resolves to the callee's bytecode IP at recording time, and the callee body inlines into the trace IR. Each inlined frame gets its own slot-variable scope (caller slots eagerly promoted from the slot pointer; callee slots lazily allocated zero-initialized). `Op::Return` and `Op::ReturnValue` truncate the abstract stack to the frame's entry mark, mirroring interpreter semantics. Args travel via the value stack — no movement to slots is required.
 
@@ -376,7 +378,7 @@ Tracing JIT is opt-in per VM (`vm.enable_tracing_jit()`). The recorder anchors a
 body touches a global. A trace records the globals it referenced and promotes
 them to native registers for the duration of the loop, spilling back on exit or
 deopt. The entry guard is extended with a per-referenced-index check — whether
-each referenced global is still a number — rather than the whole-frame check
+each referenced global is still a native `Int`/`Float` (a `Bool` is not) — rather than the whole-frame check
 used for slots, so an unrelated global changing type does not invalidate the
 trace. `TraceMetadata` carries a `global_kinds_at_anchor` fingerprint beside the
 existing slot fingerprint; it is `serde(default)`, so a trace persisted by a
@@ -457,7 +459,10 @@ it differently by design:
   terminal ones included. Its results are stored into raw `i64` slots and read
   back under each slot's own kind, so a boolean landing in a float-kinded slot
   is read as an `f64` bit pattern — the worst of the failures below, and not
-  something a result-kind channel fixes.
+  something a result-kind channel fixes. The same holds on the way *in*: a
+  `Bool` (or string, or `Undef`) in a slot or global a trace references fails
+  the entry guard rather than reaching native code as an `Int`, and one the
+  trace does not reference is left untouched by its spill.
 
   Before that rule, `VM::run` boxed `BlockNum::Int(n)` as `Value::Int(n)` before
   any frontend saw it, so a boolean-valued chunk changed variant on its second
@@ -488,7 +493,11 @@ it differently by design:
 with the operand edges — `0`, `-1`, `i64::MIN`, `2^53+1`, `-0.0`, `±1e30`,
 booleans — run through the interpreter, the linear JIT, the block JIT, the
 tracing JIT, and the AOT compiler, compared on the `Value` variant and on raw
-float bits.
+float bits. Beyond single ops it drives computed `NaN`/`±inf` operands,
+multi-op sequences whose kinds change mid-chunk, slots and globals holding
+every `Value` kind (including ones the chunk never touches, which must come
+back untouched), slots past the end of the frame, and repeated `VM::run` calls
+on one VM so a block-tier warm-up cannot change an answer.
 
 A tier that declines a case is skipped, never scored as agreement — so a
 harness whose corpus never reaches a tier would report a clean run it never
