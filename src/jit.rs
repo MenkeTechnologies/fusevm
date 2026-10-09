@@ -786,6 +786,185 @@ pub(crate) fn awk_bit_code(op: &crate::op::Op) -> Option<u8> {
     })
 }
 
+// ── Process-global JIT / cache counters ──
+
+#[cfg(feature = "jit")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Point-in-time snapshot of the process-global JIT counters, from [`stats`].
+///
+/// Every field is a monotonically increasing count since process start (or the
+/// last [`reset_stats`]), summed over all threads. The counters are plain
+/// `Relaxed` atomics bumped on the compile, cache-lookup, disk, and
+/// interpreter-fallback paths, so a snapshot taken while other threads run is
+/// not a single consistent cut: each field is individually exact, but fields
+/// may reflect slightly different instants.
+///
+/// "Cache" here means the per-thread in-memory tier caches; "disk" means the
+/// persistent native-code cache (`jit-disk-cache` feature). Without that
+/// feature the `disk_*` and `native_builds` fields stay `0`.
+#[cfg(feature = "jit")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JitStats {
+    /// Linear-tier chunks compiled in memory by Cranelift.
+    pub linear_compiles: u64,
+    /// Block-tier chunks compiled in memory by Cranelift.
+    pub block_compiles: u64,
+    /// Trace-tier recordings compiled in memory by Cranelift.
+    pub trace_compiles: u64,
+    /// Relocatable native blobs produced by Cranelift for the disk cache
+    /// (any tier). These are the codegen runs the disk cache exists to skip on
+    /// the next process start.
+    pub native_builds: u64,
+
+    /// Linear-tier lookups answered by an already-compiled entry.
+    pub linear_cache_hits: u64,
+    /// Linear-tier lookups that found no compiled entry (each is followed by a
+    /// disk load or a compile).
+    pub linear_cache_misses: u64,
+    /// Linear-tier calls declined (strict numeric mode or an ineligible /
+    /// uncompilable chunk); the caller runs the interpreter instead.
+    pub linear_fallbacks: u64,
+
+    /// Block-tier calls answered by an already-compiled entry.
+    pub block_cache_hits: u64,
+    /// Block-tier calls that reached the compile/disk-load step (the chunk had
+    /// crossed the warmup threshold and had no compiled entry yet).
+    pub block_cache_misses: u64,
+    /// Block-tier calls declined because the chunk is still below the warmup
+    /// threshold; the interpreter runs it.
+    pub block_warmups: u64,
+    /// Block-tier calls declined for any other reason (frame shorter than the
+    /// chunk's highest slot, or compilation failed); the interpreter runs it.
+    pub block_fallbacks: u64,
+
+    /// Trace lookups that ran a compiled trace.
+    pub trace_hits: u64,
+    /// Trace lookups refused by the entry guard (slot/global kind changed).
+    pub trace_guard_fails: u64,
+    /// Recordings abandoned (uncompilable, or the recorder gave up).
+    pub trace_aborts: u64,
+
+    /// Native blobs loaded from the disk cache (no Cranelift codegen).
+    pub disk_loads: u64,
+    /// Disk-cache lookups that found no usable blob and fell through to a
+    /// build.
+    pub disk_misses: u64,
+    /// Native blobs written to the disk cache.
+    pub disk_stores: u64,
+    /// Chunks the native cache could not represent (unsupported relocation or
+    /// ineligible); they fall back to the in-memory JIT.
+    pub disk_rejects: u64,
+}
+
+/// The live counters behind [`JitStats`].
+#[cfg(feature = "jit")]
+struct Counters {
+    linear_compiles: AtomicU64,
+    block_compiles: AtomicU64,
+    trace_compiles: AtomicU64,
+    native_builds: AtomicU64,
+    linear_cache_hits: AtomicU64,
+    linear_cache_misses: AtomicU64,
+    linear_fallbacks: AtomicU64,
+    block_cache_hits: AtomicU64,
+    block_cache_misses: AtomicU64,
+    block_warmups: AtomicU64,
+    block_fallbacks: AtomicU64,
+    trace_hits: AtomicU64,
+    trace_guard_fails: AtomicU64,
+    trace_aborts: AtomicU64,
+    disk_loads: AtomicU64,
+    disk_misses: AtomicU64,
+    disk_stores: AtomicU64,
+    disk_rejects: AtomicU64,
+}
+
+#[cfg(feature = "jit")]
+static COUNTERS: Counters = Counters {
+    linear_compiles: AtomicU64::new(0),
+    block_compiles: AtomicU64::new(0),
+    trace_compiles: AtomicU64::new(0),
+    native_builds: AtomicU64::new(0),
+    linear_cache_hits: AtomicU64::new(0),
+    linear_cache_misses: AtomicU64::new(0),
+    linear_fallbacks: AtomicU64::new(0),
+    block_cache_hits: AtomicU64::new(0),
+    block_cache_misses: AtomicU64::new(0),
+    block_warmups: AtomicU64::new(0),
+    block_fallbacks: AtomicU64::new(0),
+    trace_hits: AtomicU64::new(0),
+    trace_guard_fails: AtomicU64::new(0),
+    trace_aborts: AtomicU64::new(0),
+    disk_loads: AtomicU64::new(0),
+    disk_misses: AtomicU64::new(0),
+    disk_stores: AtomicU64::new(0),
+    disk_rejects: AtomicU64::new(0),
+};
+
+/// Add one to a counter (`Relaxed`).
+#[cfg(feature = "jit")]
+#[inline]
+fn bump(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot the process-global JIT counters. See [`JitStats`].
+#[cfg(feature = "jit")]
+pub fn stats() -> JitStats {
+    let c = &COUNTERS;
+    let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
+    JitStats {
+        linear_compiles: get(&c.linear_compiles),
+        block_compiles: get(&c.block_compiles),
+        trace_compiles: get(&c.trace_compiles),
+        native_builds: get(&c.native_builds),
+        linear_cache_hits: get(&c.linear_cache_hits),
+        linear_cache_misses: get(&c.linear_cache_misses),
+        linear_fallbacks: get(&c.linear_fallbacks),
+        block_cache_hits: get(&c.block_cache_hits),
+        block_cache_misses: get(&c.block_cache_misses),
+        block_warmups: get(&c.block_warmups),
+        block_fallbacks: get(&c.block_fallbacks),
+        trace_hits: get(&c.trace_hits),
+        trace_guard_fails: get(&c.trace_guard_fails),
+        trace_aborts: get(&c.trace_aborts),
+        disk_loads: get(&c.disk_loads),
+        disk_misses: get(&c.disk_misses),
+        disk_stores: get(&c.disk_stores),
+        disk_rejects: get(&c.disk_rejects),
+    }
+}
+
+/// Zero every counter. Intended for tests; counters are process-global, so a
+/// reset also discards counts accumulated by other threads.
+#[cfg(feature = "jit")]
+pub fn reset_stats() {
+    let c = &COUNTERS;
+    for a in [
+        &c.linear_compiles,
+        &c.block_compiles,
+        &c.trace_compiles,
+        &c.native_builds,
+        &c.linear_cache_hits,
+        &c.linear_cache_misses,
+        &c.linear_fallbacks,
+        &c.block_cache_hits,
+        &c.block_cache_misses,
+        &c.block_warmups,
+        &c.block_fallbacks,
+        &c.trace_hits,
+        &c.trace_guard_fails,
+        &c.trace_aborts,
+        &c.disk_loads,
+        &c.disk_misses,
+        &c.disk_stores,
+        &c.disk_rejects,
+    ] {
+        a.store(0, Ordering::Relaxed);
+    }
+}
+
 // ── Cranelift JIT implementation (feature-gated) ──
 
 #[cfg(feature = "jit")]
@@ -3329,6 +3508,7 @@ mod cranelift_jit_impl {
                 LinearRun::SlotsF(unsafe { std::mem::transmute::<*const u8, LinearFnSlotsF>(ptr) })
             }
         };
+        super::bump(&super::COUNTERS.linear_compiles);
         Some(CompiledLinear {
             backing: LinearBacking::Jit(module),
             run,
@@ -3351,6 +3531,7 @@ mod cranelift_jit_impl {
         // nothing back to the host, so it has no strict lowering: a strict VM
         // must interpret instead.
         if super::strict_numeric() {
+            super::bump(&super::COUNTERS.linear_fallbacks);
             return None;
         }
         let key = chunk.op_hash;
@@ -3361,8 +3542,10 @@ mod cranelift_jit_impl {
             cache.get(&key).map(|c| c.run(slots))
         });
         if let Some(v) = cached {
+            super::bump(&super::COUNTERS.linear_cache_hits);
             return v;
         }
+        super::bump(&super::COUNTERS.linear_cache_misses);
 
         // Disk-cache path (opt-in): reuse or build relocatable native code
         // persisted across process restarts, skipping Cranelift codegen.
@@ -3382,7 +3565,10 @@ mod cranelift_jit_impl {
         }
 
         // Cache miss: compile, invoke, store
-        let compiled = compile_linear(chunk)?;
+        let Some(compiled) = compile_linear(chunk) else {
+            super::bump(&super::COUNTERS.linear_fallbacks);
+            return None;
+        };
         let value = compiled.run(slots);
 
         LINEAR_CACHE_TLS.with(|cache_cell| {
@@ -3558,6 +3744,7 @@ mod cranelift_jit_impl {
             // `ctx` ends before we read its name table.
             let (code, raw): (Vec<u8>, Vec<(u32, Reloc, i64, Option<ExternalName>)>) = {
                 let compiled = ctx.compile(isa, &mut Default::default()).ok()?;
+                super::super::bump(&super::super::COUNTERS.native_builds);
                 let bytes = compiled.code_buffer().to_vec();
                 let relocs = compiled
                     .buffer
@@ -4210,10 +4397,13 @@ mod cranelift_jit_impl {
             if std::fs::write(&tmp, &bytes).is_ok() {
                 if std::fs::rename(&tmp, cache_path(dir, tag, op_hash, sub)).is_err() {
                     let _ = std::fs::remove_file(&tmp);
-                } else if seq.is_multiple_of(PRUNE_INTERVAL) {
-                    // Amortized cap enforcement: scan + evict roughly once per
-                    // PRUNE_INTERVAL writes rather than on every write.
-                    let _ = prune(dir, max_bytes());
+                } else {
+                    super::super::bump(&super::super::COUNTERS.disk_stores);
+                    if seq.is_multiple_of(PRUNE_INTERVAL) {
+                        // Amortized cap enforcement: scan + evict roughly once per
+                        // PRUNE_INTERVAL writes rather than on every write.
+                        let _ = prune(dir, max_bytes());
+                    }
                 }
             } else {
                 let _ = std::fs::remove_file(&tmp);
@@ -4451,10 +4641,15 @@ mod cranelift_jit_impl {
             let slot_use = LinearSlotUse::of(&chunk.ops);
             if let Some(blob) = read_blob(dir, "lin", chunk.op_hash, 0, 0) {
                 if let Some(compiled) = load_native(&blob, ret_is_bool, slot_use) {
+                    super::super::bump(&super::super::COUNTERS.disk_loads);
                     return Some(compiled);
                 }
             }
-            let blob = compile_linear_native(chunk)?;
+            super::super::bump(&super::super::COUNTERS.disk_misses);
+            let Some(blob) = compile_linear_native(chunk) else {
+                super::super::bump(&super::super::COUNTERS.disk_rejects);
+                return None;
+            };
             write_blob(dir, "lin", chunk.op_hash, 0, &blob);
             load_native(&blob, ret_is_bool, slot_use)
         }
@@ -4473,10 +4668,15 @@ mod cranelift_jit_impl {
             let kinds_hash = slot_kinds_hash(slot_kinds) ^ crate::jit::numeric_policy_salt();
             if let Some(blob) = read_blob(dir, "blk", chunk.op_hash, kinds_hash, kinds_hash) {
                 if let Some(compiled) = load_native_block(&blob) {
+                    super::super::bump(&super::super::COUNTERS.disk_loads);
                     return Some(compiled);
                 }
             }
-            let blob = compile_block_native(chunk, slot_kinds)?;
+            super::super::bump(&super::super::COUNTERS.disk_misses);
+            let Some(blob) = compile_block_native(chunk, slot_kinds) else {
+                super::super::bump(&super::super::COUNTERS.disk_rejects);
+                return None;
+            };
             write_blob(dir, "blk", chunk.op_hash, kinds_hash, &blob);
             load_native_block(&blob)
         }
@@ -4506,9 +4706,11 @@ mod cranelift_jit_impl {
             let meta_hash = meta_hash ^ crate::jit::numeric_policy_salt();
             if let Some(blob) = read_blob(dir, "trc", op_hash, sub, meta_hash) {
                 if let Some(compiled) = load_native_trace(&blob) {
+                    super::super::bump(&super::super::COUNTERS.disk_loads);
                     return Some(compiled);
                 }
             }
+            super::super::bump(&super::super::COUNTERS.disk_misses);
             let blob = compile_trace_native(
                 ops,
                 recorded_ips,
@@ -4518,7 +4720,11 @@ mod cranelift_jit_impl {
                 global_types,
                 constants,
                 meta_hash,
-            )?;
+            )
+            .or_else(|| {
+                super::super::bump(&super::super::COUNTERS.disk_rejects);
+                None
+            })?;
             write_blob(dir, "trc", op_hash, sub, &blob);
             load_native_trace(&blob)
         }
@@ -6243,6 +6449,7 @@ mod cranelift_jit_impl {
         // back in the i64 register as its f64 bit pattern; `ret` tells a typed
         // caller to decode it.
         let run = BlockRun::SlotsI(unsafe { std::mem::transmute::<*const u8, BlockFnSlotsI>(ptr) });
+        super::bump(&super::COUNTERS.block_compiles);
         Some(CompiledBlock {
             backing: BlockBacking::Jit(module),
             run,
@@ -6414,17 +6621,21 @@ mod cranelift_jit_impl {
             // slots crashed with SIGSEGV once warm). The interpreter reads such
             // a slot as `Undef` and grows the frame on a write; run it there.
             if slots.len() < entry.slots_needed {
+                super::bump(&super::COUNTERS.block_fallbacks);
                 return None;
             }
 
             if let Some(ref compiled) = entry.compiled {
+                super::bump(&super::COUNTERS.block_cache_hits);
                 return Some(compiled.invoke_typed(slots));
             }
 
             entry.hot_count = entry.hot_count.saturating_add(1);
             if entry.hot_count <= threshold {
+                super::bump(&super::COUNTERS.block_warmups);
                 return None; // not hot yet — caller falls back to interpreter
             }
+            super::bump(&super::COUNTERS.block_cache_misses);
 
             // Disk-cache path (on by default): reuse or build relocatable native
             // code persisted across process restarts, skipping Cranelift codegen.
@@ -6443,7 +6654,10 @@ mod cranelift_jit_impl {
             }
 
             // Compile on threshold cross
-            let compiled = compile_block(chunk, slot_kinds)?;
+            let Some(compiled) = compile_block(chunk, slot_kinds) else {
+                super::bump(&super::COUNTERS.block_fallbacks);
+                return None;
+            };
             let result = compiled.invoke_typed(slots);
             entry.compiled = Some(Box::new(compiled));
             Some(result)
@@ -6761,6 +6975,7 @@ mod cranelift_jit_impl {
                             if entry.deopt_count >= 5 {
                                 entry.blacklisted = true;
                             }
+                            super::bump(&super::COUNTERS.trace_guard_fails);
                             return super::TraceLookup::GuardMismatch;
                         }
                         let actual = slot_kinds_at_anchor
@@ -6773,6 +6988,7 @@ mod cranelift_jit_impl {
                             if entry.deopt_count >= 5 {
                                 entry.blacklisted = true;
                             }
+                            super::bump(&super::COUNTERS.trace_guard_fails);
                             return super::TraceLookup::GuardMismatch;
                         }
                     }
@@ -6793,6 +7009,7 @@ mod cranelift_jit_impl {
                             if entry.deopt_count >= 5 {
                                 entry.blacklisted = true;
                             }
+                            super::bump(&super::COUNTERS.trace_guard_fails);
                             return super::TraceLookup::GuardMismatch;
                         }
                     }
@@ -6806,6 +7023,7 @@ mod cranelift_jit_impl {
                     } else {
                         global_buf.as_mut_ptr()
                     };
+                    super::bump(&super::COUNTERS.trace_hits);
                     let resume_ip = compiled.invoke(slots, gptr, deopt_info) as usize;
                     return super::TraceLookup::Ran { resume_ip };
                 }
@@ -6853,6 +7071,7 @@ mod cranelift_jit_impl {
         let key = (chunk.op_hash, anchor_ip);
         TRACE_CACHE_TLS.with(|cache_cell| {
             if let Some(entry) = cache_cell.borrow_mut().get_mut(&key) {
+                super::bump(&super::COUNTERS.trace_aborts);
                 entry.aborted = true;
             }
         });
@@ -7590,7 +7809,7 @@ mod cranelift_jit_impl {
         constants: &[FuseValue],
     ) -> Option<CompiledTrace> {
         let _ = close_anchor_ip;
-        compile_trace_inner(
+        let compiled = compile_trace_inner(
             ops,
             recorded_ips,
             fallthrough_ip,
@@ -7598,7 +7817,11 @@ mod cranelift_jit_impl {
             slot_types,
             global_types,
             constants,
-        )
+        );
+        if compiled.is_some() {
+            super::bump(&super::COUNTERS.trace_compiles);
+        }
+        compiled
     }
 
     /// Content hash of everything that determines a trace's native code, used

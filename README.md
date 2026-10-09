@@ -406,6 +406,20 @@ The cached blob's fingerprint hashes the crate version, so a cache written by
 an older fusevm is never loaded by a newer one — a lowering fix can't be
 resurrected from a warm cache.
 
+**JIT counters (`jit` feature).** Process-global `Relaxed` atomic counters, summed over all threads, are bumped on compile, cache-lookup, disk, and interpreter-fallback paths — never per op. `fusevm::jit::stats()` returns a `Copy` snapshot (`JitStats`, `Debug + Default`); `fusevm::jit::reset_stats()` zeroes them (for tests).
+
+| `JitStats` field | Counts |
+|------|--------|
+| `linear_compiles` / `block_compiles` / `trace_compiles` | In-memory Cranelift compiles per tier. |
+| `native_builds` | Relocatable blobs Cranelift produced for the disk cache (any tier). |
+| `linear_cache_hits` / `linear_cache_misses` | Linear-tier lookups answered by / missing a compiled entry. |
+| `linear_fallbacks` | Linear calls declined (strict numeric mode, ineligible or uncompilable chunk). |
+| `block_cache_hits` / `block_cache_misses` | Block calls answered by a compiled entry / that reached compile-or-disk-load. |
+| `block_warmups` | Block calls declined because the chunk is below the warmup threshold. |
+| `block_fallbacks` | Block calls declined for another reason (short frame, compile failure). |
+| `trace_hits` / `trace_guard_fails` / `trace_aborts` | Compiled traces run / refused by the entry guard / recordings abandoned. |
+| `disk_loads` / `disk_misses` / `disk_stores` / `disk_rejects` | Blobs loaded / lookups with no usable blob / blobs written / chunks the native cache cannot represent. Always `0` without `jit-disk-cache`. |
+
 ### The interpreter is the specification
 
 A chunk can run interpreted or native depending only on how hot it has become,
