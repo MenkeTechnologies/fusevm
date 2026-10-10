@@ -143,8 +143,10 @@ fn chunk_serde_with_ops_and_constants() {
 }
 
 #[test]
-fn chunk_serde_op_hash_is_skipped_but_recomputable() {
-    // op_hash has #[serde(skip)] — deserialized chunk has op_hash=0.
+fn chunk_serde_op_hash_is_recomputed_on_deserialize() {
+    // op_hash is not on the wire (#[serde(skip)]), so deserializing must
+    // recompute it: a zero hash is one JIT cache key for every chunk that came
+    // off the wire.
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
     let chunk = b.build();
@@ -152,8 +154,7 @@ fn chunk_serde_op_hash_is_skipped_but_recomputable() {
 
     let json = serde_json::to_string(&chunk).expect("serialize");
     let chunk2: Chunk = serde_json::from_str(&json).expect("deserialize");
-    // After round-trip, op_hash is reset to default (0).
-    assert_eq!(chunk2.op_hash, 0);
+    assert_eq!(chunk2.op_hash, chunk.op_hash);
     // But ops are preserved.
     assert_eq!(chunk.ops, chunk2.ops);
 }

@@ -4932,6 +4932,31 @@ mod cranelift_jit_impl {
         leaders
     }
 
+    /// Whether every `Div`/`Mod` in `ops` is reached only by falling through
+    /// the op before it — that is, no jump lands on it.
+    ///
+    /// [`safe_const_div`] and [`safe_const_mod`] judge a divisor by the op
+    /// *immediately before* the division. That is the divisor only on the path
+    /// that falls through from it. A jump to the division skips the constant
+    /// load and arrives with some other value on the stack, so `c ? x : 11`
+    /// followed by `%` read as "`% 11`" while the `x` arm divided by whatever
+    /// `x` held — zero, once — and the native `srem` trapped (SIGILL) where the
+    /// interpreter answers `0`.
+    ///
+    /// A chunk with a joined division is declined whole; the interpreter runs
+    /// it. Not applied to a recorded trace, which is a straight line: its `ops`
+    /// are in execution order and a jump target there is a chunk ip, not an
+    /// index into the trace.
+    fn divisions_are_not_join_points(ops: &[Op]) -> bool {
+        if !ops.iter().any(|op| matches!(op, Op::Div | Op::Mod)) {
+            return true;
+        }
+        let leaders = find_leaders(ops);
+        ops.iter()
+            .enumerate()
+            .all(|(ip, op)| !matches!(op, Op::Div | Op::Mod) || !leaders.contains(&ip))
+    }
+
     /// Whether the `Op::Mod` at `ip` divides by a compile-time constant the
     /// native lowering handles exactly as the interpreter would.
     ///
@@ -5266,6 +5291,7 @@ mod cranelift_jit_impl {
         // PopFrame` answered `Int(1)` where the interpreter answers `Int(7)`.
         let result = !ops.is_empty()
             && !ops.iter().any(|op| matches!(op, Op::PopFrame))
+            && divisions_are_not_join_points(ops)
             && (0..ops.len()).all(|ip| is_block_eligible_op_at(ops, ip, true));
         BLOCK_ELIGIBLE_TLS.with(|c| c.borrow_mut().insert(key, result));
         result
@@ -5304,6 +5330,9 @@ mod cranelift_jit_impl {
         // Verify all jumps within the region target inside the region.
         // Rebase jumps locally if so; otherwise reject.
         let (s, e) = best?;
+        if !divisions_are_not_join_points(ops) {
+            return None;
+        }
         for op in &ops[s..e] {
             match op {
                 Op::Jump(t)
@@ -8283,7 +8312,7 @@ mod cranelift_jit_impl {
                             JitTy::Int => cond,
                             JitTy::Float => {
                                 let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
-                                let p = bcx.ins().fcmp(FloatCC::OrderedNotEqual, cond, z);
+                                let p = bcx.ins().fcmp(FloatCC::NotEqual, cond, z);
                                 let one = bcx.ins().iconst(types::I64, 1);
                                 let zero = bcx.ins().iconst(types::I64, 0);
                                 bcx.ins().select(p, one, zero)
@@ -8413,7 +8442,7 @@ mod cranelift_jit_impl {
                         JitTy::Int => cond,
                         JitTy::Float => {
                             let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
-                            let p = bcx.ins().fcmp(FloatCC::OrderedNotEqual, cond, z);
+                            let p = bcx.ins().fcmp(FloatCC::NotEqual, cond, z);
                             let one = bcx.ins().iconst(types::I64, 1);
                             let zero = bcx.ins().iconst(types::I64, 0);
                             bcx.ins().select(p, one, zero)
@@ -8450,7 +8479,7 @@ mod cranelift_jit_impl {
                         JitTy::Int => cond,
                         JitTy::Float => {
                             let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
-                            let p = bcx.ins().fcmp(FloatCC::OrderedNotEqual, cond, z);
+                            let p = bcx.ins().fcmp(FloatCC::NotEqual, cond, z);
                             let one = bcx.ins().iconst(types::I64, 1);
                             let zero = bcx.ins().iconst(types::I64, 0);
                             bcx.ins().select(p, one, zero)

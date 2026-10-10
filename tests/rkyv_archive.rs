@@ -96,10 +96,10 @@ fn chunk_survives_archive_validate_and_deserialize() {
     assert_eq!(restored.sub_chunks[0].constants, original.sub_chunks[0].constants);
 }
 
-/// `op_hash` is `#[serde(skip)]`, so the two codecs DISAGREE on it by
-/// construction. Pinned so nobody "fixes" one side without noticing.
+/// `op_hash` is `#[serde(skip)]` but archived by rkyv. The two codecs must still
+/// hand back the same hash: serde recomputes it, rkyv carries it.
 #[test]
-fn op_hash_is_archived_by_rkyv_but_dropped_by_serde() {
+fn op_hash_agrees_between_rkyv_and_serde() {
     let original = nasty_chunk();
     assert_eq!(original.op_hash, 0xDEAD_BEEF);
 
@@ -108,5 +108,10 @@ fn op_hash_is_archived_by_rkyv_but_dropped_by_serde() {
     assert_eq!(archived.op_hash, 0xDEAD_BEEF, "rkyv archives op_hash");
 
     let round: Chunk = bincode::deserialize(&bincode::serialize(&original).unwrap()).unwrap();
-    assert_eq!(round.op_hash, 0, "serde skips op_hash, so it comes back zero");
+    assert_eq!(
+        round.op_hash,
+        round.compute_op_hash(),
+        "serde recomputes op_hash from the ops and constants"
+    );
+    assert_ne!(round.op_hash, 0);
 }

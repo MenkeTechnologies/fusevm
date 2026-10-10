@@ -4330,6 +4330,14 @@ where
         fusevm_aot_store_global_float as *const u8,
     );
     builder.symbol("fusevm_aot_resume", fusevm_aot_resume as *const u8);
+    builder.symbol(
+        "fusevm_aot_load_slot_int",
+        fusevm_aot_load_slot_int as *const u8,
+    );
+    builder.symbol(
+        "fusevm_aot_guard_taken",
+        fusevm_aot_guard_taken as *const u8,
+    );
     builder.symbol("fusevm_aot_pop_int", fusevm_aot_pop_int as *const u8);
     builder.symbol(
         "fusevm_aot_push_status",

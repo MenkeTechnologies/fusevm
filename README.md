@@ -444,6 +444,13 @@ declined the same way unless its divisor is a constant with `|k| >= 2` or a
 float, because native `srem` traps on a zero divisor and on `i64::MIN % -1`
 where the interpreter answers `0`.
 
+The constant must be the op that *falls through* into the division. A jump
+that lands on the `Div`/`Mod` skips the constant load and arrives with some other
+value as the divisor — `c ? x : 11` feeding `%` is not `% 11` on the `x` arm —
+so a chunk with any jump target on a `Div` or `Mod` is declined whole and runs
+in the interpreter. (A recorded trace is a straight line, so this concerns only
+the block tier and JIT regions.)
+
 `tests/jit_block.rs` pins tier agreement for these directly: each case runs
 with `block_threshold` at `u32::MAX` (interpreter) and `0` (native) and
 requires the two results to match.
@@ -512,6 +519,22 @@ multi-op sequences whose kinds change mid-chunk, slots and globals holding
 every `Value` kind (including ones the chunk never touches, which must come
 back untouched), slots past the end of the frame, and repeated `VM::run` calls
 on one VM so a block-tier warm-up cannot change an answer.
+
+`tests/tier_fuzz.rs` is the generative counterpart. A seeded generator builds
+structured programs — nested counter loops (plain and through the fused
+compare-and-jump forms), `if`/`else`, conditional and short-circuit expressions,
+the fused modular ops, stack shuffles, host-free AWK ops including the
+zero-divisor and negative-shift traps, float and integer slots, and, in the
+mixed profile, strings, arrays, hashes and globals that no native tier lowers.
+Each program runs on the interpreter and then through the block tier via
+`VM::run` (cold and warm), the tracing tier with a low threshold, the direct
+`try_run_block*` entry points (result and slot buffer), the linear tier, the AOT
+compiler, and native code persisted by one thread and reloaded by another; bincode,
+JSON and (with `rkyv-archive`) rkyv round-trips of the chunk must execute
+identically. A panic in the interpreter is reported as a divergence. Programs are
+a pure function of the seed; `FUSEVM_FUZZ_SEEDS` and `FUSEVM_FUZZ_SEED_BASE`
+widen or move the sweep. Each native sweep also asserts that a minimum share of
+the programs actually reached native code, for the reason given below.
 
 A tier that declines a case is skipped, never scored as agreement — so a
 harness whose corpus never reaches a tier would report a clean run it never
@@ -708,6 +731,13 @@ Construct arrays with `Value::array(vec)`; read with `as_array()`, mutate with `
 This is what keeps per-element iteration linear. A frontend that lowers `seq[i]` as "load the collection, then index it" used to pay one full copy of the sequence per iteration — O(n) per step, O(n²) overall. Measured on a 16,000-element indexed read loop, the interpreter went from 1.5330 s to 0.0016 s, and the growth from ~4x per doubling to ~2x.
 
 The serde encoding is unaffected: serde's `rc` feature encodes `Arc<T>` exactly as `T`, so the bincode/JSON bytes for a `Value` — and therefore for a `Chunk` in a frontend's on-disk bytecode cache — are unchanged. `tests/array_hash_ops.rs` pins those bytes.
+
+`Chunk::op_hash` — the key every JIT cache is indexed by — is not on the wire
+either, so deserializing recomputes it from the ops and constants
+(`Chunk::compute_op_hash`). Left at `0` it would be one shared key for every chunk
+that came off the wire, and two different ones would run each other's native
+code. `VM::new` fills it in for a chunk built as a struct literal for the same
+reason.
 
 Array and hash mutations (`ArrayPush`, `ArrayPop`, `ArrayShift`, `ArraySet`, `SlotArraySet`, `HashSet`, `HashDelete`) operate in place — no clone-modify-writeback cycle. Read-only access (`ArrayGet`, `SlotArrayGet`, `ArrayLen`, `HashGet`, `HashExists`, `HashKeys`, `HashValues`) borrows directly from the globals vector or the frame's slots.
 

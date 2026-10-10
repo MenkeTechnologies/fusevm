@@ -550,7 +550,12 @@ impl VM {
     /// frame, and zeros every per-thread counter (cycle / deopt /
     /// trace stats). The chunk's `op_hash` is preserved verbatim so
     /// subsequent JIT-cache lookups can short-circuit recompilation.
-    pub fn new(chunk: Chunk) -> Self {
+    pub fn new(mut chunk: Chunk) -> Self {
+        // A struct-literal chunk has no hash, and a zero hash is one JIT cache
+        // key shared by every such chunk.
+        if chunk.op_hash == 0 {
+            chunk.op_hash = chunk.compute_op_hash();
+        }
         let num_names = chunk.names.len();
         let mut frames = Vec::with_capacity(32);
         frames.push(Frame {

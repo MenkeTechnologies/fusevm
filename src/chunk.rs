@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 
 /// A compiled bytecode unit.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// Deserializing goes through [`ChunkWire`] so `op_hash` — which serde skips —
+// is recomputed rather than left at `0`. A zero hash is a JIT cache key shared
+// by every chunk that came off the wire, so two different deserialized chunks
+// would run each other's native code.
+#[serde(from = "ChunkWire")]
 #[cfg_attr(feature = "rkyv-archive", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
 #[cfg_attr(feature = "rkyv-archive", archive(check_bytes))]
 #[cfg_attr(feature = "rkyv-archive", archive(bound(
@@ -49,7 +54,12 @@ pub struct Chunk {
     /// behavior awk/shell rely on, so existing frontends are byte-identical.
     #[serde(default)]
     pub int_overflow_deopt: bool,
-    /// Cached hash of ops + constants (computed once at build time for O(1) JIT cache lookup)
+    /// Cached hash of ops + constants (computed once at build time for O(1) JIT cache lookup).
+    ///
+    /// Not part of the serde wire format: deserializing recomputes it (see
+    /// [`Chunk::compute_op_hash`]), and `VM::new` fills it in for a chunk built
+    /// as a struct literal. `0` therefore only survives on a chunk nobody has
+    /// handed to a VM.
     #[serde(skip)]
     pub op_hash: u64,
     /// AOT native-function slot. `0` means "run through the interpreter/JIT" (the
@@ -129,6 +139,80 @@ pub struct Chunk {
     /// Declared last for the same reason as [`Chunk::sub_slot_names`].
     #[serde(default)]
     pub nan_result_hook: bool,
+}
+
+impl Chunk {
+    /// Content hash of the ops, the constants and the NaN-hook flag: the key
+    /// every JIT cache is indexed by. [`ChunkBuilder::build`] stores it in
+    /// [`Chunk::op_hash`] and deserializing recomputes it, so a chunk that
+    /// arrives off the wire keys its native code exactly as the original did.
+    pub fn compute_op_hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.ops.hash(&mut h);
+        self.constants.hash(&mut h);
+        // A NaN-hook chunk compiles to code that bails where the same ops
+        // without the flag answer, so it must never share a JIT cache entry
+        // with them. Hashed only when set: every other chunk keeps its hash.
+        if self.nan_result_hook {
+            true.hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
+/// Serde mirror of [`Chunk`]. Same fields in the same order, so the bincode
+/// and JSON encodings are unchanged; only the conversion differs, in that it
+/// recomputes `op_hash`, which the wire format does not carry. A field added
+/// to `Chunk` must be added here too — the `From` impl below is a complete
+/// struct literal, so forgetting is a compile error.
+#[derive(Deserialize)]
+struct ChunkWire {
+    ops: Vec<Op>,
+    constants: Vec<Value>,
+    names: Vec<String>,
+    lines: Vec<u32>,
+    sub_entries: Vec<(u16, usize)>,
+    block_ranges: Vec<(usize, usize)>,
+    sub_chunks: Vec<Chunk>,
+    source: String,
+    #[serde(default)]
+    int_overflow_deopt: bool,
+    #[serde(default)]
+    native_id: u32,
+    #[serde(default)]
+    aot_seeded_slots: u16,
+    #[serde(default)]
+    sub_slot_names: Vec<(usize, Vec<String>)>,
+    #[serde(default)]
+    builtin_argc_is_arity: bool,
+    #[serde(default)]
+    nan_result_hook: bool,
+}
+
+impl From<ChunkWire> for Chunk {
+    fn from(w: ChunkWire) -> Self {
+        let mut chunk = Chunk {
+            ops: w.ops,
+            constants: w.constants,
+            names: w.names,
+            lines: w.lines,
+            sub_entries: w.sub_entries,
+            block_ranges: w.block_ranges,
+            sub_chunks: w.sub_chunks,
+            source: w.source,
+            int_overflow_deopt: w.int_overflow_deopt,
+            op_hash: 0,
+            native_id: w.native_id,
+            aot_seeded_slots: w.aot_seeded_slots,
+            sub_slot_names: w.sub_slot_names,
+            builtin_argc_is_arity: w.builtin_argc_is_arity,
+            nan_result_hook: w.nan_result_hook,
+        };
+        chunk.op_hash = chunk.compute_op_hash();
+        chunk
+    }
 }
 
 impl Chunk {
@@ -390,18 +474,7 @@ impl ChunkBuilder {
 
     /// Finalize and return the chunk with precomputed op hash.
     pub fn build(mut self) -> Chunk {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        self.chunk.ops.hash(&mut h);
-        self.chunk.constants.hash(&mut h);
-        // A NaN-hook chunk compiles to code that bails where the same ops
-        // without the flag answer, so it must never share a JIT cache entry
-        // with them. Hashed only when set: every other chunk keeps its hash.
-        if self.chunk.nan_result_hook {
-            true.hash(&mut h);
-        }
-        self.chunk.op_hash = h.finish();
+        self.chunk.op_hash = self.chunk.compute_op_hash();
         self.chunk
     }
 }
@@ -732,8 +805,12 @@ mod tests {
         assert_eq!(back.names, chunk.names);
         assert_eq!(back.lines, chunk.lines);
         assert_eq!(back.source, chunk.source);
-        // op_hash has #[serde(skip)] → does NOT survive round-trip.
-        assert_eq!(back.op_hash, 0, "op_hash skipped by serde");
+        // op_hash is not on the wire, so deserializing recomputes it.
+        assert_eq!(
+            back.op_hash, chunk.op_hash,
+            "op_hash recomputed on deserialize"
+        );
+        assert_ne!(back.op_hash, 0);
     }
 
     // ─── disassemble() — shared frontend `--disasm` listing ───────────
