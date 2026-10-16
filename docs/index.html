@@ -128,7 +128,7 @@
             <span class="sep">/</span>
             <a href="https://docs.rs/fusevm" target="_blank" rel="noopener noreferrer">docs.rs</a>
           </nav>
-          <p class="docs-build-line">fusevm v0.26.9 · 237 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 26 float/int math ops · 9 goroutine / channel ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 32,462 lines Rust · 7,890 #[test] fns</p>
+          <p class="docs-build-line">fusevm v0.26.9 · 237 opcodes · 11 fused superinstructions · 29 shell ops · 61 AWK ops · 26 float/int math ops · 9 goroutine / channel ops · 3-tier Cranelift JIT auto-dispatch (linear · block · tracing) · AOT native-object codegen · 32,804 lines Rust · 7,916 #[test] fns</p>
         </div>
         <div class="tutorial-toolbar">
           <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -163,9 +163,9 @@
           <div><div class="stat">11</div><div class="stat-label">fused superinstructions</div></div>
           <div><div class="stat">29</div><div class="stat-label">shell ops</div></div>
           <div><div class="stat">61</div><div class="stat-label">AWK ops</div></div>
-          <div><div class="stat">32,462</div><div class="stat-label">production lines</div></div>
+          <div><div class="stat">32,804</div><div class="stat-label">production lines</div></div>
           <!-- production lines derived from: find src -name '*.rs' | xargs wc -l | tail -1 -->
-          <div><div class="stat">7,890</div><div class="stat-label">#[test] fns</div></div>
+          <div><div class="stat">7,916</div><div class="stat-label">#[test] fns</div></div>
           <!-- test fns derived from: grep -rc '#\[test\]\|#\[tokio::test\]' --include='*.rs' . | awk -F: '{s+=$2}END{print s}' -->
           <div><div class="stat">3</div><div class="stat-label">JIT tiers</div></div>
           <div><div class="stat">18</div><div class="stat-label">language frontends</div></div>
@@ -300,6 +300,9 @@ cargo add fusevm --features jit-disk-cache</div>
           <tr><td><code>default</code></td><td>None &mdash; pure-Rust interpreter, runtime deps <code>serde</code> / <code>tracing</code> / <code>glob</code> / <code>chrono</code></td></tr>
           <tr><td><code>jit</code></td><td>Cranelift-backed native JIT (linear, block, and tracing tiers). Pulls in Cranelift 0.130</td></tr>
           <tr><td><code>jit-disk-cache</code></td><td>Persists compiled native code to <code>~/.cache/fusevm-jit</code> so codegen is skipped across process restarts. Implies <code>jit</code>; on by default once enabled. Pulls in <code>libc</code> for executable memory mapping</td></tr>
+          <tr><td><code>aot</code></td><td>Closed-world ahead-of-time compiler (<code>src/aot.rs</code>): lowers a whole <code>Chunk</code> to a relocatable native object via <code>cranelift-object</code>. Implies <code>jit</code></td></tr>
+          <tr><td><code>ffi</code></td><td>Runtime behind inline <code>rust { &hellip; }</code> blocks (<code>src/ffi.rs</code>): compiles the body to a <code>cdylib</code>, caches it, <code>dlopen</code>s it, and registers each <code>pub extern "C" fn</code> export as a callable</td></tr>
+          <tr><td><code>rkyv-archive</code></td><td>Derives <code>rkyv</code> archive impls on <code>Value</code> and <code>Chunk</code> for zero-copy mmap-backed bytecode caches</td></tr>
         </table>
 
         <div class="code-block"><span class="keyword">use</span> fusevm::{Op, ChunkBuilder, VM, VMResult, Value};

@@ -7,7 +7,7 @@
 //! - Stack-based execution with slot-indexed fast paths
 //! - Three-tier Cranelift JIT:
 //!   - Linear (straight-line, compile on first call)
-//!   - Block (whole-chunk CFG, threshold 10)
+//!   - Block (whole-chunk CFG, threshold 1)
 //!   - Tracing (hot loop body, threshold 50, full side-exit machinery)
 //!
 //! ## Tracing JIT capability matrix
