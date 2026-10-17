@@ -828,6 +828,17 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
         without the native code ever reading the <code>VM</code> struct layout. The interpreter dispatch loop
         is gone; the <em>work</em> each op does is unchanged.</p>
 
+        <p style="font-size: 13px; color: var(--text-dim); line-height: 1.7;">
+        <strong>Large chunks.</strong> Cranelift's register allocator is superlinear in function size, so a
+        threaded chunk longer than <code>THREADED_SEGMENT_OPS</code> is split. Nothing lives in SSA values
+        across ops (the operand stack, frames and slots are in the <code>VM</code>; only the next ip passes
+        between op blocks), so every op boundary is a safe split point. Each fixed-size ip range becomes a local
+        segment function that returns any ip it does not own; the exported driver routes it to the owning
+        segment, so the <code>exec_op</code> sequence, and therefore behaviour, is unchanged. Segments compile
+        on one worker per core, each with its own Cranelift <code>Context</code>, and are defined into the
+        module in index order, so the object bytes do not depend on the thread count. Smaller chunks and the
+        register-native lowering keep one function.</p>
+
         <h3 style="color: var(--accent); font-family: 'Orbitron', sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1.5rem;">Native op specialization</h3>
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
         Layered on top of the threaded path, <code>build_entry</code> lowers chunks that are scalar

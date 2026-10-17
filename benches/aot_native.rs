@@ -1,4 +1,5 @@
-//! Interpreter vs native AOT vs native Rust — the same numeric loop.
+//! Interpreter vs native AOT vs native Rust — the same numeric loop — and the
+//! AOT object compile time of a large chunk.
 //!
 //! This validates the closed-world AOT native path ([`fusevm::aot`]): a hot
 //! integer loop whose body and counter live in slots. The native path lowers it
@@ -9,6 +10,8 @@
 //! Cranelift compile folded into `run_chunk_native` is negligible next to the
 //! execution it's measured against — this is the real "compile once, run a hot
 //! program" story, not a microbenchmark of a single op.
+//!
+//! A second group times `aot::compile_object` on one large threaded chunk.
 //!
 //! Run: cargo bench --features aot --bench aot_native
 
@@ -100,5 +103,42 @@ fn bench(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench);
+/// A straight-line chunk of about `n` ops that takes the threaded lowering: a
+/// builtin call without the arity opt-in at ip 0 is a deopt point, so the native
+/// plan covers too little. Slot arithmetic after it, the shape of a large
+/// typesetting document's chunk.
+fn large_threaded_chunk(n: usize) -> Chunk {
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::CallBuiltin(0, 0), 1);
+    b.emit(Op::Pop, 1);
+    b.emit(Op::LoadInt(0), 1);
+    b.emit(Op::SetSlot(0), 1);
+    let mut i = 0i64;
+    while b.current_pos() + 5 < n {
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(i % 7), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetSlot(0), 1);
+        i += 1;
+    }
+    b.emit(Op::GetSlot(0), 1);
+    b.build()
+}
+
+/// Object compile time of one large threaded chunk — the cost a frontend's
+/// `--aot` pays per document.
+fn bench_compile_object(c: &mut Criterion) {
+    let chunk = large_threaded_chunk(65_536);
+    assert_eq!(aot::lowering_for(&chunk), aot::Lowering::Threaded);
+    let out = std::env::temp_dir().join(format!("fusevm-aot-bench-{}.o", std::process::id()));
+    let mut g = c.benchmark_group("compile_object_threaded");
+    g.sample_size(10);
+    g.bench_function(format!("{}_ops", chunk.ops.len()), |b| {
+        b.iter(|| aot::compile_object(black_box(&chunk), &out).unwrap())
+    });
+    g.finish();
+    let _ = std::fs::remove_file(&out);
+}
+
+criterion_group!(benches, bench, bench_compile_object);
 criterion_main!(benches);

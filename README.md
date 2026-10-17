@@ -586,6 +586,31 @@ and intra-chunk `Op::Call`/`Op::Return`, whose target is only known at run time 
 without the native code ever reading the `VM` struct layout. The interpreter
 dispatch loop is gone; the *work* each op does is unchanged.
 
+#### Large chunks: split into segment functions, compiled in parallel
+
+Cranelift's register allocator is superlinear in function size, so one native
+function per chunk makes a chunk of tens of thousands of ops take minutes to
+compile. A threaded chunk longer than `THREADED_SEGMENT_OPS` is therefore split.
+Every op boundary is a safe split point here: nothing lives in SSA values across
+ops — the operand stack, frames and slots are all in the `VM` — and the only
+value passed between op blocks is the next ip. Each fixed-size ip range becomes a
+local *segment* function that returns any ip it does not own, and the exported
+driver routes that ip to the owning segment:
+
+```text
+segment_k(vm, ip): dispatch over its own ops; a foreign ip or a terminal -1 → return it
+entry(vm):         route(ip): ip >= n → finish;  r = segment_{ip / S}(vm, ip)
+                   r < 0 → finish  else → route(r)
+```
+
+The sequence of `exec_op` calls is the same as the single-function lowering's,
+so behaviour is identical — including loops and calls that cross segments, and
+an early halt or error from any segment. The segment functions (and the driver)
+compile on one worker thread per available core, each with its own Cranelift
+`Context`, and are then defined into the module in index order, so the object
+bytes are the same for any thread count. Chunks at or under the segment size,
+and the register-native lowering below, keep one function.
+
 ### Native op specialization
 
 Layered on top of the threaded path, `build_entry` lowers chunks that are

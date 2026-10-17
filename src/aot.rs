@@ -29,6 +29,11 @@
 //! struct layout. Op *semantics* still live in the runtime (linked in), so the
 //! interpreter dispatch loop is gone but the work each op does is unchanged.
 //!
+//! A chunk longer than `THREADED_SEGMENT_OPS` is split into segment functions
+//! under a routing driver and the segments compile in parallel — register
+//! allocation is superlinear in function size, and only the next ip crosses an
+//! op boundary, so any boundary is a safe split. See `ThreadedSplit`.
+//!
 //! # Native op specialization (in progress)
 //!
 //! Layered on top of the threaded path, [`build_entry`] lowers chunks that are
@@ -703,6 +708,15 @@ pub fn build_named<M: Module>(
     chunk: &Chunk,
     symbol: &str,
 ) -> Result<FuncId, String> {
+    build_named_split(module, chunk, symbol, ThreadedSplit::host())
+}
+
+fn build_named_split<M: Module>(
+    module: &mut M,
+    chunk: &Chunk,
+    symbol: &str,
+    split: ThreadedSplit,
+) -> Result<FuncId, String> {
     match analyze_native(chunk) {
         // A plan that lowers too little is worse than no plan: its deopt is
         // one-way, so the interpreter gets everything after it, whereas the
@@ -710,7 +724,7 @@ pub fn build_named<M: Module>(
         Some(plan) if plan.worth_lowering(chunk) => {
             build_entry_native(module, chunk, &plan, symbol)
         }
-        _ => build_entry_threaded(module, chunk, symbol),
+        _ => build_entry_threaded_split(module, chunk, symbol, split),
     }
 }
 
@@ -4135,14 +4149,137 @@ fn truthy(
     }
 }
 
+/// Ops per function when the threaded lowering splits a chunk (see
+/// [`ThreadedSplit`]). A power of two, so the driver finds an ip's segment with
+/// a shift. Register allocation cost grows faster than linearly in function
+/// size; at this size each segment compiles in a small fraction of a second.
+const THREADED_SEGMENT_OPS: usize = 1024;
+
+/// How the threaded lowering partitions and compiles a chunk.
+///
+/// A chunk of at most `segment_ops` ops becomes one native function, exactly as
+/// before. A larger one becomes a driver plus one *segment* function per
+/// `segment_ops`-op range. Every op boundary in the threaded lowering is a safe
+/// split point: an op block holds nothing in SSA values across ops — the operand
+/// stack, frames and locals all live in the `VM`, and the only value carried
+/// between op blocks is the next ip returned by [`fusevm_aot_exec_op`]. So a
+/// segment can hand that ip back to the driver, which routes it to the segment
+/// owning it, and the sequence of `exec_op` calls is the same as the
+/// single-function lowering's.
+///
+/// The segments compile on up to `threads` workers, each with its own
+/// `Context`, and are then defined into the module in index order, so the
+/// emitted bytes do not depend on the thread count or on scheduling.
+#[derive(Clone, Copy)]
+struct ThreadedSplit {
+    segment_ops: usize,
+    threads: usize,
+}
+
+impl ThreadedSplit {
+    /// Default segment size, one worker per available core.
+    fn host() -> Self {
+        ThreadedSplit {
+            segment_ops: THREADED_SEGMENT_OPS,
+            threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        }
+    }
+}
+
+/// One function's compiled machine code, ready for `Module::define_function_bytes`.
+struct CompiledFunc {
+    id: FuncId,
+    align: u64,
+    bytes: Vec<u8>,
+    relocs: Vec<cranelift_module::ModuleReloc>,
+}
+
+/// Compile `ctx` for `isa`. This is the compile half of
+/// `Module::define_function` — the object and JIT backends both run
+/// `ctx.compile(isa, ctrl_plane)` and turn the buffer's relocations into
+/// `ModuleReloc::from_mach_reloc(reloc, &ctx.func, id)` before storing the
+/// bytes — split off so it can run without the module borrowed.
+fn compile_func(
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
+    id: FuncId,
+    ctx: &mut cranelift_codegen::Context,
+) -> Result<CompiledFunc, String> {
+    let mut ctrl = cranelift_codegen::control::ControlPlane::default();
+    ctx.compile(isa, &mut ctrl)
+        .map_err(|e| format!("aot: compile: {}", e.inner))?;
+    let code = ctx.compiled_code().expect("compiled above");
+    Ok(CompiledFunc {
+        id,
+        align: code.buffer.alignment as u64,
+        bytes: code.code_buffer().to_vec(),
+        relocs: code
+            .buffer
+            .relocs()
+            .iter()
+            .map(|r| cranelift_module::ModuleReloc::from_mach_reloc(r, &ctx.func, id))
+            .collect(),
+    })
+}
+
+/// Compile `funcs` on up to `threads` workers and define them into `module` in
+/// the order given. Each function's bytes depend only on its own IR and the
+/// ISA, and definition order is fixed, so the module's output is the same for
+/// any thread count.
+fn define_parallel<M: Module>(
+    module: &mut M,
+    mut funcs: Vec<(FuncId, cranelift_codegen::Context)>,
+    threads: usize,
+) -> Result<(), String> {
+    let isa = module.isa();
+    let per = funcs.len().div_ceil(threads.clamp(1, funcs.len().max(1)));
+    let compiled: Vec<CompiledFunc> = if per >= funcs.len() {
+        funcs
+            .iter_mut()
+            .map(|(id, ctx)| compile_func(isa, *id, ctx))
+            .collect::<Result<_, _>>()?
+    } else {
+        std::thread::scope(|s| {
+            let workers: Vec<_> = funcs
+                .chunks_mut(per)
+                .map(|part| {
+                    s.spawn(move || {
+                        part.iter_mut()
+                            .map(|(id, ctx)| compile_func(isa, *id, ctx))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                })
+                .collect();
+            let mut all = Vec::new();
+            for w in workers {
+                all.extend(
+                    w.join()
+                        .map_err(|_| "aot: compile worker panicked".to_string())??,
+                );
+            }
+            Ok::<_, String>(all)
+        })?
+    };
+    for f in compiled {
+        module
+            .define_function_bytes(f.id, f.align, &f.bytes, &f.relocs)
+            .map_err(|e| format!("aot: define function: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Threaded fallback codegen: one Cranelift block per op, each running the op's
 /// semantics through the [`fusevm_aot_exec_op`] shim and re-dispatching on the
-/// returned next-ip. See the module docs for the control-flow shape.
-fn build_entry_threaded<M: Module>(
+/// returned next-ip. See the module docs for the control-flow shape; a chunk
+/// larger than one segment is split per [`ThreadedSplit`].
+fn build_entry_threaded_split<M: Module>(
     module: &mut M,
     chunk: &Chunk,
     symbol: &str,
+    split: ThreadedSplit,
 ) -> Result<FuncId, String> {
+    if chunk.ops.len() > split.segment_ops {
+        return build_entry_threaded_segmented(module, chunk, symbol, split);
+    }
     let ptr_ty = module.target_config().pointer_type();
 
     // Imported runtime shims.
@@ -4245,6 +4382,205 @@ fn build_entry_threaded<M: Module>(
     Ok(entry_id)
 }
 
+/// The threaded lowering of a chunk larger than one segment (see
+/// [`ThreadedSplit`]):
+///
+/// ```text
+///   segment_k(vm, ip) -> i64           // owns ops [k*S, (k+1)*S)
+///     dispatch(ip): br_table ip → op blocks of this range  (default → ret ip)
+///     block_i: next = exec_op(vm, i);
+///              if next < 0 → ret next  else → dispatch(next)
+///
+///   entry(vm):                          // the exported driver
+///     route(ip): if ip >= n → finish
+///                br_table ip >> log2(S) → call_k
+///     call_k:    r = segment_k(vm, ip); if r < 0 → finish  else → route(r)
+///     finish:    finish(vm); return 0
+/// ```
+///
+/// A segment returns an ip it does not own, which the driver routes to the
+/// owning segment; that is the only state crossing a function boundary.
+fn build_entry_threaded_segmented<M: Module>(
+    module: &mut M,
+    chunk: &Chunk,
+    symbol: &str,
+    split: ThreadedSplit,
+) -> Result<FuncId, String> {
+    assert!(split.segment_ops.is_power_of_two());
+    let ptr_ty = module.target_config().pointer_type();
+    let n = chunk.ops.len();
+    let seg_count = n.div_ceil(split.segment_ops);
+
+    let mut exec_sig = module.make_signature();
+    exec_sig.params.push(AbiParam::new(ptr_ty));
+    exec_sig.params.push(AbiParam::new(types::I64));
+    exec_sig.returns.push(AbiParam::new(types::I64));
+    let exec_id = module
+        .declare_function("fusevm_aot_exec_op", Linkage::Import, &exec_sig)
+        .map_err(|e| format!("aot: declare exec_op: {e}"))?;
+
+    let mut fin_sig = module.make_signature();
+    fin_sig.params.push(AbiParam::new(ptr_ty));
+    let fin_id = module
+        .declare_function("fusevm_aot_finish", Linkage::Import, &fin_sig)
+        .map_err(|e| format!("aot: declare finish: {e}"))?;
+
+    let mut entry_sig = module.make_signature();
+    entry_sig.params.push(AbiParam::new(ptr_ty));
+    entry_sig.returns.push(AbiParam::new(types::I64));
+    let entry_id = module
+        .declare_function(symbol, Linkage::Export, &entry_sig)
+        .map_err(|e| format!("aot: declare entry: {e}"))?;
+
+    // Segments share exec_op's signature: (vm, ip) -> next ip.
+    let seg_ids = (0..seg_count)
+        .map(|k| {
+            module
+                .declare_function(&format!("{symbol}.seg{k}"), Linkage::Local, &exec_sig)
+                .map_err(|e| format!("aot: declare segment: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut fbctx = FunctionBuilderContext::new();
+    let mut funcs = Vec::with_capacity(seg_count + 1);
+
+    for (k, &seg_id) in seg_ids.iter().enumerate() {
+        let lo = k * split.segment_ops;
+        let hi = (lo + split.segment_ops).min(n);
+        let mut ctx = module.make_context();
+        ctx.func.signature = exec_sig.clone();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let exec_ref = module.declare_func_in_func(exec_id, b.func);
+
+            let entry_block = b.create_block();
+            b.append_block_params_for_function_params(entry_block);
+            let dispatch_block = b.create_block();
+            b.append_block_param(dispatch_block, types::I64);
+            let foreign_block = b.create_block();
+            let ret_block = b.create_block();
+            b.append_block_param(ret_block, types::I64);
+            let op_blocks: Vec<_> = (lo..hi).map(|_| b.create_block()).collect();
+            let vm_var = b.declare_var(ptr_ty);
+
+            b.switch_to_block(entry_block);
+            let params = b.block_params(entry_block).to_vec();
+            b.def_var(vm_var, params[0]);
+            b.ins().jump(dispatch_block, &[BlockArg::Value(params[1])]);
+
+            b.switch_to_block(dispatch_block);
+            let ip_val = b.block_params(dispatch_block)[0];
+            let mut switch = Switch::new();
+            for (i, blk) in (lo..hi).zip(&op_blocks) {
+                switch.set_entry(i as u128, *blk);
+            }
+            switch.emit(&mut b, ip_val, foreign_block);
+
+            // An ip outside this segment goes back to the driver. `dispatch`
+            // dominates this block, so its param is in scope.
+            b.switch_to_block(foreign_block);
+            b.ins().jump(ret_block, &[BlockArg::Value(ip_val)]);
+
+            for (i, blk) in (lo..hi).zip(&op_blocks) {
+                b.switch_to_block(*blk);
+                let vm = b.use_var(vm_var);
+                let ipc = b.ins().iconst(types::I64, i as i64);
+                let call = b.ins().call(exec_ref, &[vm, ipc]);
+                let next = b.inst_results(call)[0];
+                let is_term = b.ins().icmp_imm(IntCC::SignedLessThan, next, 0);
+                b.ins().brif(
+                    is_term,
+                    ret_block,
+                    &[BlockArg::Value(next)],
+                    dispatch_block,
+                    &[BlockArg::Value(next)],
+                );
+            }
+
+            b.switch_to_block(ret_block);
+            let out = b.block_params(ret_block)[0];
+            b.ins().return_(&[out]);
+
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        funcs.push((seg_id, ctx));
+    }
+
+    let mut ctx = module.make_context();
+    ctx.func.signature = entry_sig;
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let fin_ref = module.declare_func_in_func(fin_id, b.func);
+        let seg_refs: Vec<FuncRef> = seg_ids
+            .iter()
+            .map(|&id| module.declare_func_in_func(id, b.func))
+            .collect();
+
+        let entry_block = b.create_block();
+        b.append_block_params_for_function_params(entry_block);
+        let route_block = b.create_block();
+        b.append_block_param(route_block, types::I64);
+        let switch_block = b.create_block();
+        let fin_block = b.create_block();
+        let call_blocks: Vec<_> = (0..seg_count).map(|_| b.create_block()).collect();
+        let vm_var = b.declare_var(ptr_ty);
+
+        b.switch_to_block(entry_block);
+        let vm_param = b.block_params(entry_block)[0];
+        b.def_var(vm_var, vm_param);
+        let zero = b.ins().iconst(types::I64, 0);
+        b.ins().jump(route_block, &[BlockArg::Value(zero)]);
+
+        // An ip at or past the end finishes the run, as the single-function
+        // dispatch's default edge does.
+        b.switch_to_block(route_block);
+        let ip_val = b.block_params(route_block)[0];
+        let past_end = b
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, ip_val, n as i64);
+        b.ins().brif(past_end, fin_block, &[], switch_block, &[]);
+
+        b.switch_to_block(switch_block);
+        let seg = b
+            .ins()
+            .ushr_imm(ip_val, split.segment_ops.trailing_zeros() as i64);
+        let mut switch = Switch::new();
+        for (k, blk) in call_blocks.iter().enumerate() {
+            switch.set_entry(k as u128, *blk);
+        }
+        switch.emit(&mut b, seg, fin_block);
+
+        for (blk, seg_ref) in call_blocks.iter().zip(&seg_refs) {
+            b.switch_to_block(*blk);
+            let vm = b.use_var(vm_var);
+            let call = b.ins().call(*seg_ref, &[vm, ip_val]);
+            let next = b.inst_results(call)[0];
+            let is_term = b.ins().icmp_imm(IntCC::SignedLessThan, next, 0);
+            b.ins().brif(
+                is_term,
+                fin_block,
+                &[],
+                route_block,
+                &[BlockArg::Value(next)],
+            );
+        }
+
+        b.switch_to_block(fin_block);
+        let vm = b.use_var(vm_var);
+        b.ins().call(fin_ref, &[vm]);
+        let status = b.ins().iconst(types::I64, 0);
+        b.ins().return_(&[status]);
+
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    funcs.push((entry_id, ctx));
+
+    define_parallel(module, funcs, split.threads)?;
+    Ok(entry_id)
+}
+
 /// Compile `chunk` to native code in-process via Cranelift, run it on a fresh
 /// VM, and return the result. The emitted native entry drives the whole program
 /// (no interpreter dispatch loop). `register` installs any frontend builtins on
@@ -4260,8 +4596,19 @@ pub fn run_chunk_native(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result
 /// invariant that lets `NativePlan::worth_lowering` choose freely between them.
 #[cfg(test)]
 fn run_chunk_threaded(chunk: &Chunk, register: impl FnOnce(&mut VM)) -> Result<VMResult, String> {
+    run_chunk_threaded_split(chunk, register, ThreadedSplit::host())
+}
+
+/// [`run_chunk_threaded`] with an explicit split, so a test can force segment
+/// boundaries into a small chunk.
+#[cfg(test)]
+fn run_chunk_threaded_split(
+    chunk: &Chunk,
+    register: impl FnOnce(&mut VM),
+    split: ThreadedSplit,
+) -> Result<VMResult, String> {
     Ok(run_chunk_with(chunk, register, |m, c| {
-        build_entry_threaded(m, c, AOT_ENTRY_SYMBOL)
+        build_entry_threaded_split(m, c, AOT_ENTRY_SYMBOL, split)
     })?
     .take_aot_result())
 }
@@ -4407,6 +4754,12 @@ fn object_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
 /// the frontend hook `fusevm_aot_register_builtins`, all resolved when the object
 /// is linked against the frontend runtime (see [`fusevm_aot_run_embedded`]).
 pub fn compile_object(chunk: &Chunk, out_path: &Path) -> Result<(), String> {
+    let bytes = object_bytes(chunk, ThreadedSplit::host())?;
+    std::fs::write(out_path, bytes).map_err(|e| format!("aot: write {}: {e}", out_path.display()))
+}
+
+/// The object file [`compile_object`] writes, as bytes.
+fn object_bytes(chunk: &Chunk, split: ThreadedSplit) -> Result<Vec<u8>, String> {
     let isa = object_isa()?;
     let builder = ObjectBuilder::new(isa, "fusevm_aot", default_libcall_names())
         .map_err(|e| format!("aot: object builder: {e}"))?;
@@ -4436,15 +4789,12 @@ pub fn compile_object(chunk: &Chunk, out_path: &Path) -> Result<(), String> {
         .define_data(len_id, &len_desc)
         .map_err(|e| format!("aot: define len: {e}"))?;
 
-    build_entry(&mut module, chunk)?;
+    build_named_split(&mut module, chunk, AOT_ENTRY_SYMBOL, split)?;
 
-    let product = module.finish();
-    let bytes = product
+    module
+        .finish()
         .emit()
-        .map_err(|e| format!("aot: emit object: {e}"))?;
-    std::fs::write(out_path, bytes)
-        .map_err(|e| format!("aot: write {}: {e}", out_path.display()))?;
-    Ok(())
+        .map_err(|e| format!("aot: emit object: {e}"))
 }
 
 /// Compile a whole program into ONE relocatable object: the `main` chunk under
@@ -7497,6 +7847,240 @@ mod tests {
             other => panic!("got {other:?}"),
         }
         assert_all_three_agree("moved-ip", &chunk, reg);
+    }
+
+    // ── Threaded lowering split across functions ──────────────────────────
+    //
+    // A split chunk must run the same `exec_op` sequence as the one-function
+    // lowering: every ip a segment does not own goes back through the driver.
+    // Tiny segments force the interesting edges — a backward jump into an
+    // earlier function, a call into a later one and the return out of it, an
+    // early exit from the middle — into chunks small enough to read.
+
+    /// One function, whatever the chunk size.
+    const UNSPLIT: ThreadedSplit = ThreadedSplit {
+        segment_ops: 1 << 30,
+        threads: 1,
+    };
+
+    /// Run `chunk` on the interpreter, the one-function threaded lowering, and
+    /// split lowerings at several segment sizes and thread counts; all must agree.
+    fn assert_splits_agree(label: &str, chunk: &Chunk, register: fn(&mut VM)) {
+        let interp = {
+            let mut vm = VM::new(chunk.clone());
+            register(&mut vm);
+            vm.run()
+        };
+        let whole = run_chunk_threaded_split(chunk, register, UNSPLIT).expect("unsplit");
+        let same = |a: &VMResult, b: &VMResult| match (a, b) {
+            (VMResult::Ok(x), VMResult::Ok(y)) => x == y,
+            (VMResult::Halted, VMResult::Halted) => true,
+            (VMResult::Error(x), VMResult::Error(y)) => x == y,
+            _ => false,
+        };
+        assert!(
+            same(&interp, &whole),
+            "{label}: interp {interp:?} != unsplit {whole:?}"
+        );
+        for segment_ops in [1, 2, 4] {
+            for threads in [1, 3] {
+                let split = ThreadedSplit {
+                    segment_ops,
+                    threads,
+                };
+                let got = run_chunk_threaded_split(chunk, register, split).expect("split");
+                assert!(
+                    same(&interp, &got),
+                    "{label}: segment_ops={segment_ops} threads={threads}: \
+                     interp {interp:?} != split {got:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_threaded_loop_jumps_backward_across_functions() {
+        // The loop body spans ips 2..=9, so at segment sizes 1/2/4 the
+        // `JumpIfTrue` back to ip 2 leaves its own function for an earlier one
+        // on every iteration but the last.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let top = b.current_pos();
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::Add, 1);
+        b.emit(Op::SetSlot(0), 1);
+        b.emit(Op::Nop, 1);
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(300), 1);
+        b.emit(Op::NumLt, 1);
+        let back = b.emit(Op::JumpIfTrue(0), 1);
+        b.patch_jump(back, top);
+        b.emit(Op::GetSlot(0), 1);
+        let chunk = b.build();
+        match run_chunk_threaded_split(
+            &chunk,
+            |_| {},
+            ThreadedSplit {
+                segment_ops: 2,
+                threads: 2,
+            },
+        )
+        .expect("run")
+        {
+            VMResult::Ok(v) => assert_eq!(v, Value::int(300)),
+            other => panic!("got {other:?}"),
+        }
+        assert_splits_agree("loop", &chunk, |_| {});
+    }
+
+    #[test]
+    fn split_threaded_call_and_return_cross_functions() {
+        // The sub sits at the end of the chunk, a different function from both
+        // call sites; it is called twice so the return lands on two different
+        // ips, each in a different function from the sub body.
+        let mut b = ChunkBuilder::new();
+        let n = b.add_name("triple");
+        b.emit(Op::LoadInt(5), 1);
+        b.emit(Op::Call(n, 1), 1);
+        b.emit(Op::Nop, 1);
+        b.emit(Op::Nop, 1);
+        b.emit(Op::Nop, 1);
+        b.emit(Op::Call(n, 1), 1);
+        b.emit(Op::ReturnValue, 1);
+        let sub_ip = b.current_pos();
+        b.emit(Op::Nop, 1);
+        b.emit(Op::LoadInt(3), 1);
+        b.emit(Op::Mul, 1);
+        b.emit(Op::ReturnValue, 1);
+        b.add_sub_entry(n, sub_ip);
+        let chunk = b.build();
+        match run_chunk_threaded_split(
+            &chunk,
+            |_| {},
+            ThreadedSplit {
+                segment_ops: 4,
+                threads: 2,
+            },
+        )
+        .expect("run")
+        {
+            VMResult::Ok(v) => assert_eq!(v, Value::int(45)),
+            other => panic!("got {other:?}"),
+        }
+        assert_splits_agree("call", &chunk, |_| {});
+    }
+
+    #[test]
+    fn split_threaded_early_exits_stop_the_driver() {
+        // A halt from the middle of the chunk must end the run, not fall into
+        // the next function's ops.
+        let mut b = ChunkBuilder::new();
+        for _ in 0..5 {
+            b.emit(Op::Nop, 1);
+        }
+        b.emit(Op::CallBuiltin(2, 0), 1);
+        b.emit(Op::Pop, 1);
+        b.emit(Op::LoadInt(999), 1);
+        let reg: fn(&mut VM) = |vm| vm.register_builtin(2, halting_builtin);
+        assert_splits_agree("halt", &b.build(), reg);
+
+        // A runtime error in a later function surfaces as that error.
+        let mut b = ChunkBuilder::new();
+        let missing = b.add_name("missing");
+        for _ in 0..6 {
+            b.emit(Op::Nop, 1);
+        }
+        b.emit(Op::Call(missing, 0), 1);
+        b.emit(Op::LoadInt(1), 1);
+        assert_splits_agree("error", &b.build(), |_| {});
+
+        // A jump to exactly one past the last op finishes, from the first
+        // function, without visiting the others.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::LoadInt(7), 1);
+        let j = b.emit(Op::Jump(0), 1);
+        for _ in 0..6 {
+            b.emit(Op::LoadInt(8), 1);
+        }
+        let end = b.current_pos();
+        b.patch_jump(j, end);
+        assert_splits_agree("jump-to-end", &b.build(), |_| {});
+    }
+
+    #[test]
+    fn split_threaded_builtin_moving_ip_lands_in_another_function() {
+        // `jumping_builtin` sets ip 4, which at segment size 1/2 belongs to a
+        // different function from the call at ip 0.
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::CallBuiltin(3, 0), 1);
+        b.emit(Op::Pop, 1);
+        b.emit(Op::LoadInt(111), 1);
+        b.emit(Op::Jump(6), 1);
+        b.emit(Op::Pop, 1);
+        b.emit(Op::LoadInt(222), 1);
+        let reg: fn(&mut VM) = |vm| vm.register_builtin(3, jumping_builtin);
+        assert_splits_agree("moved-ip", &b.build(), reg);
+    }
+
+    /// A straight-line slot-arithmetic chunk of about `n` ops behind a builtin
+    /// call without the arity opt-in — a deopt point at ip 0, so the native plan
+    /// covers too little and the threaded lowering takes it. The shape of a
+    /// large typesetting chunk.
+    fn large_threaded_chunk(n: usize) -> Chunk {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::CallBuiltin(0, 0), 1);
+        b.emit(Op::Pop, 1);
+        b.emit(Op::LoadInt(0), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let mut i = 0i64;
+        while b.current_pos() + 5 < n {
+            b.emit(Op::GetSlot(0), 1);
+            b.emit(Op::LoadInt(i % 7), 1);
+            b.emit(Op::Add, 1);
+            b.emit(Op::SetSlot(0), 1);
+            i += 1;
+        }
+        b.emit(Op::GetSlot(0), 1);
+        b.build()
+    }
+
+    #[test]
+    fn split_threaded_object_bytes_do_not_depend_on_thread_count() {
+        let chunk = large_threaded_chunk(3000);
+        assert_eq!(lowering_for(&chunk), Lowering::Threaded);
+        let bytes = |threads| {
+            object_bytes(
+                &chunk,
+                ThreadedSplit {
+                    segment_ops: 128,
+                    threads,
+                },
+            )
+            .expect("object")
+        };
+        let one = bytes(1);
+        for threads in [2, 5, 16] {
+            assert!(one == bytes(threads), "object differs at {threads} threads");
+        }
+        // And the split object really is split: it is not the unsplit one.
+        assert!(one != object_bytes(&chunk, UNSPLIT).expect("object"));
+
+        let mut vm = VM::new(chunk.clone());
+        register_test_builtins(&mut vm);
+        let interp = vm.run();
+        let split = ThreadedSplit {
+            segment_ops: 128,
+            threads: 4,
+        };
+        match (
+            interp,
+            run_chunk_threaded_split(&chunk, register_test_builtins, split).expect("run"),
+        ) {
+            (VMResult::Ok(a), VMResult::Ok(b)) => assert_eq!(a, b),
+            other => panic!("got {other:?}"),
+        }
     }
 
     // ── Boxed-handle bookkeeping ──────────────────────────────────────────
