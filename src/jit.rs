@@ -661,6 +661,16 @@ impl DeoptInfo {
             stack_kinds: [0; MAX_DEOPT_STACK],
         }
     }
+
+    /// Mark the buffer empty. The counts are what say how much of `frames`
+    /// and `stack_buf` is valid, and every reader stops at them, so clearing
+    /// the counts is enough — zeroing the whole buffer costs a memset of its
+    /// full size each time.
+    pub fn reset(&mut self) {
+        self.resume_ip = 0;
+        self.frame_count = 0;
+        self.stack_count = 0;
+    }
 }
 
 // ── gawk bitwise codegen shared by the block JIT and the AOT compiler ──
@@ -7044,9 +7054,7 @@ mod cranelift_jit_impl {
                     }
                     // Reset deopt info before each invocation so stale
                     // records from prior calls don't leak through.
-                    deopt_info.resume_ip = 0;
-                    deopt_info.frame_count = 0;
-                    deopt_info.stack_count = 0;
+                    deopt_info.reset();
                     let gptr = if global_buf.is_empty() {
                         std::ptr::null_mut()
                     } else {

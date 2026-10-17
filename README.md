@@ -858,7 +858,7 @@ For tiny chunks the pool is *slower* — `reset` does more bookkeeping (drop the
 - Many slots get used (frame.slots Vec capacity is preserved across reuse)
 - Tracing JIT runs (the deopt buffer is already allocated; `reset` recomputes the block-JIT eligibility answer for the new chunk)
 
-A caller that keeps one VM per chunk and runs that same chunk again (a frontend pooling a VM per function) should call `VM::rewind()` instead of handing the chunk back through `reset`: it restarts execution identically but keeps the per-chunk memos — the block-JIT eligibility answer and the `UndefRead::chunk` identity — so a call does not re-probe the JIT's thread-local eligibility table.
+A caller that keeps one VM per chunk and runs that same chunk again (a frontend pooling a VM per function) should call `VM::rewind()` instead of handing the chunk back through `reset`: it restarts execution identically but keeps the per-chunk memos — the block-JIT eligibility answer and the `UndefRead::chunk` identity — so a call does not re-probe the JIT's thread-local eligibility table, and it reuses the base frame's slot buffer (emptied) instead of freeing and reallocating it.
 
 Honest read: VMPool is useful for **multi-chunk evaluation loops with non-trivial chunk shapes**. For uniform tight loops, pure `VM::new` is fine. The API is shipped so callers can pick. ~10 LOC if your call site looks like `for chunk in ... { VM::new(chunk).run() }`.
 

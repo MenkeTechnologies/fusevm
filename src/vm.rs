@@ -910,16 +910,27 @@ impl VM {
     /// chunk must go through `reset`.
     pub fn rewind(&mut self) {
         self.stack.clear();
-        self.frames.clear();
         let num_names = self.chunk.names.len();
         self.globals.clear();
         self.globals.resize(num_names, Value::Undef);
-        self.frames.push(Frame {
-            return_ip: 0,
-            stack_base: 0,
-            slots: Vec::with_capacity(16),
-            entry_ip: None,
-        });
+        // Keep the base frame and its slot buffer. Freeing that buffer and
+        // allocating a fresh one was the largest single cost of a rewind, which
+        // a frontend that pools one VM per function pays on every call.
+        self.frames.truncate(1);
+        match self.frames.first_mut() {
+            Some(base) => {
+                base.return_ip = 0;
+                base.stack_base = 0;
+                base.slots.clear();
+                base.entry_ip = None;
+            }
+            None => self.frames.push(Frame {
+                return_ip: 0,
+                stack_base: 0,
+                slots: Vec::with_capacity(16),
+                entry_ip: None,
+            }),
+        }
         self.ip = 0;
         self.last_status = 0;
         self.halted = false;
@@ -933,7 +944,7 @@ impl VM {
             self.global_buf.clear();
             self.global_kinds_buf.clear();
             self.global_numeric.clear();
-            self.deopt_info = DeoptInfo::zeroed();
+            self.deopt_info.reset();
         }
     }
 
@@ -7022,5 +7033,24 @@ mod tests {
         vm.reset(own);
         assert!(vm.block_eligible_cached.is_none(), "reset drops the memo");
         assert!(matches!(vm.run(), VMResult::Ok(Value::Float(f)) if f == 1.0));
+    }
+
+    /// `rewind` reuses the base frame's slot buffer rather than allocating a
+    /// new one, so it has to empty it: a slot one run wrote must read as unset
+    /// in the next, as it did when the frame was rebuilt from scratch.
+    #[test]
+    fn rewind_starts_the_next_run_with_unset_slots() {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::GetSlot(0), 1);
+        b.emit(Op::LoadInt(7), 1);
+        b.emit(Op::SetSlot(0), 1);
+        let mut vm = VM::new(b.build());
+        for _ in 0..3 {
+            assert!(matches!(vm.run(), VMResult::Ok(Value::Undef)));
+            assert!(matches!(vm.frames[0].slots[0], Value::Int(7)));
+            vm.rewind();
+            assert_eq!(vm.frames.len(), 1);
+            assert!(vm.frames[0].slots.is_empty());
+        }
     }
 }
