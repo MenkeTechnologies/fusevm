@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT (linear, block, tracing). The shared execution engine behind eighteen language frontends: zshrs, strykelang, awkrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, go-rs, tclrs, and texrs.">
+  <meta name="description" content="fusevm — Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT (linear, block, tracing). The shared execution engine behind its language frontends: zshrs, strykelang, awkrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, go-rs, tclrs, and texrs.">
   <title>fusevm — Documentation</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -150,7 +150,7 @@
 
     <main class="tutorial-main">
       <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>FUSEVM REFERENCE</h2>
-      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 1), tracing (hot loop body with side-exits, frame materialization, side-trace stitching). Auto-dispatched from <code>VM::run()</code> when tracing is enabled. The shared execution engine behind eighteen language frontends — zshrs, strykelang, awkrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, go-rs, tclrs, and texrs. For full numbers / subsystem breakdown / file inventory see the <a href="report.html" style="color:var(--accent);">Engineering Report</a>.</p>
+      <p class="tutorial-subtitle">Language-agnostic bytecode VM with fused superinstructions and a three-tier Cranelift JIT — linear (instant), block (CFG, threshold 1), tracing (hot loop body with side-exits, frame materialization, side-trace stitching). Auto-dispatched from <code>VM::run()</code> when tracing is enabled. The shared execution engine behind its language frontends — zshrs, strykelang, awkrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, go-rs, tclrs, and texrs. For full numbers / subsystem breakdown / file inventory see the <a href="report.html" style="color:var(--accent);">Engineering Report</a>.</p>
 
       <!-- ════════════════════════════════════════════════════════════ -->
       <section class="tutorial-section">
@@ -172,7 +172,7 @@
         </div>
 
         <p style="font-size: 14px; line-height: 1.8; color: var(--text);">
-        fusevm is the shared execution engine behind eighteen language frontends &mdash;
+        fusevm is the shared execution engine behind its language frontends &mdash;
         <a href="https://github.com/MenkeTechnologies/zshrs" style="color: var(--cyan);">zshrs</a>,
         <a href="https://github.com/MenkeTechnologies/strykelang" style="color: var(--cyan);">strykelang</a>,
         <a href="https://github.com/MenkeTechnologies/awkrs" style="color: var(--cyan);">awkrs</a>,
@@ -213,7 +213,7 @@
   │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐        │
   │  │  strykelang   │  │    zshrs      │  │    awkrs      │        │
   │  │ Perl 5 compat │  │ shell compiler│  │ awk compiler  │        │
-  │  │ 131 ext IDs   │  │ CallBuiltin   │  │ 65 ext IDs    │        │
+  │  │ Extended ops  │  │ CallBuiltin   │  │ Extended ops  │        │
   │  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘        │
   │          │       compile    │                  │                │
   │          └──────────────────┼──────────────────┘                │
@@ -459,7 +459,7 @@ vm.set_extension_handler(Box::new(|vm, id, arg| {
           </div>
           <div class="cat-card">
             <h4>Builtins</h4>
-            <p>1 op &mdash; <code>CallBuiltin(id, argc)</code> dispatches 140 builtin IDs in <code>shell_builtins.rs</code></p>
+            <p>1 op &mdash; <code>CallBuiltin(id, argc)</code> dispatches the builtin IDs in <code>shell_builtins.rs</code></p>
             <p><code>CallBuiltin</code></p>
           </div>
           <div class="cat-card">
@@ -608,7 +608,7 @@ b.emit(Op::AwkSubstr(<span class="var">3</span>), <span class="var">1</span>);  
   ┌──────────────────────────────────────────────────────────────┐
   │                 EXTENSION DISPATCH TABLE                     │
   │                                                              │
-  │ strykelang (two disjoint blocks, 131 IDs):                   │
+  │ strykelang (two disjoint blocks):                            │
   │   Extended(0x0000, _) → STK_REGEX_MATCH                      │
   │   Extended(0x0001, _) → STK_REGEX_SUBST                      │
   │   ...                                                        │
@@ -617,13 +617,13 @@ b.emit(Op::AwkSubstr(<span class="var">3</span>), <span class="var">1</span>);  
   │   ...                                                        │
   │   Extended(0x105C, _) → nops::ARROW_ARRAY_AUTOVIV            │
   │                                                              │
-  │ awkrs (65 IDs):                                              │
+  │ awkrs:                                                       │
   │   Extended(1000, _)   → AWK_GET_FIELD                        │
   │   Extended(1001, _)   → AWK_SET_FIELD                        │
   │   ...                                                        │
   │   Extended(1213, _)   → AWK_JUMP_IF_SLOT_GE_NUM              │
   │                                                              │
-  │ elisprs (13 IDs):                                            │
+  │ elisprs:                                                     │
   │   Extended(0, _)      → TRUTHY                               │
   │   Extended(1, _)      → CALL                                 │
   │   ...                                                        │
@@ -634,7 +634,7 @@ b.emit(Op::AwkSubstr(<span class="var">3</span>), <span class="var">1</span>);  
   │   CallBuiltin(263, _)       → BUILTIN_CP                     │
   │   CallBuiltin(283..=760, _) → zshrs-owned IDs                │
   │                                                              │
-  │ vimlrs (CallBuiltin, not Extended; 588 handlers):            │
+  │ vimlrs (CallBuiltin, not Extended):                          │
   │   CallBuiltin(3000, _) → VIML_GETVAR                         │
   │   CallBuiltin(3001, _) → VIML_SETVAR                         │
   │   ...                                                        │
@@ -924,7 +924,7 @@ std::fs::write(<span class="string">"traces.json"</span>, serde_json::to_vec(&am
         pools (&gt;16 entries, where reset's resize amortizes), many slots (frame Vec capacity is preserved
         across reuse), or multi-chunk evaluation loops with non-trivial chunk shapes. For uniform tight loops
         on tiny chunks the pool is actually <em>slower</em> (<code>reset</code> does more bookkeeping than
-        <code>VM::new</code> skips), so the API is shipped to let callers choose. All eighteen sibling frontends already on the VM
+        <code>VM::new</code> skips), so the API is shipped to let callers choose. All sibling frontends already on the VM
         (strykelang, awkrs, zshrs, vimlrs, elisprs, rubylang, phplang, pythonrs, node-js, arb, rlang, javars, kotlinrs, scalars, groovyrs, go-rs, tclrs, texrs) drive <code>fusevm::VM</code> through bridge layers backed by a frontend-owned
         <code>VMPool</code>.</p>
       </section>
