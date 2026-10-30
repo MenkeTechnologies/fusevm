@@ -324,8 +324,12 @@ if jit.is_linear_eligible(&chunk) {
 | Logic | `LogNot` |
 | Stack | `Pop`, `Dup`, `Swap`, `Rot` |
 | Slots | `GetSlot`, `SetSlot`, `PreIncSlot`, `PreIncSlotVoid`, `AddAssignSlotVoid` |
+| AWK | `AwkMkbool`, `AwkSin`/`Cos`/`Exp`/`Atan2`, `AwkDivJit`/`AwkModJit`, `AwkSqrtJit`/`AwkLogJit`, `AwkLshiftJit`/`AwkRshiftJit`/`AwkComplJit`, `AwkAnd`/`Or`/`Xor` (2+ args), `AwkGetFieldNum` |
+| Misc | `Nop` |
 
 The `slots` argument is read-only. A chunk that addresses a slot past `slots.len()` declines (`None`); slot writes the chunk makes go to a private copy and are visible only to later reads in the same run.
+
+AWK traps: a zero divisor (`AwkDivJit`/`AwkModJit`) or a negative bitwise operand makes `try_run_linear` return `None` with the trap channel already drained, so the caller's interpreter run raises the awk fatal. A chunk where `AwkSqrtJit`/`AwkLogJit` precedes a trapping op is not linear-eligible (the interpreter re-run would print the negative-argument warning twice). `AwkInt` stays out of every native tier (host-dispatched).
 
 Int/float promotion: when either operand is float, both are promoted to `f64`. Cranelift emits `iadd`/`fadd`/`fcvt_from_sint` as needed. Runtime helpers for `Pow` (wrapping integer + `f64::powf`) and `Mod` (float `fmod`).
 

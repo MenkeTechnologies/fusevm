@@ -1046,6 +1046,8 @@ mod cranelift_jit_impl {
         /// Which frame slots the native code touches. Checked against the
         /// caller's slice on every call — see [`CompiledLinear::run`].
         slot_use: LinearSlotUse,
+        /// The code can return through an awk trap (see [`linear_may_trap`]).
+        may_trap: bool,
     }
 
     /// The frame-slot footprint of a linear sequence: how many slots it
@@ -1115,6 +1117,15 @@ mod cranelift_jit_impl {
             } else {
                 self.invoke(slots.as_ptr())
             };
+            // An awk zero divisor or negative bitwise operand returned a
+            // sentinel through the trap channel. Decline, so the caller runs
+            // the chunk in the interpreter and raises the awk fatal there —
+            // the contract `JitCompiler::take_awk_div_trap` documents for the
+            // block tier, applied here so linear callers need no extra step.
+            if self.may_trap && super::take_awk_div_trap() != 0 {
+                super::take_awk_trap_args();
+                return None;
+            }
             Some(self.result_to_value(result))
         }
 
@@ -1629,6 +1640,41 @@ mod cranelift_jit_impl {
                     _ => Cell::DynF,
                 });
             }
+            // awk transcendentals and the guarded awk ops. Every one answers
+            // `Value::Float` in the interpreter (`dispatch_awk`, `awk_bitwise`,
+            // and the `Awk*Jit` arms of `vm.rs`), whatever its operand kinds.
+            // Never folded: the zero-divisor / negative-operand traps and the
+            // negative-argument warnings are runtime events the native code
+            // must raise. The lowering is `emit_linear_awk_op` (guarded ops)
+            // and `emit_data_op` (sin/cos/exp/atan2).
+            Op::AwkSin
+            | Op::AwkCos
+            | Op::AwkExp
+            | Op::AwkSqrtJit
+            | Op::AwkLogJit
+            | Op::AwkComplJit => {
+                pop_num(stack)?;
+                stack.push(Cell::DynF);
+            }
+            Op::AwkAtan2 | Op::AwkDivJit | Op::AwkModJit | Op::AwkLshiftJit | Op::AwkRshiftJit => {
+                pop2_strict(stack)?;
+                stack.push(Cell::DynF);
+            }
+            // Fewer than two arguments is a gawk fatal of its own that the
+            // native fold does not model; the interpreter raises it.
+            Op::AwkAnd(n) | Op::AwkOr(n) | Op::AwkXor(n) => {
+                if *n < 2 {
+                    return None;
+                }
+                for _ in 0..*n {
+                    pop_num(stack)?;
+                }
+                stack.push(Cell::DynF);
+            }
+            // `$N` read through the thread-local host hook — a plain libcall,
+            // so the linear signature needs no host pointer.
+            Op::AwkGetFieldNum(_) => stack.push(Cell::DynF),
+            Op::Nop => {}
             Op::Inc => {
                 let a = pop_num(stack)?;
                 stack.push(match a {
@@ -1740,9 +1786,46 @@ mod cranelift_jit_impl {
         Some(())
     }
 
+    /// Awk ops whose linear lowering can leave the function early through the
+    /// `fusevm_jit_awk_div_trap` / `fusevm_jit_awk_bit_trap` channel.
+    fn is_awk_trap_op(op: &Op) -> bool {
+        matches!(
+            op,
+            Op::AwkDivJit
+                | Op::AwkModJit
+                | Op::AwkLshiftJit
+                | Op::AwkRshiftJit
+                | Op::AwkComplJit
+                | Op::AwkAnd(_)
+                | Op::AwkOr(_)
+                | Op::AwkXor(_)
+        )
+    }
+
+    /// Awk ops that print a warning to stderr on a negative argument.
+    fn is_awk_warn_op(op: &Op) -> bool {
+        matches!(op, Op::AwkSqrtJit | Op::AwkLogJit)
+    }
+
+    /// Whether native code for `seq` can return through an awk trap, so
+    /// [`CompiledLinear::run`] must drain the trap channel after each call.
+    pub(crate) fn linear_may_trap(seq: &[Op]) -> bool {
+        seq.iter().any(is_awk_trap_op)
+    }
+
     fn validate_linear_seq(seq: &[Op], constants: &[FuseValue]) -> bool {
         if seq.is_empty() {
             return false;
+        }
+        // A trap declines the call and the caller re-runs the whole chunk in
+        // the interpreter (see `CompiledLinear::run`). A negative-argument
+        // warning printed *before* the trap would then be printed twice, so
+        // that ordering stays in the interpreter. A warning after the trap
+        // never runs in either tier.
+        if let Some(first_warn) = seq.iter().position(is_awk_warn_op) {
+            if seq[first_warn..].iter().any(is_awk_trap_op) {
+                return false;
+            }
         }
         let mut stack: Vec<Cell> = Vec::new();
         for op in seq {
@@ -3367,6 +3450,175 @@ mod cranelift_jit_impl {
         Some(())
     }
 
+    /// Branch to an early `return` when `cond` holds: the trap block runs
+    /// `trap` (the libcall that records the awk trap code) and returns a
+    /// zero of the function's return type, which [`CompiledLinear::run`]
+    /// discards after reading the trap channel. Codegen continues in the
+    /// fall-through block.
+    fn emit_linear_trap_if(
+        bcx: &mut FunctionBuilder,
+        cond: Value,
+        ret_ty: JitTy,
+        trap: impl FnOnce(&mut FunctionBuilder),
+    ) {
+        let trap_block = bcx.create_block();
+        let cont_block = bcx.create_block();
+        bcx.ins().brif(cond, trap_block, &[], cont_block, &[]);
+        bcx.switch_to_block(trap_block);
+        trap(bcx);
+        let sentinel = match ret_ty {
+            JitTy::Int => bcx.ins().iconst(types::I64, 0),
+            JitTy::Float => bcx.ins().f64const(0.0),
+        };
+        bcx.ins().return_(&[sentinel]);
+        bcx.switch_to_block(cont_block);
+    }
+
+    /// Linear-tier lowering of the awk ops that branch: the zero-divisor
+    /// div/mod, the negative-argument sqrt/log warnings, the gawk bitwise
+    /// ops with their negative-operand fatal, and the `$N` host read.
+    /// Instruction-for-instruction the block tier's lowering in
+    /// `build_block_function` (same compares, same libcalls, same shared
+    /// `emit_awk_*` bitwise helpers); only the trap exit differs, returning a
+    /// sentinel of the linear function's own return type.
+    ///
+    /// Returns `Some(false)` for any other op (the caller hands it to
+    /// `emit_data_op`), `None` when a required libcall was not imported.
+    fn emit_linear_awk_op(
+        bcx: &mut FunctionBuilder,
+        op: &Op,
+        stack: &mut Vec<(Value, JitTy)>,
+        fmod_f64_ref: Option<cranelift_codegen::ir::FuncRef>,
+        math: MathRefs,
+        ret_ty: JitTy,
+    ) -> Option<bool> {
+        match op {
+            Op::Nop => {}
+            // Pop divisor (top) then dividend, as `Op::AwkDivJit` in vm.rs.
+            // `FloatCC::Equal` is true for `-0.0`, matching `divisor == 0.0`.
+            Op::AwkDivJit | Op::AwkModJit => {
+                let trap_ref = math.awk_div_trap?;
+                let divisor = pop_as_f64(bcx, stack)?;
+                let dividend = pop_as_f64(bcx, stack)?;
+                let zero = bcx.ins().f64const(0.0);
+                let is_zero = bcx.ins().fcmp(FloatCC::Equal, divisor, zero);
+                let code = if matches!(op, Op::AwkDivJit) { 1 } else { 2 };
+                emit_linear_trap_if(bcx, is_zero, ret_ty, |bcx| {
+                    let code_v = bcx.ins().iconst(types::I64, code);
+                    bcx.ins().call(trap_ref, &[code_v]);
+                });
+                let res = if matches!(op, Op::AwkDivJit) {
+                    bcx.ins().fdiv(dividend, divisor)
+                } else {
+                    let call = bcx.ins().call(fmod_f64_ref?, &[dividend, divisor]);
+                    bcx.inst_results(call)[0]
+                };
+                stack.push((res, JitTy::Float));
+            }
+            // sqrt/log of a negative: warn, then NaN (non-fatal). The two
+            // paths phi-merge on an F64 block parameter.
+            Op::AwkSqrtJit | Op::AwkLogJit => {
+                let warn_ref = math.awk_neg_warn?;
+                let log_ref = if matches!(op, Op::AwkLogJit) {
+                    Some(math.log?)
+                } else {
+                    None
+                };
+                let v = pop_as_f64(bcx, stack)?;
+                let zero = bcx.ins().f64const(0.0);
+                let is_neg = bcx.ins().fcmp(FloatCC::LessThan, v, zero);
+                let warn_block = bcx.create_block();
+                let pos_block = bcx.create_block();
+                let merge_block = bcx.create_block();
+                bcx.append_block_param(merge_block, types::F64);
+                bcx.ins().brif(is_neg, warn_block, &[], pos_block, &[]);
+
+                bcx.switch_to_block(warn_block);
+                // Op id 0 = sqrt, 1 = log (`fusevm_jit_awk_neg_warn`).
+                let op_id = bcx.ins().iconst(types::I64, log_ref.is_some() as i64);
+                bcx.ins().call(warn_ref, &[op_id, v]);
+                let nan = bcx.ins().f64const(f64::NAN);
+                bcx.ins().jump(merge_block, &[BlockArg::Value(nan)]);
+
+                bcx.switch_to_block(pos_block);
+                let res = match log_ref {
+                    Some(log_ref) => {
+                        let call = bcx.ins().call(log_ref, &[v]);
+                        bcx.inst_results(call)[0]
+                    }
+                    None => bcx.ins().sqrt(v),
+                };
+                bcx.ins().jump(merge_block, &[BlockArg::Value(res)]);
+
+                bcx.switch_to_block(merge_block);
+                stack.push((bcx.block_params(merge_block)[0], JitTy::Float));
+            }
+            // gawk lshift(a, n) / rshift(a, n): stack [a, n], pop n then a.
+            Op::AwkLshiftJit | Op::AwkRshiftJit => {
+                let trap_ref = math.awk_bit_trap?;
+                let code = super::awk_bit_code(op)?;
+                let n = pop_as_f64(bcx, stack)?;
+                let a = pop_as_f64(bcx, stack)?;
+                let zero = bcx.ins().f64const(0.0);
+                let a_neg = bcx.ins().fcmp(FloatCC::LessThan, a, zero);
+                let n_neg = bcx.ins().fcmp(FloatCC::LessThan, n, zero);
+                let any_neg = bcx.ins().bor(a_neg, n_neg);
+                emit_linear_trap_if(bcx, any_neg, ret_ty, |bcx| {
+                    let code_v = bcx.ins().iconst(types::I64, code as i64);
+                    bcx.ins().call(trap_ref, &[code_v, a, n]);
+                });
+                let res = super::emit_awk_shift(bcx, matches!(op, Op::AwkLshiftJit), a, n);
+                stack.push((res, JitTy::Float));
+            }
+            Op::AwkComplJit => {
+                let trap_ref = math.awk_bit_trap?;
+                let v = pop_as_f64(bcx, stack)?;
+                let zero = bcx.ins().f64const(0.0);
+                let is_neg = bcx.ins().fcmp(FloatCC::LessThan, v, zero);
+                emit_linear_trap_if(bcx, is_neg, ret_ty, |bcx| {
+                    let code_v = bcx
+                        .ins()
+                        .iconst(types::I64, crate::awk_host::bit_code::COMPL as i64);
+                    bcx.ins().call(trap_ref, &[code_v, v, zero]);
+                });
+                let res = super::emit_awk_compl(bcx, v);
+                stack.push((res, JitTy::Float));
+            }
+            // gawk and/or/xor: gawk pops the last argument first and stops at
+            // the first negative one, so operands are guarded top-down and
+            // the trap reports that argument's 1-based position.
+            Op::AwkAnd(n) | Op::AwkOr(n) | Op::AwkXor(n) => {
+                if *n < 2 {
+                    return None;
+                }
+                let trap_ref = math.awk_bit_trap?;
+                let code = super::awk_bit_code(op)?;
+                let mut acc = super::emit_awk_fold_init(bcx, code);
+                let zero = bcx.ins().f64const(0.0);
+                for argno in (1..=*n).rev() {
+                    let v = pop_as_f64(bcx, stack)?;
+                    let is_neg = bcx.ins().fcmp(FloatCC::LessThan, v, zero);
+                    emit_linear_trap_if(bcx, is_neg, ret_ty, |bcx| {
+                        let code_v = bcx.ins().iconst(types::I64, code as i64);
+                        let argno_v = bcx.ins().f64const(argno as f64);
+                        bcx.ins().call(trap_ref, &[code_v, argno_v, v]);
+                    });
+                    acc = super::emit_awk_fold_step(bcx, code, acc, v);
+                }
+                let res = super::emit_awk_uint_result(bcx, acc);
+                stack.push((res, JitTy::Float));
+            }
+            Op::AwkGetFieldNum(field_idx) => {
+                let hook_ref = math.awk_get_field_num?;
+                let idx_v = bcx.ins().iconst(types::I64, *field_idx as i64);
+                let call = bcx.ins().call(hook_ref, &[idx_v]);
+                stack.push((bcx.inst_results(call)[0], JitTy::Float));
+            }
+            _ => return Some(false),
+        }
+        Some(true)
+    }
+
     // ── Linear JIT compilation ──
 
     /// Compile a straight-line sequence of ops to native code.
@@ -3407,7 +3659,7 @@ mod cranelift_jit_impl {
         } else {
             None
         };
-        let needs_fmod = seq.iter().any(|o| matches!(o, Op::Mod));
+        let needs_fmod = seq.iter().any(|o| matches!(o, Op::Mod | Op::AwkModJit));
         let fmod_f64_id = if needs_fmod {
             let mut ps = module.make_signature();
             ps.params.push(AbiParam::new(types::F64));
@@ -3475,6 +3727,9 @@ mod cranelift_jit_impl {
 
             let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::with_capacity(32);
             for op in seq {
+                if emit_linear_awk_op(&mut bcx, op, &mut stack, fmod_f64_ref, math, ret_ty)? {
+                    continue;
+                }
                 emit_data_op(
                     &mut bcx,
                     op,
@@ -3524,6 +3779,7 @@ mod cranelift_jit_impl {
             run,
             ret_is_bool: ret_cell.is_bool(),
             slot_use: LinearSlotUse::of(seq),
+            may_trap: linear_may_trap(seq),
         })
     }
 
@@ -3657,6 +3913,10 @@ mod cranelift_jit_impl {
         /// Negative-operand trap libcall for the JIT-compiled gawk bitwise ops
         /// (`AwkLshiftJit`/`AwkRshiftJit`/`AwkComplJit`/`AwkAnd`/`AwkOr`/`AwkXor`).
         pub(crate) const H_AWK_BIT_TRAP: u32 = 25;
+        /// Negative-argument warning libcall for `AwkSqrtJit`/`AwkLogJit`.
+        pub(crate) const H_AWK_NEG_WARN: u32 = 26;
+        /// `$N` host-hook libcall for `AwkGetFieldNum`.
+        pub(crate) const H_AWK_GET_FIELD_NUM: u32 = 27;
 
         // Native-blob tier discriminator. Persisted in the file and verified on
         // load so a block blob can never be transmuted with a linear signature.
@@ -3732,6 +3992,10 @@ mod cranelift_jit_impl {
                 H_TIME_I64 => super::fusevm_jit_time_i64 as *const u8 as usize,
                 H_AWK_DIV_TRAP => super::super::fusevm_jit_awk_div_trap as *const u8 as usize,
                 H_AWK_BIT_TRAP => super::super::fusevm_jit_awk_bit_trap as *const u8 as usize,
+                H_AWK_NEG_WARN => super::super::fusevm_jit_awk_neg_warn as *const u8 as usize,
+                H_AWK_GET_FIELD_NUM => {
+                    super::super::fusevm_jit_awk_get_field_num as *const u8 as usize
+                }
                 H_NUM_OVF_TRAP => super::super::fusevm_jit_num_overflow_trap as *const u8 as usize,
                 _ => return None,
             })
@@ -4069,16 +4333,19 @@ mod cranelift_jit_impl {
                     None
                 };
 
-                let import = |bcx: &mut FunctionBuilder,
-                              id: u32,
-                              params: &[types::Type],
-                              ret: types::Type|
+                // `rets` is empty for the void trap/warn helpers.
+                let import_sig = |bcx: &mut FunctionBuilder,
+                                  id: u32,
+                                  params: &[types::Type],
+                                  rets: &[types::Type]|
                  -> cranelift_codegen::ir::FuncRef {
                     let mut s = Signature::new(call_conv);
                     for p in params {
                         s.params.push(AbiParam::new(*p));
                     }
-                    s.returns.push(AbiParam::new(ret));
+                    for r in rets {
+                        s.returns.push(AbiParam::new(*r));
+                    }
                     let sref = bcx.import_signature(s);
                     let nref = bcx
                         .func
@@ -4089,6 +4356,13 @@ mod cranelift_jit_impl {
                         colocated: false,
                         patchable: false,
                     })
+                };
+                let import = |bcx: &mut FunctionBuilder,
+                              id: u32,
+                              params: &[types::Type],
+                              ret: types::Type|
+                 -> cranelift_codegen::ir::FuncRef {
+                    import_sig(bcx, id, params, &[ret])
                 };
 
                 let pow_i64_ref = Some(import(
@@ -4155,22 +4429,37 @@ mod cranelift_jit_impl {
                         types::I64,
                     )),
                     time_i64: Some(import(&mut bcx, H_TIME_I64, &[], types::I64)),
-                    // The linear tier never lowers AwkDivJit/AwkModJit (those are
-                    // block-only ops handled in `build_block_function`), so the
-                    // linear native path imports no trap ref. The block native
-                    // path *does* carry them and registers the trap libcall under
-                    // `H_AWK_DIV_TRAP`, so div/mod chunks persist to disk. Same
-                    // reasoning applies to the warn libcall used by AwkSqrtJit /
-                    // AwkLogJit on the negative path.
-                    awk_div_trap: None,
+                    // The guarded awk ops (`emit_linear_awk_op`) call these
+                    // under stable host ids, so chunks using them persist.
+                    awk_div_trap: Some(import_sig(&mut bcx, H_AWK_DIV_TRAP, &[types::I64], &[])),
+                    // The linear tier has no strict-numeric lowering
+                    // (`try_run_linear` declines under strict mode).
                     num_ovf_trap: None,
-                    awk_neg_warn: None,
-                    awk_bit_trap: None,
-                    awk_get_field_num: None,
+                    awk_neg_warn: Some(import_sig(
+                        &mut bcx,
+                        H_AWK_NEG_WARN,
+                        &[types::I64, types::F64],
+                        &[],
+                    )),
+                    awk_bit_trap: Some(import_sig(
+                        &mut bcx,
+                        H_AWK_BIT_TRAP,
+                        &[types::I64, types::F64, types::F64],
+                        &[],
+                    )),
+                    awk_get_field_num: Some(import(
+                        &mut bcx,
+                        H_AWK_GET_FIELD_NUM,
+                        &[types::I64],
+                        types::F64,
+                    )),
                 };
 
                 let mut stack: Vec<(Value, JitTy)> = Vec::with_capacity(32);
                 for op in seq {
+                    if emit_linear_awk_op(&mut bcx, op, &mut stack, fmod_f64_ref, math, ret_ty)? {
+                        continue;
+                    }
                     emit_data_op(
                         &mut bcx,
                         op,
@@ -4321,6 +4610,7 @@ mod cranelift_jit_impl {
             blob: &NativeBlob,
             ret_is_bool: bool,
             slot_use: LinearSlotUse,
+            may_trap: bool,
         ) -> Option<CompiledLinear> {
             if blob.kind != KIND_LINEAR {
                 return None;
@@ -4347,6 +4637,7 @@ mod cranelift_jit_impl {
                 run,
                 ret_is_bool,
                 slot_use,
+                may_trap,
             })
         }
 
@@ -4649,8 +4940,9 @@ mod cranelift_jit_impl {
                 .map(Cell::is_bool)
                 .unwrap_or(false);
             let slot_use = LinearSlotUse::of(&chunk.ops);
+            let may_trap = linear_may_trap(&chunk.ops);
             if let Some(blob) = read_blob(dir, "lin", chunk.op_hash, 0, 0) {
-                if let Some(compiled) = load_native(&blob, ret_is_bool, slot_use) {
+                if let Some(compiled) = load_native(&blob, ret_is_bool, slot_use, may_trap) {
                     super::super::bump(&super::super::COUNTERS.disk_loads);
                     return Some(compiled);
                 }
@@ -4661,7 +4953,7 @@ mod cranelift_jit_impl {
                 return None;
             };
             write_blob(dir, "lin", chunk.op_hash, 0, &blob);
-            load_native(&blob, ret_is_bool, slot_use)
+            load_native(&blob, ret_is_bool, slot_use, may_trap)
         }
 
         /// Block-tier equivalent of [`try_load_or_build`]. Keyed by `op_hash`.
@@ -9137,6 +9429,10 @@ impl JitCompiler {
     /// `slots` is read-only: a chunk that addresses a slot past `slots.len()`
     /// declines, and slot writes made by the chunk land in a private copy that
     /// is discarded after the run.
+    ///
+    /// An awk trap (zero divisor in `AwkDivJit`/`AwkModJit`, negative operand
+    /// to a gawk bitwise op) also returns `None`, with the trap channel
+    /// drained: run the chunk in the interpreter to raise the awk fatal.
     #[cfg(feature = "jit")]
     /// Public method `try_run_linear` — see the implementing block's surrounding context for the call contract.
     pub fn try_run_linear(&self, chunk: &crate::Chunk, slots: &[i64]) -> Option<crate::Value> {

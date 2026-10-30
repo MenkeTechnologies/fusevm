@@ -920,6 +920,10 @@ impl Hash for Op {
             | Op::AwkArrayDelete(idx)
             | Op::AwkArrayClear(idx)
             | Op::AwkArrayLen(idx) => idx.hash(state),
+            // The field index selects which `$N` the host hook reads, so it
+            // must reach `op_hash`: the JIT caches are keyed on it alone, and
+            // ignoring it made `$1` and `$2` chunks share one compiled entry.
+            Op::AwkGetFieldNum(idx) => idx.hash(state),
             Op::Jump(t)
             | Op::JumpIfTrue(t)
             | Op::JumpIfFalse(t)
@@ -1133,7 +1137,6 @@ impl Hash for Op {
             | Op::AwkLshiftJit
             | Op::AwkRshiftJit
             | Op::AwkComplJit
-            | Op::AwkGetFieldNum(_)
             | Op::AwkCompl
             | Op::AwkLshift
             | Op::AwkRshift
