@@ -346,8 +346,6 @@ mod disk_cache {
     }
 
     /// The linear blob file for `ops` (see `cache_path` in `src/jit.rs`).
-    /// Checked by name, not by counting files: the cache directory override is
-    /// process-global, so concurrently running tests may write into it too.
     fn lin_blob(dir: &std::path::Path, ops: &[Op]) -> std::path::PathBuf {
         let op_hash = build(ops).op_hash;
         dir.join(format!("{op_hash:016x}.{:016x}.lin.fjit", 0))
@@ -355,10 +353,8 @@ mod disk_cache {
 
     fn run_in(dir: &std::path::Path, ops: &[Op]) -> Option<Value> {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir.to_path_buf()));
-        let r = jit.try_run_linear(&build(ops), &[]);
-        jit.set_jit_cache_dir(None);
-        r
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir.to_path_buf()));
+        jit.try_run_linear(&build(ops), &[])
     }
 
     /// Each new libcall (div trap, bit trap, negative-argument warning, `$N`

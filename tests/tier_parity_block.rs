@@ -510,8 +510,6 @@ fn global_chunks_round_trip_through_the_disk_cache() {
             .unwrap()
             .as_nanos()
     ));
-    let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
     let chunk = salted(&[
         Op::GetVar(0),
         Op::LoadInt(3),
@@ -530,10 +528,12 @@ fn global_chunks_round_trip_through_the_disk_cache() {
             format!("{r:?} {:?}", vm.globals)
         };
         // Thread A compiles and writes the blob, thread B loads it; each is a
-        // fresh thread, so its in-memory block cache starts cold.
+        // fresh thread, so its in-memory block cache starts cold. Each pins
+        // `dir` for itself only, so no other test's compiles land in it.
         for _ in 0..2 {
-            let (chunk, seed) = (chunk.clone(), globals.clone());
+            let (chunk, seed, dir) = (chunk.clone(), globals.clone(), dir.clone());
             let got = std::thread::spawn(move || {
+                let _cache_dir = JitCompiler::new().scope_jit_cache_dir(Some(dir));
                 let mut last = String::new();
                 for _ in 0..2 {
                     let mut vm = VM::new(chunk.clone());
@@ -555,8 +555,7 @@ fn global_chunks_round_trip_through_the_disk_cache() {
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        // The cache directory is process-wide, so other tests in this binary
-        // write to it too; count only this chunk's blobs.
+        // Count this chunk's block blobs.
         .filter(|n| n.starts_with(&prefix) && n.contains(".blk."))
         .count();
     assert_eq!(blobs, 2, "one block blob per global-kind signature");
