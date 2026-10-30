@@ -658,7 +658,7 @@ b.emit(Op::AwkSubstr(<span class="var">3</span>), <span class="var">1</span>);  
         <table class="arch-table">
           <tr><th>Tier</th><th>Trigger</th><th>Coverage</th><th>Speculation</th></tr>
           <tr><td><code>Linear</code></td><td>first call</td><td>Straight-line expression chunks; returns <code>Value</code> (int or float)</td><td>None — IR matches bytecode exactly</td></tr>
-          <tr><td><code>Block</code></td><td>≥ 1 invocation (default)</td><td>Whole-chunk CFG (loops, branches, fused backedges)</td><td>None — slot ops assume i64</td></tr>
+          <tr><td><code>Block</code></td><td>≥ 1 invocation (default)</td><td>Whole-chunk CFG (loops, branches, fused backedges, kept-value jumps, <code>LogAnd</code>/<code>LogOr</code>, globals)</td><td>Entry check, no deopt: every slot and every referenced global must be a native <code>Int</code>/<code>Float</code>, else the interpreter runs the chunk</td></tr>
           <tr><td><code>Tracing</code></td><td>≥ 50 backedges through any loop header</td><td>Hot path through anything; recorded loop body compiled with type-specialized IR</td><td>Slot-type entry guard + per-branch <code>brif</code> guards; deopts to interpreter on guard miss</td></tr>
         </table>
 

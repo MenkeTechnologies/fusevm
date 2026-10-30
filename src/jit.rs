@@ -41,7 +41,9 @@
 //! `NumEq`/`NumNe`/`NumLt`/`NumGt`/`NumLe`/`NumGe`/`Spaceship`,
 //! `BitAnd`/`BitOr`/`BitXor`/`BitNot`/`Shl`/`Shr`,
 //! `LogNot`,
-//! `Jump`/`JumpIfTrue`/`JumpIfFalse`/`JumpIfTrueKeep`/`JumpIfFalseKeep` (block tier only),
+//! `Jump`/`JumpIfTrue`/`JumpIfFalse` (block tier only),
+//! `JumpIfTrueKeep`/`JumpIfFalseKeep`, `LogAnd`/`LogOr`, `GetVar`/`SetVar`/`DeclareVar` (whole block chunks only;
+//! globals are promoted from a globals buffer and must be native `Int`/`Float` at entry),
 //! `PreIncSlot`/`PreIncSlotVoid`/`SlotLtIntJumpIfFalse`/`SlotIncLtIntJumpBack`/`AccumSumLoop`/`AddAssignSlotVoid`.
 
 /// Extension trait for language-specific JIT codegen.
@@ -85,6 +87,8 @@ pub trait JitExtension: Send + Sync {
     }
 }
 
+#[cfg(feature = "jit")]
+pub(crate) use cranelift_jit_impl::BlockGlobals;
 #[cfg(feature = "jit")]
 pub use cranelift_jit_impl::ExtJitCtx;
 
@@ -3927,8 +3931,10 @@ mod cranelift_jit_impl {
         // Bumped when the compiled entry point's ABI changes. `FJITNAT3`: the
         // trace function gained a second pointer parameter (the globals
         // buffer), so a blob written by an earlier build would be called with
+        // the wrong signature. `FJITNAT4`: the block function gained the same
+        // second pointer parameter (globals promoted by the block tier).
         // the wrong signature.
-        const MAGIC: &[u8; 8] = b"FJITNAT3";
+        const MAGIC: &[u8; 8] = b"FJITNAT4";
         // 7 -> 8: inserted `Op::PowFloat` mid-enum, shifting the serde/Hash
         // discriminants of all following ops; bumped to invalidate any prior
         // op_hash-keyed blobs that would otherwise collide.
@@ -3955,7 +3961,9 @@ mod cranelift_jit_impl {
         // 17 -> 18: block blobs carry a `ret_is_void` flag (bit 2). A blob
         // written before it reads back as an integer result for a chunk that
         // leaves no value, so it must be rebuilt rather than trusted.
-        const SCHEMA_VERSION: u32 = 18;
+        // 18 -> 19: block code addresses referenced globals through a second
+        // entry parameter and its aux word folds in their kinds.
+        const SCHEMA_VERSION: u32 = 19;
 
         /// Current address of a host helper by id, or `None` if unknown.
         fn host_addr(id: u32) -> Option<usize> {
@@ -4642,7 +4650,7 @@ mod cranelift_jit_impl {
         }
 
         /// Map a block blob and build a [`CompiledBlock`]. Block functions are
-        /// always `fn(*mut i64) -> i64` (the `SlotsI` variant).
+        /// always `fn(*mut i64, *mut i64) -> i64` (the `SlotsI` variant).
         pub(crate) fn load_native_block(blob: &NativeBlob) -> Option<CompiledBlock> {
             if blob.kind != KIND_BLOCK {
                 return None;
@@ -4961,13 +4969,16 @@ mod cranelift_jit_impl {
             chunk: &Chunk,
             dir: &Path,
             slot_kinds: &[crate::SlotKind],
+            global_kinds: &[crate::SlotKind],
         ) -> Option<CompiledBlock> {
             // The slot-kinds hash is the verification aux word: native code
             // compiled for Int slots must not be reused for Float slots (the
             // bit-cast/arithmetic differs), so a kinds mismatch rejects the file.
-            // The numeric policy is salted in for the same reason: strict-mode
-            // code traps on integer overflow where coercing-mode code wraps.
-            let kinds_hash = slot_kinds_hash(slot_kinds) ^ crate::jit::numeric_policy_salt();
+            // The referenced globals' kinds join it for the same reason. The
+            // numeric policy is salted in too: strict-mode code traps on
+            // integer overflow where coercing-mode code wraps.
+            let kinds_hash = block_kinds_hash(chunk, slot_kinds, global_kinds)
+                ^ crate::jit::numeric_policy_salt();
             if let Some(blob) = read_blob(dir, "blk", chunk.op_hash, kinds_hash, kinds_hash) {
                 if let Some(compiled) = load_native_block(&blob) {
                     super::super::bump(&super::super::COUNTERS.disk_loads);
@@ -4975,7 +4986,7 @@ mod cranelift_jit_impl {
                 }
             }
             super::super::bump(&super::super::COUNTERS.disk_misses);
-            let Some(blob) = compile_block_native(chunk, slot_kinds) else {
+            let Some(blob) = compile_block_native(chunk, slot_kinds, global_kinds) else {
                 super::super::bump(&super::super::COUNTERS.disk_rejects);
                 return None;
             };
@@ -5037,6 +5048,7 @@ mod cranelift_jit_impl {
         pub(crate) fn compile_block_native(
             chunk: &Chunk,
             slot_kinds: &[crate::SlotKind],
+            global_kinds: &[crate::SlotKind],
         ) -> Option<NativeBlob> {
             let (
                 BuiltFn {
@@ -5047,7 +5059,7 @@ mod cranelift_jit_impl {
                     ext_helpers,
                 },
                 ret,
-            ) = build_block_function(chunk, slot_kinds)?;
+            ) = build_block_function(chunk, slot_kinds, global_kinds)?;
             let (code, relocs) = {
                 let isa = module.isa();
                 compile_and_extract(&mut ctx, isa, |index| {
@@ -5062,7 +5074,7 @@ mod cranelift_jit_impl {
                 ret_is_float: ret == BlockRet::Float,
                 need_slots: true,
                 ret_is_void: ret == BlockRet::Void,
-                aux: slot_kinds_hash(slot_kinds),
+                aux: block_kinds_hash(chunk, slot_kinds, global_kinds),
             })
         }
 
@@ -5117,7 +5129,7 @@ mod cranelift_jit_impl {
 
     // Specialized block-JIT function pointer types.
     // Saves a register by omitting the slot pointer when the chunk doesn't use slots.
-    type BlockFnSlotsI = unsafe extern "C" fn(*mut i64) -> i64;
+    type BlockFnSlotsI = unsafe extern "C" fn(*mut i64, *mut i64) -> i64;
     type BlockFnSlotsF = unsafe extern "C" fn(*mut i64) -> f64;
     type BlockFnNoSlotsI = unsafe extern "C" fn() -> i64;
     type BlockFnNoSlotsF = unsafe extern "C" fn() -> f64;
@@ -5146,7 +5158,7 @@ mod cranelift_jit_impl {
         backing: BlockBacking,
         run: BlockRun,
         /// How to read the `i64` return register (the block signature is always
-        /// `fn(*mut i64) -> i64`; float results are `bitcast`, not truncated, so a
+        /// `fn(*mut i64, *mut i64) -> i64`; float results are `bitcast`, not truncated, so a
         /// typed caller can recover the exact value via [`f64::from_bits`]).
         ret: BlockRet,
     }
@@ -5170,7 +5182,7 @@ mod cranelift_jit_impl {
         /// exact same value they did before float returns were bit-encoded).
         #[allow(dead_code)]
         pub(crate) fn invoke(&self, slots: &mut [i64]) -> i64 {
-            let (bits, ret) = self.invoke_typed(slots);
+            let (bits, ret) = self.invoke_typed(slots, &mut []);
             if ret == BlockRet::Float {
                 f64::from_bits(bits as u64) as i64
             } else {
@@ -5181,14 +5193,28 @@ mod cranelift_jit_impl {
         /// Invoke and return `(raw_bits, ret)`. For a float result `raw_bits` is
         /// the `f64` bit pattern (recover via `f64::from_bits`); for an integer
         /// result it is the plain `i64`.
-        pub(crate) fn invoke_typed(&self, slots: &mut [i64]) -> (i64, BlockRet) {
+        ///
+        /// `globals` is the whole global table encoded as `fill_global_buffers`
+        /// does, addressed by global index; empty for a chunk that references
+        /// no global (the caller declines one that does — see
+        /// `BlockCacheEntry::globals_needed`).
+        pub(crate) fn invoke_typed(
+            &self,
+            slots: &mut [i64],
+            globals: &mut [i64],
+        ) -> (i64, BlockRet) {
             let ptr = if slots.is_empty() {
                 std::ptr::null_mut()
             } else {
                 slots.as_mut_ptr()
             };
+            let gptr = if globals.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                globals.as_mut_ptr()
+            };
             let raw = match &self.run {
-                BlockRun::SlotsI(f) => unsafe { f(ptr) },
+                BlockRun::SlotsI(f) => unsafe { f(ptr, gptr) },
                 BlockRun::NoSlotsI(f) => unsafe { f() },
                 BlockRun::SlotsF(f) => (unsafe { f(ptr) }).to_bits() as i64,
                 BlockRun::NoSlotsF(f) => (unsafe { f() }).to_bits() as i64,
@@ -5211,7 +5237,10 @@ mod cranelift_jit_impl {
                         leaders.insert(ip + 1);
                     }
                 }
-                Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
+                Op::JumpIfTrue(t)
+                | Op::JumpIfFalse(t)
+                | Op::JumpIfTrueKeep(t)
+                | Op::JumpIfFalseKeep(t) => {
                     leaders.insert(*t);
                     if ip + 1 < ops.len() {
                         leaders.insert(ip + 1);
@@ -5310,9 +5339,10 @@ mod cranelift_jit_impl {
     /// block and trace tiers otherwise admit.
     ///
     /// `Op::Spaceship` is deliberately absent — it answers `Value::Int(-1|0|1)`
-    /// (see its arm in `vm.rs`), not a boolean. `Op::LogAnd`/`Op::LogOr` and the
-    /// `Op::Str*` comparisons do produce booleans but are not in the eligible
-    /// set at all, so they never reach this check.
+    /// (see its arm in `vm.rs`), not a boolean. `Op::LogAnd`/`Op::LogOr` are
+    /// admitted only in a whole block chunk (`is_block_chunk_op_at`), under
+    /// the same escape rule. The `Op::Str*` comparisons do produce booleans but
+    /// are not in the eligible set at all, so they never reach this check.
     fn produces_bool(op: &Op) -> bool {
         matches!(
             op,
@@ -5325,6 +5355,8 @@ mod cranelift_jit_impl {
                 | Op::NumLe
                 | Op::NumGe
                 | Op::LogNot
+                | Op::LogAnd
+                | Op::LogOr
         )
     }
 
@@ -5594,9 +5626,127 @@ mod cranelift_jit_impl {
         let result = !ops.is_empty()
             && !ops.iter().any(|op| matches!(op, Op::PopFrame))
             && divisions_are_not_join_points(ops)
-            && (0..ops.len()).all(|ip| is_block_eligible_op_at(ops, ip, true));
+            && (0..ops.len()).all(|ip| is_block_chunk_op_at(ops, ip));
         BLOCK_ELIGIBLE_TLS.with(|c| c.borrow_mut().insert(key, result));
         result
+    }
+
+    /// Per-op eligibility for a *whole* block chunk: [`is_block_eligible_op_at`]
+    /// plus the ops only a whole-chunk compile can lower.
+    ///
+    /// - `GetVar`/`SetVar`/`DeclareVar`: every referenced global is promoted to
+    ///   a register from the globals buffer at entry, and the ones the chunk
+    ///   writes are spilled back at its return (see [`BlockGlobals`]). A JIT
+    ///   region and a recorded trace have no such entry/return pair under this
+    ///   rule (the trace tier has its own global promotion), so they keep
+    ///   routing through `is_block_eligible_op_at`, which refuses these.
+    /// - `JumpIfTrueKeep`/`JumpIfFalseKeep`: the tested value stays on the
+    ///   operand stack on both edges, carried as a block parameter like any
+    ///   other live stack entry. `find_jit_region`/`extract_region` do not
+    ///   rebase these targets, and the trace tier has no codegen for them.
+    /// - `LogAnd`/`LogOr`: produce a `Value::Bool`, so they obey the same
+    ///   escape rule as the comparisons (`bool_is_consumed_in_place`, or the
+    ///   chunk result). Their operands cannot be booleans — a boolean that is
+    ///   not consumed by a jump or `Pop` makes the chunk ineligible already —
+    ///   so each operand is an int or float register tested for truth.
+    fn is_block_chunk_op_at(ops: &[Op], ip: usize) -> bool {
+        match &ops[ip] {
+            Op::GetVar(_)
+            | Op::SetVar(_)
+            | Op::DeclareVar(_)
+            | Op::JumpIfTrueKeep(_)
+            | Op::JumpIfFalseKeep(_) => true,
+            Op::LogAnd | Op::LogOr => {
+                bool_is_consumed_in_place(ops, ip) || bool_is_chunk_result(ops, ip)
+            }
+            _ => is_block_eligible_op_at(ops, ip, true),
+        }
+    }
+
+    /// The globals a block chunk references, each listed once in ascending
+    /// order. `used` drives the entry guard and the register promotion;
+    /// `written` (a subset of `used`) is what the compiled code spills back to
+    /// the globals buffer and what `VM::run` copies into `vm.globals`. A global
+    /// the chunk only reads is never written back, so its `Value` is exactly
+    /// the one the chunk entered with.
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct BlockGlobals {
+        pub(crate) used: Vec<u16>,
+        pub(crate) written: Vec<u16>,
+    }
+
+    pub(crate) fn collect_block_globals(ops: &[Op]) -> BlockGlobals {
+        let mut used = BTreeSet::new();
+        let mut written = BTreeSet::new();
+        for op in ops {
+            match op {
+                Op::GetVar(g) => {
+                    used.insert(*g);
+                }
+                Op::SetVar(g) | Op::DeclareVar(g) => {
+                    used.insert(*g);
+                    written.insert(*g);
+                }
+                _ => {}
+            }
+        }
+        BlockGlobals {
+            used: used.into_iter().collect(),
+            written: written.into_iter().collect(),
+        }
+    }
+
+    /// Kinds of the referenced globals, folded into the block cache key beside
+    /// [`slot_kinds_hash`]: code compiled for an `Int` global bit-casts and
+    /// computes differently from code compiled for a `Float` one. `0` for a
+    /// chunk that references no global, so those keys are unchanged.
+    pub(crate) fn block_globals_hash(used: &[u16], global_kinds: &[super::SlotKind]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        if used.is_empty() {
+            return 0;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for &g in used {
+            g.hash(&mut h);
+            matches!(global_kinds.get(g as usize), Some(super::SlotKind::Float)).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Slot and referenced-global kinds of a block chunk in one word — the
+    /// cold-path form of the key `try_run_block_inner` builds from a cached
+    /// [`BlockGlobals::used`].
+    #[cfg_attr(not(feature = "jit-disk-cache"), allow(dead_code))]
+    pub(crate) fn block_kinds_hash(
+        chunk: &Chunk,
+        slot_kinds: &[super::SlotKind],
+        global_kinds: &[super::SlotKind],
+    ) -> u64 {
+        slot_kinds_hash(slot_kinds)
+            ^ block_globals_hash(&collect_block_globals(&chunk.ops).used, global_kinds)
+    }
+
+    /// The globals half of a block invocation, from `VM::run`.
+    ///
+    /// `buf`/`kinds` are the whole global table as
+    /// `fill_global_buffers` encodes it, addressed by global index; `used` is
+    /// the chunk's [`BlockGlobals::used`]. The direct `try_run_block*` entry
+    /// points pass [`BlockGlobalArgs::none`], so a chunk that references a
+    /// global is declined there rather than handed a buffer it would overrun.
+    pub(crate) struct BlockGlobalArgs<'a> {
+        pub(crate) used: &'a [u16],
+        pub(crate) buf: &'a mut [i64],
+        pub(crate) kinds: &'a [super::SlotKind],
+    }
+
+    impl BlockGlobalArgs<'_> {
+        fn none() -> BlockGlobalArgs<'static> {
+            BlockGlobalArgs {
+                used: &[],
+                buf: &mut [],
+                kinds: &[],
+            }
+        }
     }
 
     /// Find the largest contiguous JIT-eligible region in a chunk.
@@ -5811,13 +5961,14 @@ mod cranelift_jit_impl {
     /// Build the block-JIT Cranelift function for `chunk`. Returns the built
     /// function plus its [`BlockRet`]: whether the chunk's result is an integer,
     /// a float (returned as the raw `f64` bit pattern in the `i64` return
-    /// register — the signature is always `fn(*mut i64) -> i64`), or absent.
+    /// register — the signature is always `fn(*mut i64, *mut i64) -> i64`), or absent.
     /// Returns `None` if the chunk is block-ineligible, or if two distinct return
     /// points disagree on that kind (an inconsistent ABI the caller can't decode)
     /// — in which case the caller falls back to the interpreter.
     pub(crate) fn build_block_function(
         chunk: &Chunk,
         slot_kinds: &[super::SlotKind],
+        global_kinds: &[super::SlotKind],
     ) -> Option<(BuiltFn, BlockRet)> {
         let ops = &chunk.ops;
         if !is_block_eligible(chunk) {
@@ -5831,6 +5982,11 @@ mod cranelift_jit_impl {
         // Float slot so the chunk falls back to the interpreter.
         let slot_is_float =
             |slot: u16| matches!(slot_kinds.get(slot as usize), Some(super::SlotKind::Float));
+        // Globals follow the same rule, from the kinds the globals held at entry
+        // (`VM::run` declines the chunk unless every referenced one is a native
+        // `Int`/`Float`, so these kinds are exact).
+        let global_is_float =
+            |g: u16| matches!(global_kinds.get(g as usize), Some(super::SlotKind::Float));
 
         let leaders = find_leaders(ops);
         let leader_vec: Vec<usize> = leaders.iter().copied().collect();
@@ -5907,6 +6063,7 @@ mod cranelift_jit_impl {
         let ptr_ty = module.target_config().pointer_type();
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 slots
+        sig.params.push(AbiParam::new(ptr_ty)); // *mut i64 globals
         sig.returns.push(AbiParam::new(types::I64)); // result
 
         let fid = module
@@ -5964,6 +6121,21 @@ mod cranelift_jit_impl {
                 );
                 bcx.def_var(var, val);
                 slot_vars.insert(slot, var);
+            }
+
+            // ── Global promotion: the same treatment, from the globals ──
+            // ── pointer, addressed by global index (`g * 8`).            ──
+            // Only the globals the chunk writes are spilled at the return.
+            let global_base = bcx.block_params(entry)[1];
+            let block_globals = collect_block_globals(ops);
+            let mut global_vars: HashMap<u16, Variable> = HashMap::new();
+            for &g in &block_globals.used {
+                let var = bcx.declare_var(types::I64);
+                let val =
+                    bcx.ins()
+                        .load(types::I64, MemFlags::trusted(), global_base, (g as i32) * 8);
+                bcx.def_var(var, val);
+                global_vars.insert(g, var);
             }
 
             let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
@@ -6087,6 +6259,94 @@ mod cranelift_jit_impl {
                             )?;
                             bcx.ins().brif(pred, fall, &fargs, target_block, &targs);
                             block_terminated = true;
+                        }
+
+                        // Keep variants: test the top of the stack without
+                        // popping it (`self.peek()` in `vm.rs`), so the value
+                        // rides into both successors as a block parameter.
+                        Op::JumpIfTrueKeep(target) | Op::JumpIfFalseKeep(target) => {
+                            let &(cond, ty) = stack.last()?;
+                            let pred = cond_to_i1(&mut bcx, cond, ty);
+                            let target_block = *block_map.get(target)?;
+                            let fall = if ip + 1 < ops.len() {
+                                *block_map.get(&(ip + 1))?
+                            } else {
+                                return None;
+                            };
+                            let targs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                target_block,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            let fargs = branch_block_args(
+                                &mut bcx,
+                                entry,
+                                fall,
+                                &stack,
+                                &mut block_param_tys,
+                            )?;
+                            if matches!(op, Op::JumpIfTrueKeep(_)) {
+                                bcx.ins().brif(pred, target_block, &targs, fall, &fargs);
+                            } else {
+                                bcx.ins().brif(pred, fall, &fargs, target_block, &targs);
+                            }
+                            block_terminated = true;
+                        }
+
+                        // `LogAnd`/`LogOr` — `Bool(a.is_truthy() op
+                        // b.is_truthy())`. Eligibility guarantees both operands
+                        // are int/float registers and the result is consumed
+                        // as a truth value, discarded, or is the chunk result
+                        // (decoded back to `Bool` by `chunk_result_is_bool`).
+                        Op::LogAnd | Op::LogOr => {
+                            let (b, bty) = stack.pop()?;
+                            let (a, aty) = stack.pop()?;
+                            let ta = cond_to_i1(&mut bcx, a, aty);
+                            let tb = cond_to_i1(&mut bcx, b, bty);
+                            let t = if matches!(op, Op::LogAnd) {
+                                bcx.ins().band(ta, tb)
+                            } else {
+                                bcx.ins().bor(ta, tb)
+                            };
+                            let r = bcx.ins().uextend(types::I64, t);
+                            stack.push((r, JitTy::Int));
+                        }
+
+                        // ── Global data ops: promoted Variables, kinds fixed ──
+                        // ── at entry exactly like the slots'.                ──
+                        Op::GetVar(g) => {
+                            let var = *global_vars.get(g)?;
+                            let raw = bcx.use_var(var);
+                            if global_is_float(*g) {
+                                let f = bcx.ins().bitcast(
+                                    types::F64,
+                                    cranelift_codegen::ir::MemFlags::new(),
+                                    raw,
+                                );
+                                stack.push((f, JitTy::Float));
+                            } else {
+                                stack.push((raw, JitTy::Int));
+                            }
+                        }
+                        Op::SetVar(g) | Op::DeclareVar(g) => {
+                            let var = *global_vars.get(g)?;
+                            let (v, ty) = stack.pop()?;
+                            // A store of the other kind has no encoding under
+                            // the global's fixed kind (see `Op::SetSlot` below
+                            // for the two ways that went wrong for slots).
+                            // Decline and let the interpreter run it.
+                            let v_i = match (global_is_float(*g), ty) {
+                                (false, JitTy::Int) => v,
+                                (true, JitTy::Float) => bcx.ins().bitcast(
+                                    types::I64,
+                                    cranelift_codegen::ir::MemFlags::new(),
+                                    v,
+                                ),
+                                _ => return None,
+                            };
+                            bcx.def_var(var, v_i);
                         }
 
                         // ── Slot data ops: use Variables (register-allocated) ──
@@ -6620,6 +6880,13 @@ mod cranelift_jit_impl {
                             bcx.ins()
                                 .store(MemFlags::trusted(), val, slot_base, (slot as i32) * 8);
                         }
+                        // Spill the globals the chunk owns (writes); the
+                        // read-only ones are left exactly as they entered.
+                        for &g in &block_globals.written {
+                            let val = bcx.use_var(*global_vars.get(&g)?);
+                            bcx.ins()
+                                .store(MemFlags::trusted(), val, global_base, (g as i32) * 8);
+                        }
                         bcx.ins().return_(&[ret_val]);
                     } else {
                         // Non-final unterminated block: fall through to the next leader,
@@ -6757,10 +7024,11 @@ mod cranelift_jit_impl {
     }
 
     /// In-memory block JIT: build the function and finalize it through the
-    /// `JITModule`. Block functions are always `fn(*mut i64) -> i64`.
+    /// `JITModule`. Block functions are always `fn(*mut i64, *mut i64) -> i64`.
     pub(crate) fn compile_block(
         chunk: &Chunk,
         slot_kinds: &[super::SlotKind],
+        global_kinds: &[super::SlotKind],
     ) -> Option<CompiledBlock> {
         let (
             BuiltFn {
@@ -6771,12 +7039,12 @@ mod cranelift_jit_impl {
                 ext_helpers: _,
             },
             ret,
-        ) = build_block_function(chunk, slot_kinds)?;
+        ) = build_block_function(chunk, slot_kinds, global_kinds)?;
         module.define_function(fid, &mut ctx).ok()?;
         module.clear_context(&mut ctx);
         module.finalize_definitions().ok()?;
         let ptr = module.get_finalized_function(fid);
-        // Always SlotsI: signature is fn(*mut i64) -> i64. A float result rides
+        // Always SlotsI: signature is fn(*mut i64, *mut i64) -> i64. A float result rides
         // back in the i64 register as its f64 bit pattern; `ret` tells a typed
         // caller to decode it.
         let run = BlockRun::SlotsI(unsafe { std::mem::transmute::<*const u8, BlockFnSlotsI>(ptr) });
@@ -6805,6 +7073,11 @@ mod cranelift_jit_impl {
         /// loads and stores every such slot through the caller's buffer
         /// unchecked, so a shorter buffer is declined instead of overrun.
         slots_needed: usize,
+        /// The same bound for globals: one past the highest global index the
+        /// chunk addresses. Only `VM::run` supplies a globals buffer, so on the
+        /// direct `try_run_block*` entry points a chunk that references a
+        /// global is declined here.
+        globals_needed: usize,
     }
 
     thread_local! {
@@ -6821,7 +7094,14 @@ mod cranelift_jit_impl {
     /// Below the threshold this returns `None` and the caller falls back to the
     /// interpreter — avoiding compile cost for one-shot chunks.
     pub(crate) fn try_run_block(chunk: &Chunk, slots: &mut [i64]) -> Option<i64> {
-        try_run_block_inner(chunk, slots, &[], cfg_block_threshold()).map(decode_block_i64)
+        try_run_block_inner(
+            chunk,
+            slots,
+            &[],
+            BlockGlobalArgs::none(),
+            cfg_block_threshold(),
+        )
+        .map(decode_block_i64)
     }
 
     /// Slot-kind-aware variant: `slot_kinds[i]` gives the runtime kind of slot
@@ -6832,7 +7112,14 @@ mod cranelift_jit_impl {
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
     ) -> Option<i64> {
-        try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold()).map(decode_block_i64)
+        try_run_block_inner(
+            chunk,
+            slots,
+            slot_kinds,
+            BlockGlobalArgs::none(),
+            cfg_block_threshold(),
+        )
+        .map(decode_block_i64)
     }
 
     /// Typed slot-kind-aware variant: returns the chunk result as a
@@ -6844,14 +7131,20 @@ mod cranelift_jit_impl {
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
     ) -> Option<super::BlockNum> {
-        try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold())
-            .map(|r| decode_block_num(chunk, r))
+        try_run_block_inner(
+            chunk,
+            slots,
+            slot_kinds,
+            BlockGlobalArgs::none(),
+            cfg_block_threshold(),
+        )
+        .map(|r| decode_block_num(chunk, r))
     }
 
     /// Like `try_run_block` but compiles immediately (no warmup). For tests
     /// and synthetic benchmarks where you want to skip the tiered policy.
     pub(crate) fn try_run_block_eager(chunk: &Chunk, slots: &mut [i64]) -> Option<i64> {
-        try_run_block_inner(chunk, slots, &[], 0).map(decode_block_i64)
+        try_run_block_inner(chunk, slots, &[], BlockGlobalArgs::none(), 0).map(decode_block_i64)
     }
 
     /// Slot-kind-aware eager variant (see [`try_run_block_kinded`]).
@@ -6860,7 +7153,8 @@ mod cranelift_jit_impl {
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
     ) -> Option<i64> {
-        try_run_block_inner(chunk, slots, slot_kinds, 0).map(decode_block_i64)
+        try_run_block_inner(chunk, slots, slot_kinds, BlockGlobalArgs::none(), 0)
+            .map(decode_block_i64)
     }
 
     /// Typed eager slot-kind-aware variant (see [`try_run_block_typed_kinded`]).
@@ -6869,7 +7163,8 @@ mod cranelift_jit_impl {
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
     ) -> Option<super::BlockNum> {
-        try_run_block_inner(chunk, slots, slot_kinds, 0).map(|r| decode_block_num(chunk, r))
+        try_run_block_inner(chunk, slots, slot_kinds, BlockGlobalArgs::none(), 0)
+            .map(|r| decode_block_num(chunk, r))
     }
 
     /// Decode a `(raw_bits, ret)` block result to an i64, truncating a float
@@ -6900,12 +7195,47 @@ mod cranelift_jit_impl {
     /// chunk which leaves its operand stack empty answers `Some(None)` — the
     /// interpreter's `VMResult::Halted` — instead of `Some(Int(0))`, which is a
     /// value the interpreter never produced.
+    ///
+    /// `used` is the chunk's [`BlockGlobals::used`]. When it is not empty the
+    /// global table is snapshotted into `global_buf`/`global_kinds`/
+    /// `global_numeric` (the trace tier's encoding, `fill_global_buffers`) and
+    /// every referenced global must hold a native `Int`/`Float` inside the
+    /// table: a `Bool` would be computed with as `Int(0|1)` where the
+    /// interpreter coerces it through `to_float`, a string or `Undef` (which
+    /// may also reach an `UndefHook`) as `Int(0)`, and a global past the end of
+    /// the table has no buffer entry. Any of those declines the run and the
+    /// interpreter takes it. The caller copies the chunk's written globals
+    /// back out of `global_buf` once it has ruled out the trap channels.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_run_block_vm(
         chunk: &Chunk,
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
+        used: &[u16],
+        globals: &[FuseValue],
+        global_buf: &mut Vec<i64>,
+        global_kinds: &mut Vec<super::SlotKind>,
+        global_numeric: &mut Vec<bool>,
     ) -> Option<Option<super::BlockNum>> {
-        let (raw, ret) = try_run_block_inner(chunk, slots, slot_kinds, cfg_block_threshold())?;
+        let gargs = if used.is_empty() {
+            BlockGlobalArgs::none()
+        } else {
+            fill_global_buffers(globals, global_buf, global_kinds, global_numeric);
+            if !used
+                .iter()
+                .all(|&g| global_numeric.get(g as usize).copied().unwrap_or(false))
+            {
+                super::bump(&super::COUNTERS.block_fallbacks);
+                return None;
+            }
+            BlockGlobalArgs {
+                used,
+                buf: global_buf,
+                kinds: global_kinds,
+            }
+        };
+        let (raw, ret) =
+            try_run_block_inner(chunk, slots, slot_kinds, gargs, cfg_block_threshold())?;
         Some((ret != BlockRet::Void).then(|| decode_block_num(chunk, (raw, ret))))
     }
 
@@ -6924,6 +7254,7 @@ mod cranelift_jit_impl {
         chunk: &Chunk,
         slots: &mut [i64],
         slot_kinds: &[super::SlotKind],
+        globals: BlockGlobalArgs<'_>,
         threshold: u32,
     ) -> Option<(i64, BlockRet)> {
         // Salt the key with the numeric policy: strict-mode native code traps on
@@ -6934,7 +7265,17 @@ mod cranelift_jit_impl {
         } else {
             0
         };
-        let key = (chunk.op_hash, slot_kinds_hash(slot_kinds) ^ policy_salt);
+        let key = (
+            chunk.op_hash,
+            slot_kinds_hash(slot_kinds)
+                ^ policy_salt
+                ^ block_globals_hash(globals.used, globals.kinds),
+        );
+        let BlockGlobalArgs {
+            buf: gbuf,
+            kinds: global_kinds,
+            ..
+        } = globals;
 
         BLOCK_CACHE_TLS.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
@@ -6944,6 +7285,10 @@ mod cranelift_jit_impl {
                 slots_needed: collect_slots(&chunk.ops)
                     .last()
                     .map_or(0, |&s| s as usize + 1),
+                globals_needed: collect_block_globals(&chunk.ops)
+                    .used
+                    .last()
+                    .map_or(0, |&g| g as usize + 1),
             });
 
             // A slot past the end of the buffer has no `i64` to load from or
@@ -6951,14 +7296,14 @@ mod cranelift_jit_impl {
             // (a null pointer for an empty buffer: `VM::run` on a frame with no
             // slots crashed with SIGSEGV once warm). The interpreter reads such
             // a slot as `Undef` and grows the frame on a write; run it there.
-            if slots.len() < entry.slots_needed {
+            if slots.len() < entry.slots_needed || gbuf.len() < entry.globals_needed {
                 super::bump(&super::COUNTERS.block_fallbacks);
                 return None;
             }
 
             if let Some(ref compiled) = entry.compiled {
                 super::bump(&super::COUNTERS.block_cache_hits);
-                return Some(compiled.invoke_typed(slots));
+                return Some(compiled.invoke_typed(slots, gbuf));
             }
 
             entry.hot_count = entry.hot_count.saturating_add(1);
@@ -6974,9 +7319,9 @@ mod cranelift_jit_impl {
             {
                 if let Some(dir) = disk_cache::cache_dir() {
                     if let Some(compiled) =
-                        disk_cache::try_load_or_build_block(chunk, &dir, slot_kinds)
+                        disk_cache::try_load_or_build_block(chunk, &dir, slot_kinds, global_kinds)
                     {
-                        let result = compiled.invoke_typed(slots);
+                        let result = compiled.invoke_typed(slots, gbuf);
                         entry.compiled = Some(Box::new(compiled));
                         return Some(result);
                     }
@@ -6985,11 +7330,11 @@ mod cranelift_jit_impl {
             }
 
             // Compile on threshold cross
-            let Some(compiled) = compile_block(chunk, slot_kinds) else {
+            let Some(compiled) = compile_block(chunk, slot_kinds, global_kinds) else {
                 super::bump(&super::COUNTERS.block_fallbacks);
                 return None;
             };
-            let result = compiled.invoke_typed(slots);
+            let result = compiled.invoke_typed(slots, gbuf);
             entry.compiled = Some(Box::new(compiled));
             Some(result)
         })
@@ -7644,9 +7989,9 @@ mod cranelift_jit_impl {
             Op::CallBuiltin(_, _) | Op::PushFrame | Op::PopFrame => false,
             // Globals: the trace tier promotes each referenced one to a
             // register at entry and spills it at every exit, the same way it
-            // treats a caller-frame slot. The block tier has no such buffer, so
-            // `is_block_eligible_op_at` still refuses these and a whole-chunk
-            // compile is unaffected.
+            // treats a caller-frame slot. The block tier promotes them only for a
+            // whole chunk (`is_block_chunk_op_at`); `is_block_eligible_op_at`
+            // still refuses them, so the fallthrough below never admits them.
             Op::GetVar(_) | Op::SetVar(_) | Op::DeclareVar(_) => true,
             _ => is_block_eligible_op_at(ops, ip, false),
         }
@@ -9603,14 +9948,38 @@ impl JitCompiler {
     /// `VM::run`'s block entry point: [`Self::try_run_block_typed_kinded`], except
     /// that a chunk which leaves no value answers `Some(None)` (the
     /// interpreter's `VMResult::Halted`) rather than `Some(BlockNum::Int(0))`.
+    /// `used` is the chunk's referenced globals ([`Self::block_globals`]); the
+    /// global table is snapshotted into the three buffers and guarded there.
     #[cfg(feature = "jit")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_run_block_vm(
         &self,
         chunk: &crate::Chunk,
         slots: &mut [i64],
         slot_kinds: &[SlotKind],
+        used: &[u16],
+        globals: &[crate::Value],
+        global_buf: &mut Vec<i64>,
+        global_kinds: &mut Vec<SlotKind>,
+        global_numeric: &mut Vec<bool>,
     ) -> Option<Option<BlockNum>> {
-        cranelift_jit_impl::try_run_block_vm(chunk, slots, slot_kinds)
+        cranelift_jit_impl::try_run_block_vm(
+            chunk,
+            slots,
+            slot_kinds,
+            used,
+            globals,
+            global_buf,
+            global_kinds,
+            global_numeric,
+        )
+    }
+
+    /// The globals a whole block chunk reads and writes, for `VM::run`'s entry
+    /// guard and write-back.
+    #[cfg(feature = "jit")]
+    pub(crate) fn block_globals(&self, chunk: &crate::Chunk) -> BlockGlobals {
+        cranelift_jit_impl::collect_block_globals(&chunk.ops)
     }
 
     /// Typed slot-kind-aware [`Self::try_run_block_kinded`]: returns the chunk result

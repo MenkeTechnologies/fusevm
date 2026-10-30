@@ -273,6 +273,12 @@ pub struct VM {
     /// perform on every run.
     #[cfg(feature = "jit")]
     block_eligible_cached: Option<bool>,
+    /// The globals `self.chunk` reads and writes, computed beside
+    /// [`VM::block_eligible_cached`] (and recomputed whenever that is reset).
+    /// The block tier guards the `used` ones at entry and `VM::run` copies
+    /// the `written` ones back after a native run.
+    #[cfg(feature = "jit")]
+    block_globals: crate::jit::BlockGlobals,
     /// Result captured by the AOT closed-world driver (`fusevm::aot`). The
     /// native entry function stores the terminating [`VMResult`] here via
     /// [`VM::aot_finish`]; the caller takes it after the driver returns.
@@ -611,6 +617,8 @@ impl VM {
             deopt_info: DeoptInfo::zeroed(),
             #[cfg(feature = "jit")]
             block_eligible_cached: None,
+            #[cfg(feature = "jit")]
+            block_globals: crate::jit::BlockGlobals::default(),
             #[cfg(feature = "aot")]
             aot_result: None,
             #[cfg(feature = "aot")]
@@ -1194,6 +1202,25 @@ impl VM {
         }
     }
 
+    /// Copy the globals a native block run wrote back into `self.globals`.
+    ///
+    /// Only [`BlockGlobals::written`](crate::jit::BlockGlobals) — the globals
+    /// the chunk owns. Every one of them was a native `Int`/`Float` inside the
+    /// table at entry (the block entry guard), and the compiled code keeps each
+    /// at that kind (a store of the other kind declines the compile), so the
+    /// entry kind in `global_kinds_buf` is the kind to materialize.
+    #[cfg(feature = "jit")]
+    fn write_block_globals_back(&mut self) {
+        for &g in &self.block_globals.written {
+            let g = g as usize;
+            let raw = self.global_buf[g];
+            self.globals[g] = match self.global_kinds_buf[g] {
+                SlotKind::Int => Value::Int(raw),
+                SlotKind::Float => Value::Float(f64::from_bits(raw as u64)),
+            };
+        }
+    }
+
     /// Consult the trace cache at a backward-branch site and return the IP
     /// the interpreter should resume at. If a compiled trace runs, slot state
     /// is copied back from the trace's i64 buffer into the frame, and any
@@ -1755,6 +1782,11 @@ impl VM {
                     let v = self.jit.is_block_eligible(&self.chunk)
                         && !self.chunk.ops.iter().any(|op| matches!(op, Op::PushFrame));
                     self.block_eligible_cached = Some(v);
+                    self.block_globals = if v {
+                        self.jit.block_globals(&self.chunk)
+                    } else {
+                        crate::jit::BlockGlobals::default()
+                    };
                     v
                 }
             };
@@ -1783,6 +1815,11 @@ impl VM {
                         &self.chunk,
                         &mut self.slot_buf,
                         &self.slot_kinds_buf,
+                        &self.block_globals.used,
+                        &self.globals,
+                        &mut self.global_buf,
+                        &mut self.global_kinds_buf,
+                        &mut self.global_numeric,
                     ) {
                         // Strict numeric mode: an integer op in the compiled block
                         // overflowed i64. The native result is the wrapped (wrong)
@@ -1818,6 +1855,7 @@ impl VM {
                                 _ => {}
                             }
                             self.write_slots_back(false);
+                            self.write_block_globals_back();
                             self.halted = true;
                             // Leave the VM where the interpreter would: past the
                             // last op. Left at 0, a second `run()` on this VM

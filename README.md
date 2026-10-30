@@ -340,7 +340,7 @@ fusevm runs three JIT tiers in increasing order of optimization power and compil
 | Tier | Trigger | Coverage | Speculation |
 |------|---------|----------|-------------|
 | **Linear** | `is_linear_eligible` + first call | Straight-line expression chunks; returns `Value` (int or float) | None — IR matches bytecode exactly |
-| **Block** | `is_block_eligible` + 1 invocation | Whole-chunk CFG (loops, branches, fused backedges) | None — slot ops assume i64 |
+| **Block** | `is_block_eligible` + 1 invocation | Whole-chunk CFG (loops, branches, fused backedges, kept-value jumps, `LogAnd`/`LogOr`, globals) | Entry check, no deopt: every slot and every referenced global must be a native `Int`/`Float`, else the interpreter runs the chunk |
 | **Tracing** | 50 backedges through any loop header | Hot path through anything; recorded loop body compiled with type-specialized IR | Slot-type entry guard; deopt to interpreter on guard miss |
 
 #### Tuning warmup for re-run-heavy workloads
@@ -392,6 +392,23 @@ build that predates global support still deserializes (an empty vector says
 exactly what it means — that trace referenced no global). An imported trace
 re-checks the live global table before it runs rather than trusting the
 persisted kinds.
+
+**Globals in whole block chunks.** The block tier lowers `GetVar`/`SetVar`/`DeclareVar`
+the same way, for a whole chunk only (`is_block_chunk_op_at`; JIT regions and the
+trace fallthrough still refuse them). The compiled function takes the global
+table as a second `*mut i64` parameter, encoded exactly as for traces; each
+referenced global is loaded into a register at entry, and only the globals the
+chunk writes are stored back at its return and copied into `vm.globals` by
+`VM::run` (after the overflow and AWK trap channels are ruled out). `VM::run`
+declines the run when any referenced global is a `Bool`, string, `Undef` or other
+non-native value, or lies past the end of the table; a store of the other numeric
+kind (an `Int` into a `Float` global, or the reverse) declines the compile. The
+kinds of the referenced globals join the slot kinds in the block cache key and the
+disk-cache aux word. The direct `try_run_block*` entry points pass no global table,
+so they decline a chunk that references one. The same whole-chunk rule admits
+`JumpIfTrueKeep`/`JumpIfFalseKeep` (the tested value rides both edges as a block
+parameter) and `LogAnd`/`LogOr` (a `Bool` result, under the same escape rule as the
+comparisons).
 
 **Persistent native-code disk cache (`jit-disk-cache`).** Enable with `cargo add fusevm --features jit-disk-cache` to cache compiled **native code** to disk, skipping Cranelift codegen across process restarts — a big win for workloads that re-launch the VM repeatedly (e.g. running a large test suite over and over). The cache covers **all three tiers** (linear, block, tracing) and is **on by default once the feature is enabled**, writing to `~/.cache/fusevm-jit`. Override the directory with the `FUSEVM_JIT_CACHE_DIR` env var or `JitCompiler::set_jit_cache_dir(Some(dir))`; disable at runtime with `FUSEVM_JIT_CACHE_DIR=off` or `set_jit_cache_dir(None)`.
 
@@ -525,6 +542,12 @@ multi-op sequences whose kinds change mid-chunk, slots and globals holding
 every `Value` kind (including ones the chunk never touches, which must come
 back untouched), slots past the end of the frame, and repeated `VM::run` calls
 on one VM so a block-tier warm-up cannot change an answer.
+
+`tests/tier_parity_block.rs` covers the whole-chunk-only block ops: global reads,
+writes and loops with every `Value` kind in the global table, globals past the
+table, kept-value jumps and `LogAnd`/`LogOr` on every truthiness edge, each run
+cold and warm through `VM::run` and asserted to compile (or to be declined)
+in the block tier, plus a disk-cache round trip keyed on the globals' kinds.
 
 `tests/tier_fuzz.rs` is the generative counterpart. A seeded generator builds
 structured programs — nested counter loops (plain and through the fused
