@@ -5965,19 +5965,16 @@ mod cranelift_jit_impl {
     /// The *first* predecessor to branch to a block fixes its parameter list (one
     /// param per live stack entry, typed by [`JitTy`]); every later predecessor must
     /// agree on arity and types, otherwise the chunk is rejected (`None`) and falls
-    /// back to the interpreter. Branching back to the entry block is unsupported
-    /// (its params are the function params), and also yields `None`. Returns the
-    /// block arguments to hand to the branch instruction.
+    /// back to the interpreter. Every bytecode block, op 0's included, is an
+    /// ordinary target: the function's entry block is a separate preamble that
+    /// no op maps to. Returns the block arguments to hand to the branch
+    /// instruction.
     fn branch_block_args(
         bcx: &mut FunctionBuilder,
-        entry: cranelift_codegen::ir::Block,
         target: cranelift_codegen::ir::Block,
         stack: &[(Value, JitTy)],
         param_tys: &mut HashMap<cranelift_codegen::ir::Block, Vec<JitTy>>,
     ) -> Option<Vec<BlockArg>> {
-        if target == entry && !stack.is_empty() {
-            return None;
-        }
         let tys: Vec<JitTy> = stack.iter().map(|(_, t)| *t).collect();
         match param_tys.get(&target) {
             Some(existing) => {
@@ -6127,8 +6124,11 @@ mod cranelift_jit_impl {
                 block_map.insert(leader_ip, bcx.create_block());
             }
 
-            // Entry block setup
-            let entry = block_map[&0];
+            // Entry block setup. The function's entry block is a preamble that
+            // only loads the slots and globals: Cranelift gives the entry block
+            // the function's params and no predecessors, so op 0 gets an ordinary
+            // block of its own that a loop whose header is op 0 can branch back to.
+            let entry = bcx.create_block();
             bcx.append_block_params_for_function_params(entry);
             bcx.switch_to_block(entry);
             let slot_base = bcx.block_params(entry)[0];
@@ -6194,6 +6194,10 @@ mod cranelift_jit_impl {
             let mut block_param_tys: HashMap<cranelift_codegen::ir::Block, Vec<JitTy>> =
                 HashMap::new();
 
+            let first = block_map[&0];
+            let first_args = branch_block_args(&mut bcx, first, &[], &mut block_param_tys)?;
+            bcx.ins().jump(first, &first_args);
+
             // The chunk's result kind, decided at the (one or more) return
             // points. All return points must agree; a disagreement makes the
             // i64-encoded result undecodable, so we bail to the interpreter.
@@ -6207,25 +6211,20 @@ mod cranelift_jit_impl {
                 };
 
                 let cur_block = block_map[&leader_ip];
-                // Switch to this block (unless it's the entry which we already started).
                 // Fallthrough jumps are emitted at the END of the predecessor block so
                 // the residual operand stack can be passed as block arguments.
-                if leader_ip > 0 {
-                    bcx.switch_to_block(cur_block);
-                }
+                bcx.switch_to_block(cur_block);
 
                 let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::new();
                 // Seed the local operand stack from this block's parameters (values
                 // carried in from predecessors across the merge).
-                if leader_ip > 0 {
-                    if let Some(tys) = block_param_tys.get(&cur_block) {
-                        let params: Vec<Value> = bcx.block_params(cur_block).to_vec();
-                        if params.len() != tys.len() {
-                            return None;
-                        }
-                        for (i, ty) in tys.iter().enumerate() {
-                            stack.push((params[i], *ty));
-                        }
+                if let Some(tys) = block_param_tys.get(&cur_block) {
+                    let params: Vec<Value> = bcx.block_params(cur_block).to_vec();
+                    if params.len() != tys.len() {
+                        return None;
+                    }
+                    for (i, ty) in tys.iter().enumerate() {
+                        stack.push((params[i], *ty));
                     }
                 }
                 let mut block_terminated = false;
@@ -6239,7 +6238,6 @@ mod cranelift_jit_impl {
                             let target_block = *block_map.get(target)?;
                             let args = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 target_block,
                                 &stack,
                                 &mut block_param_tys,
@@ -6259,14 +6257,12 @@ mod cranelift_jit_impl {
                             };
                             let targs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 target_block,
                                 &stack,
                                 &mut block_param_tys,
                             )?;
                             let fargs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 fall,
                                 &stack,
                                 &mut block_param_tys,
@@ -6286,14 +6282,12 @@ mod cranelift_jit_impl {
                             };
                             let targs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 target_block,
                                 &stack,
                                 &mut block_param_tys,
                             )?;
                             let fargs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 fall,
                                 &stack,
                                 &mut block_param_tys,
@@ -6316,14 +6310,12 @@ mod cranelift_jit_impl {
                             };
                             let targs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 target_block,
                                 &stack,
                                 &mut block_param_tys,
                             )?;
                             let fargs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 fall,
                                 &stack,
                                 &mut block_param_tys,
@@ -6534,14 +6526,12 @@ mod cranelift_jit_impl {
                             // if >= limit, jump to target; otherwise fall through
                             let targs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 target_block,
                                 &stack,
                                 &mut block_param_tys,
                             )?;
                             let fargs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 fall,
                                 &stack,
                                 &mut block_param_tys,
@@ -6569,14 +6559,12 @@ mod cranelift_jit_impl {
                             };
                             let targs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 target_block,
                                 &stack,
                                 &mut block_param_tys,
                             )?;
                             let fargs = branch_block_args(
                                 &mut bcx,
-                                entry,
                                 fall,
                                 &stack,
                                 &mut block_param_tys,
@@ -6935,7 +6923,6 @@ mod cranelift_jit_impl {
                         let next_block = *block_map.get(&block_end)?;
                         let args = branch_block_args(
                             &mut bcx,
-                            entry,
                             next_block,
                             &stack,
                             &mut block_param_tys,

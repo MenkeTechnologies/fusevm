@@ -1235,3 +1235,50 @@ fn lognot_on_a_float_compiles_and_agrees() {
     assert_tiers_agree("!nan", &[Op::LoadFloat(f64::NAN), Op::LogNot]);
     assert_tiers_agree("!inf", &[Op::LoadFloat(f64::INFINITY), Op::LogNot]);
 }
+
+/// A loop whose header is op 0 — the first thing in the chunk is the loop
+/// condition, and the back-edge jumps to op 0 — block-compiles and agrees with
+/// the interpreter. The function's native entry block cannot be a branch target,
+/// so op 0 must get a block of its own rather than sharing the entry's.
+#[test]
+fn block_jit_compiles_loop_whose_header_is_op_zero() {
+    // while i < 1000 { sum += i; i += 1 }; sum   (slot 0 = sum, slot 1 = i)
+    let mut b = ChunkBuilder::new();
+    b.emit(Op::GetSlot(1), 1); // 0: loop header
+    b.emit(Op::LoadInt(1000), 1);
+    b.emit(Op::NumLt, 1);
+    b.emit(Op::JumpIfFalse(13), 1);
+    b.emit(Op::GetSlot(0), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(0), 1);
+    b.emit(Op::GetSlot(1), 1);
+    b.emit(Op::LoadInt(1), 1);
+    b.emit(Op::Add, 1);
+    b.emit(Op::SetSlot(1), 1);
+    b.emit(Op::Jump(0), 1); // 12: back-edge to op 0
+    b.emit(Op::GetSlot(0), 1); // 13: exit
+    let chunk = b.build();
+
+    let mut vm = VM::new(chunk.clone());
+    vm.set_slot(0, Value::Int(0));
+    vm.set_slot(1, Value::Int(0));
+    let interp = match vm.run() {
+        VMResult::Ok(v) => v,
+        other => panic!("interpreter failed: {other:?}"),
+    };
+    assert_eq!(interp, Value::Int(499_500));
+
+    let jit = JitCompiler::new();
+    // Measure compilation itself: a blob persisted by an earlier run would
+    // otherwise be loaded instead of compiled.
+    let _no_disk = jit.scope_jit_cache_dir(None);
+    assert!(jit.is_block_eligible(&chunk));
+    let mut slots = vec![0i64; 2];
+    assert_eq!(
+        jit.try_run_block_eager(&chunk, &mut slots),
+        Some(499_500),
+        "a loop headed at op 0 must compile, not fall back"
+    );
+    assert_eq!(slots, vec![499_500, 1000], "slots written back at exit");
+}
