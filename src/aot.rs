@@ -54,8 +54,11 @@
 //! libcalls; `AbsInt`/`TruncInt`; `GcdInt`/`LcmInt` as internal Euclid loops;
 //! and the awk scalar ops — `AwkDiv`/`AwkMod` and their JIT twins
 //! `AwkDivJit`/`AwkModJit`/`AwkLshiftJit`/`AwkRshiftJit`/`AwkComplJit` (a native
-//! error-return branch on a bad operand), plus `AwkSqrtJit`/`AwkLogJit`
-//! (warn-and-return-NaN on a negative argument) — integer bitwise/shift ops
+//! error-return branch on a bad operand), the gawk folds `AwkAnd`/`AwkOr`/`AwkXor`
+//! (same error branch, plus a run-time deopt when an awk host is registered),
+//! `AwkSqrtJit`/`AwkLogJit` (warn-and-return-NaN on a negative argument),
+//! `AwkSin`/`AwkCos`/`AwkExp`/`AwkAtan2` (NaN-canonicalizing libcalls) and
+//! `AwkMkbool`; `TimeInt` via a clock libcall — integer bitwise/shift ops
 //! (`BitAnd`/…/`Shl`/`Shr`), `Inc`/`Dec`, booleans (`LoadTrue`/`LoadFalse`/
 //! `LogNot`/`LogAnd`/`LogOr`), three-way compare (`Spaceship`), stack shuffles
 //! (`Dup`/`Dup2`/`Swap`/`Rot`/`Pop`), control flow (`Jump`/`JumpIf*`, including
@@ -603,6 +606,11 @@ pub extern "C" fn fusevm_aot_unary_math(id: u32, x: f64) -> f64 {
         10 => x.ln(),
         11 => x.log2(),
         12 => x.log10(),
+        // awk sin/cos/exp: the awk host's `awk_canon_nan` (a NaN result is
+        // `+nan`, matching gawk), unlike the plain `*Float` ops above.
+        13 => crate::awk_host::awk_canon_nan(x.sin()),
+        14 => crate::awk_host::awk_canon_nan(x.cos()),
+        15 => crate::awk_host::awk_canon_nan(x.exp()),
         _ => f64::NAN,
     }
 }
@@ -625,6 +633,36 @@ pub extern "C" fn fusevm_aot_mulmod_floor(a: i64, b: i64, k: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn fusevm_aot_atan2(y: f64, x: f64) -> f64 {
     y.atan2(x)
+}
+
+/// Math libcall for `Op::AwkAtan2`: `y.atan2(x)` with the awk host's NaN
+/// canonicalization (`awk_canon_nan`). Pure (no VM access).
+#[no_mangle]
+pub extern "C" fn fusevm_aot_awk_atan2(y: f64, x: f64) -> f64 {
+    crate::awk_host::awk_canon_nan(y.atan2(x))
+}
+
+/// Clock read for `Op::TimeInt`: whole seconds since the Unix epoch, the
+/// interpreter's `sysclock::unix_secs`. No VM access.
+#[no_mangle]
+pub extern "C" fn fusevm_aot_time_int() -> i64 {
+    crate::sysclock::unix_secs()
+}
+
+/// Whether an [`crate::awk_host::AwkHost`] is registered on the VM (1) or not
+/// (0). The interpreter routes gawk `and`/`or`/`xor` to a registered host
+/// (whose defaults coerce a negative operand to 0 rather than raising gawk's
+/// fatal, and which a frontend may override), and computes them itself only
+/// with no host. Native code answers only the no-host case and deopts
+/// otherwise.
+///
+/// # Safety
+/// Same contract as [`fusevm_aot_exec_op`].
+#[no_mangle]
+pub unsafe extern "C" fn fusevm_aot_has_awk_host(vm: *mut VM) -> i64 {
+    debug_assert!(!vm.is_null());
+    // SAFETY: see the function contract; the driver owns the VM for the run.
+    unsafe { (*vm).awk_host.is_some() as i64 }
 }
 
 /// Build a Cranelift ISA for the host. `is_pic=false` matches the in-process
@@ -1191,6 +1229,15 @@ impl NativePlan {
     }
 }
 
+/// Ops whose native lowering answers only the no-awk-host case: the
+/// interpreter hands them to a registered [`crate::awk_host::AwkHost`], whose
+/// defaults (and any override) differ from the host-less gawk semantics — a
+/// negative operand coerces to 0 instead of raising the fatal. Codegen checks
+/// host presence at run time and deopts to the interpreter when one is set.
+fn awk_host_guarded(op: &Op) -> bool {
+    matches!(op, Op::AwkAnd(_) | Op::AwkOr(_) | Op::AwkXor(_))
+}
+
 /// Whether `chunk` lowers natively — thin wrapper over `analyze_native` used
 /// by tests to assert which path a chunk takes.
 #[cfg(test)]
@@ -1634,6 +1681,52 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
                 st.push(Kind::Float);
                 succs.push((ip + 1, st, inits));
             }
+            // awk sin/cos/exp: `Float(awk_canon_nan(f(x.to_float())))` for every
+            // conforming host (see `Op::AwkInt`'s doc in `src/op.rs`). Any scalar
+            // kind coerces exactly through `load_f64` (a `Bool` is 0/1, as in
+            // `to_float`); a boxed operand deopts.
+            Op::AwkSin | Op::AwkCos | Op::AwkExp => {
+                deopt_unless!(st.pop()? != Kind::Obj);
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // awk atan2(y, x): same contract, two operands.
+            Op::AwkAtan2 => {
+                let x = st.pop()?;
+                let y = st.pop()?;
+                deopt_unless!(x != Kind::Obj && y != Kind::Obj);
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // awk mkbool(x): `Float(1.0)` if `x.is_truthy()`, else `Float(0.0)`
+            // — the `truthy` codegen helper, which handles every kind (a boxed
+            // operand asks the runtime).
+            Op::AwkMkbool => {
+                st.pop()?;
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // gawk and/or/xor(v1..vn): variadic fold, fatal on a negative operand,
+            // Float result. Fewer than two operands is gawk's own fatal, left to
+            // the interpreter. A registered awk host takes the op over in the
+            // interpreter, so codegen also guards on host presence at run time
+            // and deopts here when one is installed (see `inits_at` below).
+            Op::AwkAnd(argc) | Op::AwkOr(argc) | Op::AwkXor(argc) => {
+                deopt_unless!(*argc >= 2);
+                let mut scalar = true;
+                for _ in 0..*argc {
+                    scalar &= st.pop()? != Kind::Obj;
+                }
+                deopt_unless!(scalar);
+                st.push(Kind::Float);
+                succs.push((ip + 1, st, inits));
+            }
+            // Seconds since the epoch → Int, via a clock libcall.
+            Op::TimeInt => {
+                st.push(Kind::Int);
+                max_depth = max_depth.max(st.len());
+                succs.push((ip + 1, st, inits));
+            }
             // Sink ops (inline/shim boundary): consume `n` scalars and push
             // nothing, straight-line. The spilled operands are scalar by
             // construction (everything on the native stack is), so no reload or
@@ -2066,15 +2159,20 @@ fn analyze_native(chunk: &Chunk) -> Option<NativePlan> {
     // `CallBuiltin` also deopts at run time — on the cold path where the handler
     // halted the VM or moved `vm.ip` — without being in `deopt_points`.
     let has_builtin = ops.iter().any(|o| matches!(o, Op::CallBuiltin(_, _)));
-    let may = if deopt_points.is_empty() && !has_ovf_arith && !has_div && !has_builtin {
-        HashMap::new()
-    } else {
-        may_assigned(chunk, n, &deopt_points)
-    };
+    // The gawk folds deopt at run time when an awk host is registered.
+    let has_host_guard = ops.iter().any(awk_host_guarded);
+    let may =
+        if deopt_points.is_empty() && !has_ovf_arith && !has_div && !has_builtin && !has_host_guard
+        {
+            HashMap::new()
+        } else {
+            may_assigned(chunk, n, &deopt_points)
+        };
     let mut inits_at: HashMap<usize, BTreeSet<u32>> = HashMap::new();
     for &ip in state.keys() {
         if deopt_points.contains(&ip)
             || matches!(ops[ip], Op::Div | Op::CallBuiltin(_, _))
+            || awk_host_guarded(&ops[ip])
             || (arith_deopts && matches!(ops[ip], Op::Add | Op::Sub | Op::Mul))
         {
             inits_at.insert(ip, may.get(&ip).cloned().unwrap_or_default());
@@ -2171,6 +2269,16 @@ fn build_entry_native<M: Module>(
     let atan2_id = module
         .declare_function("fusevm_aot_atan2", Linkage::Import, &math_sig)
         .map_err(|e| format!("aot: declare atan2: {e}"))?;
+    let awk_atan2_id = module
+        .declare_function("fusevm_aot_awk_atan2", Linkage::Import, &math_sig)
+        .map_err(|e| format!("aot: declare awk_atan2: {e}"))?;
+
+    // `Op::TimeInt` clock read: fn() -> i64.
+    let mut time_sig = module.make_signature();
+    time_sig.returns.push(AbiParam::new(types::I64));
+    let time_id = module
+        .declare_function("fusevm_aot_time_int", Linkage::Import, &time_sig)
+        .map_err(|e| format!("aot: declare time_int: {e}"))?;
 
     // Fused exact `(a*b) % k`: fn(i64, i64, i64) -> i64.
     let mut mulmod_sig = module.make_signature();
@@ -2352,6 +2460,10 @@ fn build_entry_native<M: Module>(
     let guard_id = module
         .declare_function("fusevm_aot_guard_taken", Linkage::Import, &guard_sig)
         .map_err(|e| format!("aot: declare guard_taken: {e}"))?;
+    // Awk-host presence, (vm) -> i64 — same shape as `guard_taken`.
+    let has_host_id = module
+        .declare_function("fusevm_aot_has_awk_host", Linkage::Import, &guard_sig)
+        .map_err(|e| format!("aot: declare has_awk_host: {e}"))?;
 
     // Status source/result: pop_int (vm) -> i64, push_status/set_status_result
     // (vm, i64).
@@ -2389,6 +2501,9 @@ fn build_entry_native<M: Module>(
         let mulmod_ref = module.declare_func_in_func(mulmod_id, b.func);
         let muladdmod_ref = module.declare_func_in_func(muladdmod_id, b.func);
         let atan2_ref = module.declare_func_in_func(atan2_id, b.func);
+        let awk_atan2_ref = module.declare_func_in_func(awk_atan2_id, b.func);
+        let time_ref = module.declare_func_in_func(time_id, b.func);
+        let has_host_ref = module.declare_func_in_func(has_host_id, b.func);
         let unary_ref = module.declare_func_in_func(unary_id, b.func);
         let warn_ref = module.declare_func_in_func(warn_id, b.func);
         let berr_ref = module.declare_func_in_func(berr_id, b.func);
@@ -3429,6 +3544,126 @@ fn build_entry_native<M: Module>(
                     b.switch_to_block(cont_blk);
                     kinds.push(Kind::Float);
                 }
+                // awk sin/cos/exp: the shared unary libcall, ids 13..15 (the
+                // NaN-canonicalizing awk variants).
+                op @ (Op::AwkSin | Op::AwkCos | Op::AwkExp) => {
+                    let id: i64 = match op {
+                        Op::AwkSin => 13,
+                        Op::AwkCos => 14,
+                        _ => 15, // AwkExp
+                    };
+                    let ka = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let x = load_f64(&mut b, &ivars, &fvars, idx, ka);
+                    let idc = b.ins().iconst(types::I32, id);
+                    let call = b.ins().call(unary_ref, &[idc, x]);
+                    let r = b.inst_results(call)[0];
+                    b.def_var(fvars[idx], r);
+                    kinds.push(Kind::Float);
+                }
+                // awk atan2(y, x): pops x (top) then y.
+                Op::AwkAtan2 => {
+                    let kx = kinds.pop().unwrap();
+                    let ixx = kinds.len();
+                    let ky = kinds.pop().unwrap();
+                    let iy = kinds.len();
+                    let x = load_f64(&mut b, &ivars, &fvars, ixx, kx);
+                    let y = load_f64(&mut b, &ivars, &fvars, iy, ky);
+                    let call = b.ins().call(awk_atan2_ref, &[y, x]);
+                    let r = b.inst_results(call)[0];
+                    b.def_var(fvars[iy], r);
+                    kinds.push(Kind::Float);
+                }
+                // awk mkbool: `Value::is_truthy` of any kind → 1.0 / 0.0. A boxed
+                // operand's handle is consumed, as the interpreter's pop is.
+                Op::AwkMkbool => {
+                    let ka = kinds.pop().unwrap();
+                    let idx = kinds.len();
+                    let t = truthy(
+                        &mut b,
+                        vm_var,
+                        truthy_ref,
+                        truthy_keep_ref,
+                        &ivars,
+                        &fvars,
+                        idx,
+                        ka,
+                        true,
+                    );
+                    let one = b.ins().f64const(Ieee64::with_bits(1f64.to_bits()));
+                    let zero = b.ins().f64const(Ieee64::with_bits(0f64.to_bits()));
+                    let r = b.ins().select(t, one, zero);
+                    b.def_var(fvars[idx], r);
+                    kinds.push(Kind::Float);
+                }
+                // gawk and/or/xor: the interpreter's `awk_bit_fold_checked`.
+                // First the host guard (operands not yet popped, so the deopt
+                // spills the full stack and the interpreter re-runs the op with
+                // its host). Then the operands are guarded top-down — gawk pops
+                // the last argument first, so the right-most negative one is
+                // reported, with its 1-based position — and folded with the
+                // block tier's shared `emit_awk_fold_*` sequence.
+                op @ (Op::AwkAnd(argc) | Op::AwkOr(argc) | Op::AwkXor(argc)) => {
+                    let vm = b.use_var(vm_var);
+                    let call = b.ins().call(has_host_ref, &[vm]);
+                    let has_host = b.inst_results(call)[0];
+                    let deopt_blk = b.create_block();
+                    let fold_blk = b.create_block();
+                    b.ins().brif(has_host, deopt_blk, &[], fold_blk, &[]);
+
+                    b.switch_to_block(deopt_blk);
+                    emit_deopt(
+                        &mut b,
+                        plan,
+                        vm_var,
+                        &ivars,
+                        &fvars,
+                        &slot_vars,
+                        &global_vars,
+                        &deopt_refs,
+                        &kinds,
+                        &plan.inits_at[&ip],
+                        ip,
+                    );
+
+                    b.switch_to_block(fold_blk);
+                    let code = crate::jit::awk_bit_code(op).unwrap_or(0);
+                    let mut acc = crate::jit::emit_awk_fold_init(&mut b, code);
+                    let zero = b.ins().f64const(Ieee64::with_bits(0f64.to_bits()));
+                    for argno in (1..=*argc).rev() {
+                        let k = kinds.pop().unwrap();
+                        let v = load_f64(&mut b, &ivars, &fvars, kinds.len(), k);
+                        let neg = b.ins().fcmp(FloatCC::LessThan, v, zero);
+                        let err_blk = b.create_block();
+                        let ok_blk = b.create_block();
+                        b.ins().brif(neg, err_blk, &[], ok_blk, &[]);
+
+                        b.switch_to_block(err_blk);
+                        let vm = b.use_var(vm_var);
+                        let codev = b.ins().iconst(types::I32, code as i64);
+                        let argv = b
+                            .ins()
+                            .f64const(Ieee64::with_bits((argno as f64).to_bits()));
+                        b.ins().call(berr_ref, &[vm, codev, argv, v]);
+                        let st0 = b.ins().iconst(types::I64, 0);
+                        b.ins().return_(&[st0]);
+
+                        b.switch_to_block(ok_blk);
+                        acc = crate::jit::emit_awk_fold_step(&mut b, code, acc, v);
+                    }
+                    let r = crate::jit::emit_awk_uint_result(&mut b, acc);
+                    let idx = kinds.len();
+                    b.def_var(fvars[idx], r);
+                    kinds.push(Kind::Float);
+                }
+                // Seconds since the epoch, the interpreter's clock read.
+                Op::TimeInt => {
+                    let call = b.ins().call(time_ref, &[]);
+                    let r = b.inst_results(call)[0];
+                    let idx = kinds.len();
+                    b.def_var(ivars[idx], r);
+                    kinds.push(Kind::Int);
+                }
                 // Sink ops: spill the top n scalar registers onto the boxed
                 // stack (bottom-most first, matching the interpreter's order),
                 // then run the op through the shim. vm.stack is empty before and
@@ -4044,7 +4279,8 @@ fn build_entry_native<M: Module>(
 /// exact only while the integer is one an `f64` can hold. Past `2^53` it
 /// rounds, so under a numeric hook the mixed pairs never reach here at all:
 /// [`native_rounds_operand`] has already made the op a deopt point. Never
-/// called on a `Bool` (analysis rejects booleans feeding arithmetic).
+/// relied on for a `Bool` by arithmetic (analysis rejects booleans there); the
+/// awk builtins that accept one get its `to_float` (0/1) exactly.
 fn load_f64(
     b: &mut FunctionBuilder,
     ivars: &[Variable],
@@ -4642,6 +4878,12 @@ where
     builder.symbol("fusevm_aot_fmod", fusevm_aot_fmod as *const u8);
     builder.symbol("fusevm_aot_unary_math", fusevm_aot_unary_math as *const u8);
     builder.symbol("fusevm_aot_atan2", fusevm_aot_atan2 as *const u8);
+    builder.symbol("fusevm_aot_awk_atan2", fusevm_aot_awk_atan2 as *const u8);
+    builder.symbol("fusevm_aot_time_int", fusevm_aot_time_int as *const u8);
+    builder.symbol(
+        "fusevm_aot_has_awk_host",
+        fusevm_aot_has_awk_host as *const u8,
+    );
     builder.symbol(
         "fusevm_aot_mulmod_floor",
         fusevm_aot_mulmod_floor as *const u8,
