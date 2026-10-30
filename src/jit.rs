@@ -7333,11 +7333,16 @@ mod cranelift_jit_impl {
     /// (cross-call inlining, phase 2). `Op::CallBuiltin` is rejected because
     /// builtin handlers are arbitrary Rust we can't lower to Cranelift IR.
     /// `Op::PushFrame` / `Op::PopFrame` are rejected — the trace JIT models
-    /// scopes implicitly via Call/Return only. The fused control-flow ops
-    /// (`SlotLtIntJumpIfFalse`, `SlotIncLtIntJumpBack`, `AccumSumLoop`) carry
-    /// embedded jumps and are rejected — chunks that contain these are
-    /// already block-JIT-optimized and tracing them would just compile the
-    /// same loop pattern twice.
+    /// scopes implicitly via Call/Return only.
+    ///
+    /// The fused slot ops (`PreDecSlot`, `PostIncSlot`, `PostDecSlot`) and the
+    /// fused counter-loop superinstructions fall through to the block-tier
+    /// list, which admits them. In a trace, `SlotLtIntJumpIfFalse` and a
+    /// non-closing `SlotIncLtIntJumpBack` are guarded branches with a side
+    /// exit, exactly like `JumpIfTrue`; a closing `SlotIncLtIntJumpBack` is the
+    /// loop back-edge; `AccumSumLoop` is a self-contained native inner loop.
+    /// `JumpIfTrueKeep` / `JumpIfFalseKeep` are refused by
+    /// [`is_trace_eligible`].
     ///
     /// `ops`/`ip` give the op its context, which the strict-mode `Op::Mod`
     /// carve-out needs to see its (constant) divisor.
@@ -7345,13 +7350,6 @@ mod cranelift_jit_impl {
         match &ops[ip] {
             Op::Call(_, _) | Op::Return | Op::ReturnValue => true,
             Op::CallBuiltin(_, _) | Op::PushFrame | Op::PopFrame => false,
-            Op::SlotLtIntJumpIfFalse(_, _, _)
-            | Op::SlotIncLtIntJumpBack(_, _, _)
-            | Op::AccumSumLoop(_, _, _) => false,
-            // Post/pre-dec slot ops are emitted by the bytecode optimizer for
-            // counter loops and are handled by the block JIT (whole-chunk);
-            // the trace tier has no codegen for them, so reject to fall back.
-            Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_) => false,
             // Globals: the trace tier promotes each referenced one to a
             // register at entry and spills it at every exit, the same way it
             // treats a caller-frame slot. The block tier has no such buffer, so
@@ -7644,16 +7642,100 @@ mod cranelift_jit_impl {
         Some(var)
     }
 
-    /// Validate a recorded trace before compilation. Phase 2 rules:
+    /// Whether a fused integer slot op may run on `slot` in the current frame.
+    /// The fused slot ops store `Value::Int` whatever the slot held; a caller
+    /// slot whose anchor kind is `Float` would change kind mid-trace, which the
+    /// anchor-kinded spill cannot carry, so the compile is refused. Inlined
+    /// callee slots are always `Int` scratch.
+    fn trace_slot_is_int(
+        frames: &[CompileFrame],
+        slot_kind_of: &HashMap<u16, JitTy>,
+        slot: u16,
+    ) -> bool {
+        frames.len() != 1 || slot_kind_of.get(&slot).copied() != Some(JitTy::Float)
+    }
+
+    /// Emit a mid-trace branch guard: continue in a fresh block when `cond`'s
+    /// truthiness equals `stay_if_true` (the direction the recorder followed),
+    /// otherwise side-exit to `side_exit_ip`. The side exit spills the caller's
+    /// slots and the promoted globals, materializes every inlined callee frame
+    /// (`frames[1..]`; the caller frame already exists in `vm.frames`), and
+    /// writes the abstract stack to the deopt buffer. `None` when the state at
+    /// this point exceeds a deopt-buffer bound.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_trace_guard(
+        bcx: &mut FunctionBuilder,
+        cond: cranelift_codegen::ir::Value,
+        stay_if_true: bool,
+        side_exit_ip: usize,
+        slot_base: cranelift_codegen::ir::Value,
+        global_base: cranelift_codegen::ir::Value,
+        deopt_ptr: cranelift_codegen::ir::Value,
+        frames: &[CompileFrame],
+        global_vars: &HashMap<u16, Variable>,
+        stack: &[(cranelift_codegen::ir::Value, JitTy)],
+        ovf: Option<TraceOverflow>,
+    ) -> Option<()> {
+        // Phase 5b: a non-empty abstract stack with mixed Int/Float entries is
+        // fine — each entry's kind is tagged in `DeoptInfo.stack_kinds`.
+        if stack.len() > super::MAX_DEOPT_STACK {
+            return None;
+        }
+        let mut frames_to_materialize: Vec<(usize, usize, Vec<(u16, Variable)>)> = Vec::new();
+        for callee_frame in &frames[1..] {
+            let slot_count = callee_frame
+                .slot_vars
+                .keys()
+                .max()
+                .map_or(0, |&max| max as usize + 1);
+            if slot_count > super::MAX_DEOPT_SLOTS_PER_FRAME {
+                return None;
+            }
+            let slot_vals: Vec<(u16, Variable)> = callee_frame
+                .slot_vars
+                .iter()
+                .map(|(&slot, &var)| (slot, var))
+                .collect();
+            frames_to_materialize.push((callee_frame.return_ip, slot_count, slot_vals));
+        }
+        if frames_to_materialize.len() > super::MAX_DEOPT_FRAMES {
+            return None;
+        }
+        let cont = bcx.create_block();
+        let side = bcx.create_block();
+        if stay_if_true {
+            bcx.ins().brif(cond, cont, &[], side, &[]);
+        } else {
+            bcx.ins().brif(cond, side, &[], cont, &[]);
+        }
+        bcx.switch_to_block(side);
+        emit_exit(
+            bcx,
+            slot_base,
+            global_base,
+            deopt_ptr,
+            &frames[0].slot_vars,
+            global_vars,
+            &frames_to_materialize,
+            stack,
+            side_exit_ip,
+            ovf,
+        );
+        bcx.switch_to_block(cont);
+        Some(())
+    }
+
+    /// Validate a recorded trace before compilation:
     ///
     /// - All ops are trace-allowed (block-eligible + Call/Return/ReturnValue).
     /// - Slot indices stay below `MAX_TRACE_SLOT`.
     /// - Frame depth, simulated by `Call` (push) and `Return`/`ReturnValue`
     ///   (pop), stays non-negative throughout and is exactly 0 at the close.
-    /// - Inside any callee body (depth > 0), no `Jump*` ops (branchless
-    ///   callees only — internal branches need side-exit machinery).
-    /// - In the caller frame (depth == 0), only the FINAL op may be a Jump*,
-    ///   and it must be a backward branch with target == `anchor_ip`.
+    /// - The FINAL op is a backward branch (`Jump*` or
+    ///   `SlotIncLtIntJumpBack`) with target == `anchor_ip`; no earlier
+    ///   caller-frame branch may target `anchor_ip` (a duplicate close).
+    /// - Inlining depth at any internal branch stays within `MAX_DEOPT_FRAMES`.
+    /// - No `JumpIfTrueKeep` / `JumpIfFalseKeep`.
     /// - Length is bounded by `MAX_TRACE_LEN`.
     pub(crate) fn is_trace_eligible(ops: &[Op], anchor_ip: usize) -> bool {
         if ops.is_empty() || ops.len() > cfg_max_trace_len() {
@@ -7670,6 +7752,9 @@ mod cranelift_jit_impl {
                 | Op::SetSlot(s)
                 | Op::PreIncSlot(s)
                 | Op::PreIncSlotVoid(s)
+                | Op::PreDecSlot(s)
+                | Op::PostIncSlot(s)
+                | Op::PostDecSlot(s)
                 | Op::SlotLtIntJumpIfFalse(s, _, _)
                 | Op::SlotIncLtIntJumpBack(s, _, _) => *s >= MAX_TRACE_SLOT,
                 Op::AccumSumLoop(a, b, _) | Op::AddAssignSlotVoid(a, b) => {
@@ -7686,10 +7771,15 @@ mod cranelift_jit_impl {
         }
 
         // Last op must be a backward branch to anchor_ip in the caller frame.
+        // `SlotIncLtIntJumpBack` closes a loop the bytecode optimizer fused
+        // into one counter op; the VM anchors and closes on it the same way.
         let last = ops.last().unwrap();
         let closes = matches!(
             last,
-            Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t)
+            Op::Jump(t)
+                | Op::JumpIfTrue(t)
+                | Op::JumpIfFalse(t)
+                | Op::SlotIncLtIntJumpBack(_, _, t)
                 if *t == anchor_ip
         );
         if !closes {
@@ -7710,7 +7800,11 @@ mod cranelift_jit_impl {
                         return false;
                     }
                 }
-                Op::Jump(t) | Op::JumpIfTrue(t) | Op::JumpIfFalse(t) => {
+                Op::Jump(t)
+                | Op::JumpIfTrue(t)
+                | Op::JumpIfFalse(t)
+                | Op::SlotLtIntJumpIfFalse(_, _, t)
+                | Op::SlotIncLtIntJumpBack(_, _, t) => {
                     // Backward jumps to anchor BEFORE the final close are
                     // duplicate closes — malformed trace.
                     if depth == 0 && *t == anchor_ip {
@@ -7721,8 +7815,15 @@ mod cranelift_jit_impl {
                     }
                 }
                 Op::JumpIfTrueKeep(_) | Op::JumpIfFalseKeep(_) => {
-                    // Keep variants leave the condition on the stack post-
-                    // branch; we still require empty stack at branch points.
+                    // Keep variants leave the condition on the stack in both
+                    // directions. A side exit could spill it mechanically, but
+                    // the condition is almost always a comparison result: the
+                    // interpreter keeps a `Value::Bool` there, while the
+                    // trace's abstract stack and the deopt `stack_kinds` tags
+                    // carry only Int/Float, so a side exit (or a store of the
+                    // kept value) would hand back `Int(1)` where the
+                    // interpreter has `Bool(true)`. Refused until the trace
+                    // stack tracks a Bool kind end to end.
                     return false;
                 }
                 _ => {}
@@ -7767,9 +7868,13 @@ mod cranelift_jit_impl {
                 }
             };
             match op {
-                Op::GetSlot(s) | Op::SetSlot(s) | Op::PreIncSlot(s) | Op::PreIncSlotVoid(s) => {
-                    mark(*s, &mut seen)
-                }
+                Op::GetSlot(s)
+                | Op::SetSlot(s)
+                | Op::PreIncSlot(s)
+                | Op::PreIncSlotVoid(s)
+                | Op::PreDecSlot(s)
+                | Op::PostIncSlot(s)
+                | Op::PostDecSlot(s) => mark(*s, &mut seen),
                 Op::SlotLtIntJumpIfFalse(s, _, _) | Op::SlotIncLtIntJumpBack(s, _, _) => {
                     mark(*s, &mut seen)
                 }
@@ -8270,6 +8375,31 @@ mod cranelift_jit_impl {
                         let new = bcx.ins().iadd(old, one);
                         bcx.def_var(var, new);
                     }
+                    // The remaining fused counter ops, same rules as
+                    // `PreIncSlot`: int-only (a Float-kinded caller slot would
+                    // become an Int in the interpreter, which the anchor-kinded
+                    // spill cannot express, so the compile is refused), and the
+                    // arithmetic wraps exactly as the interpreter's
+                    // `wrapping_add` / `wrapping_sub` do.
+                    Op::PreDecSlot(slot) | Op::PostIncSlot(slot) | Op::PostDecSlot(slot) => {
+                        if !trace_slot_is_int(&frames, &slot_kind_of, *slot) {
+                            return None;
+                        }
+                        let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
+                        let old = bcx.use_var(var);
+                        let one = bcx.ins().iconst(types::I64, 1);
+                        let new = match op {
+                            Op::PostIncSlot(_) => bcx.ins().iadd(old, one),
+                            _ => bcx.ins().isub(old, one),
+                        };
+                        bcx.def_var(var, new);
+                        let pushed = if matches!(op, Op::PreDecSlot(_)) {
+                            new
+                        } else {
+                            old
+                        };
+                        stack.push((pushed, JitTy::Int));
+                    }
                     Op::AddAssignSlotVoid(a_slot, b_slot) => {
                         if frames.len() == 1 {
                             let a_kind = slot_kind_of.get(a_slot).copied().unwrap_or(JitTy::Int);
@@ -8332,70 +8462,155 @@ mod cranelift_jit_impl {
                             Op::JumpIfFalse(_) => !took_jump,
                             _ => unreachable!(),
                         };
-                        // Build materialization records for inlined callee
-                        // frames (frames[1..]). Caller frame is implicit —
-                        // it already exists in vm.frames at trace entry.
-                        let mut frames_to_materialize: Vec<(usize, usize, Vec<(u16, Variable)>)> =
-                            Vec::new();
-                        for callee_frame in &frames[1..] {
-                            let slot_count = if callee_frame.slot_vars.is_empty() {
-                                0
-                            } else {
-                                let max = *callee_frame.slot_vars.keys().max().unwrap();
-                                (max as usize) + 1
-                            };
-                            if slot_count > super::MAX_DEOPT_SLOTS_PER_FRAME {
-                                return None;
-                            }
-                            let slot_vals: Vec<(u16, Variable)> = callee_frame
-                                .slot_vars
-                                .iter()
-                                .map(|(&slot, &var)| (slot, var))
-                                .collect();
-                            frames_to_materialize.push((
-                                callee_frame.return_ip,
-                                slot_count,
-                                slot_vals,
-                            ));
-                        }
-                        if frames_to_materialize.len() > super::MAX_DEOPT_FRAMES {
-                            return None;
-                        }
-                        let cont = bcx.create_block();
-                        let side = bcx.create_block();
-                        if recorded_truthy {
-                            bcx.ins().brif(cond_pred, cont, &[], side, &[]);
-                        } else {
-                            bcx.ins().brif(cond_pred, side, &[], cont, &[]);
-                        }
-                        // Side-exit: spill caller slots, materialize inlined
-                        // frames, write the remaining abstract stack to the
-                        // deopt buffer, return resume_ip.
-                        bcx.switch_to_block(side);
-                        emit_exit(
+                        emit_trace_guard(
                             &mut bcx,
+                            cond_pred,
+                            recorded_truthy,
+                            side_exit_ip,
                             slot_base,
                             global_base,
                             deopt_ptr,
-                            &frames[0].slot_vars,
+                            &frames,
                             &global_vars,
-                            &frames_to_materialize,
                             &stack,
-                            side_exit_ip,
                             ovf,
-                        );
-                        // Resume IR emission in the continue block.
-                        bcx.switch_to_block(cont);
+                        )?;
                     }
                     // Phase 3 doesn't support Keep variants (post-branch
                     // stack non-empty). Eligibility rejects upstream; this
                     // is a defensive double-check.
                     Op::JumpIfTrueKeep(_) | Op::JumpIfFalseKeep(_) => return None,
 
-                    // Fused-loop ops contain embedded control flow; rejected.
-                    Op::SlotLtIntJumpIfFalse(_, _, _)
-                    | Op::SlotIncLtIntJumpBack(_, _, _)
-                    | Op::AccumSumLoop(_, _, _) => return None,
+                    // ── Fused counter-loop superinstructions ──
+                    // Each is int-only for the reason given at `PreDecSlot`.
+                    //
+                    // `SlotLtIntJumpIfFalse` is a conditional branch whose
+                    // condition is `slot < limit` (falls through when true,
+                    // jumps when false) — guarded like `JumpIfFalse`, with the
+                    // abstract stack and inlined frames materialized on the
+                    // side exit. It reads the slot and writes nothing.
+                    Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
+                        if !trace_slot_is_int(&frames, &slot_kind_of, *slot) {
+                            return None;
+                        }
+                        let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
+                        let val = bcx.use_var(var);
+                        let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
+                        let is_lt = bcx.ins().icmp(IntCC::SignedLessThan, val, limit_v);
+                        let took_jump = next_recorded_ip == Some(*target);
+                        let side_exit_ip = if took_jump {
+                            recorded_ips[i] + 1
+                        } else {
+                            *target
+                        };
+                        emit_trace_guard(
+                            &mut bcx,
+                            is_lt,
+                            !took_jump,
+                            side_exit_ip,
+                            slot_base,
+                            global_base,
+                            deopt_ptr,
+                            &frames,
+                            &global_vars,
+                            &stack,
+                            ovf,
+                        )?;
+                    }
+                    // A `SlotIncLtIntJumpBack` that does not close the trace
+                    // (an inner loop's back-edge the recorder unrolled through):
+                    // the increment happens in both directions, then the
+                    // `new < limit` test is guarded like `JumpIfTrue`. The side
+                    // exit spills the incremented slot, as the interpreter has
+                    // stored it before branching.
+                    Op::SlotIncLtIntJumpBack(slot, limit, target) => {
+                        if !trace_slot_is_int(&frames, &slot_kind_of, *slot) {
+                            return None;
+                        }
+                        let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
+                        let old = bcx.use_var(var);
+                        let one = bcx.ins().iconst(types::I64, 1);
+                        let new = bcx.ins().iadd(old, one);
+                        bcx.def_var(var, new);
+                        let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
+                        let is_lt = bcx.ins().icmp(IntCC::SignedLessThan, new, limit_v);
+                        let took_jump = next_recorded_ip == Some(*target);
+                        let side_exit_ip = if took_jump {
+                            recorded_ips[i] + 1
+                        } else {
+                            *target
+                        };
+                        emit_trace_guard(
+                            &mut bcx,
+                            is_lt,
+                            took_jump,
+                            side_exit_ip,
+                            slot_base,
+                            global_base,
+                            deopt_ptr,
+                            &frames,
+                            &global_vars,
+                            &stack,
+                            ovf,
+                        )?;
+                    }
+                    // `AccumSumLoop` has no exit of its own: it runs its whole
+                    // `while i < limit { sum += i; i += 1 }` loop and falls
+                    // through, so it lowers to a native inner loop (the
+                    // block tier's lowering) with no guard. `sum` wraps like
+                    // the interpreter's `wrapping_add`; `i` stops at `limit`
+                    // (an `i32`), so it cannot overflow. Both slots are written
+                    // back sum-then-i, so `sum_slot == i_slot` ends holding `i`
+                    // as in the interpreter.
+                    Op::AccumSumLoop(sum_slot, i_slot, limit) => {
+                        if !trace_slot_is_int(&frames, &slot_kind_of, *sum_slot)
+                            || !trace_slot_is_int(&frames, &slot_kind_of, *i_slot)
+                        {
+                            return None;
+                        }
+                        let sum_var = get_or_alloc_slot_var(&mut frames, *sum_slot, &mut bcx)?;
+                        let i_var = get_or_alloc_slot_var(&mut frames, *i_slot, &mut bcx)?;
+                        let sum_init = bcx.use_var(sum_var);
+                        let i_init = bcx.use_var(i_var);
+                        let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
+
+                        let acc_hdr = bcx.create_block();
+                        let acc_body = bcx.create_block();
+                        let acc_exit = bcx.create_block();
+                        bcx.append_block_param(acc_hdr, types::I64); // sum
+                        bcx.append_block_param(acc_hdr, types::I64); // i
+                        bcx.append_block_param(acc_exit, types::I64);
+                        bcx.append_block_param(acc_exit, types::I64);
+                        bcx.ins().jump(
+                            acc_hdr,
+                            &[BlockArg::Value(sum_init), BlockArg::Value(i_init)],
+                        );
+
+                        bcx.switch_to_block(acc_hdr);
+                        let sum_p = bcx.block_params(acc_hdr)[0];
+                        let i_p = bcx.block_params(acc_hdr)[1];
+                        let more = bcx.ins().icmp(IntCC::SignedLessThan, i_p, limit_v);
+                        bcx.ins().brif(
+                            more,
+                            acc_body,
+                            &[],
+                            acc_exit,
+                            &[BlockArg::Value(sum_p), BlockArg::Value(i_p)],
+                        );
+
+                        bcx.switch_to_block(acc_body);
+                        let new_sum = bcx.ins().iadd(sum_p, i_p);
+                        let one = bcx.ins().iconst(types::I64, 1);
+                        let new_i = bcx.ins().iadd(i_p, one);
+                        bcx.ins()
+                            .jump(acc_hdr, &[BlockArg::Value(new_sum), BlockArg::Value(new_i)]);
+
+                        bcx.switch_to_block(acc_exit);
+                        let final_sum = bcx.block_params(acc_exit)[0];
+                        let final_i = bcx.block_params(acc_exit)[1];
+                        bcx.def_var(sum_var, final_sum);
+                        bcx.def_var(i_var, final_i);
+                    }
 
                     // Frame markers and builtin calls aren't traceable.
                     Op::PushFrame | Op::PopFrame | Op::CallBuiltin(_, _) => return None,
@@ -8511,6 +8726,41 @@ mod cranelift_jit_impl {
                         );
                     } else {
                         bcx.ins().brif(pred, exit_block, &[], loop_hdr, &[]);
+                    }
+                }
+                // Fused counter back-edge: `slot += 1`, continue while
+                // `slot < limit`. Nothing is popped, so the abstract stack must
+                // already be empty — the exits below spill no stack values.
+                Op::SlotIncLtIntJumpBack(slot, limit, t) => {
+                    let target_ip = *t;
+                    if !stack.is_empty() || !trace_slot_is_int(&frames, &slot_kind_of, *slot) {
+                        return None;
+                    }
+                    let var = get_or_alloc_slot_var(&mut frames, *slot, &mut bcx)?;
+                    let old = bcx.use_var(var);
+                    let one = bcx.ins().iconst(types::I64, 1);
+                    let new = bcx.ins().iadd(old, one);
+                    bcx.def_var(var, new);
+                    let limit_v = bcx.ins().iconst(types::I64, *limit as i64);
+                    let pred = bcx.ins().icmp(IntCC::SignedLessThan, new, limit_v);
+                    if is_side_trace {
+                        let cont_exit = bcx.create_block();
+                        bcx.ins().brif(pred, cont_exit, &[], exit_block, &[]);
+                        bcx.switch_to_block(cont_exit);
+                        emit_exit(
+                            &mut bcx,
+                            slot_base,
+                            global_base,
+                            deopt_ptr,
+                            &frames[0].slot_vars,
+                            &global_vars,
+                            &[],
+                            &[],
+                            target_ip,
+                            ovf,
+                        );
+                    } else {
+                        bcx.ins().brif(pred, loop_hdr, &[], exit_block, &[]);
                     }
                 }
                 _ => return None,

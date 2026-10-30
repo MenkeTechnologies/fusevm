@@ -2675,7 +2675,20 @@ impl VM {
                 let val = self.get_slot(*slot).to_int().wrapping_add(1);
                 self.set_slot(*slot, Value::Int(val));
                 if val < *limit as i64 {
-                    self.ip = *target;
+                    let target = *target;
+                    // A taken backward edge is a loop back-edge, so it anchors
+                    // a trace exactly like a backward `JumpIfTrue`: the slot
+                    // already holds the incremented value the trace reads.
+                    #[cfg(feature = "jit")]
+                    if self.tracing_jit && self.recorder.is_none() && target <= ip {
+                        self.ip = self.lookup_trace_for_backward(target, ip + 1);
+                    } else {
+                        self.ip = target;
+                    }
+                    #[cfg(not(feature = "jit"))]
+                    {
+                        self.ip = target;
+                    }
                 }
             }
             Op::AccumSumLoop(sum_slot, i_slot, limit) => {
@@ -4103,6 +4116,7 @@ impl VM {
                     | Op::JumpIfFalse(_)
                     | Op::JumpIfTrueKeep(_)
                     | Op::JumpIfFalseKeep(_)
+                    | Op::SlotIncLtIntJumpBack(_, _, _)
             );
             let landed_at_anchor = self.ip == close_ip;
             if aborted || (was_jump && landed_at_anchor) {
