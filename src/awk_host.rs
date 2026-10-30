@@ -943,7 +943,7 @@ pub fn awk_intdiv(a: &Value, b: &Value) -> Value {
     if bi == 0 {
         return Value::Undef;
     }
-    Value::Float((ai / bi) as f64)
+    Value::Float(trunc_quotient(ai, bi))
 }
 
 /// gawk `intdiv0(a, b)` — like [`awk_intdiv`], but division by zero yields `0.0`
@@ -958,5 +958,14 @@ pub fn awk_intdiv0(a: &Value, b: &Value) -> Value {
     if bi == 0 {
         return Value::Float(0.0);
     }
-    Value::Float((a.to_float() as i64 / bi) as f64)
+    Value::Float(trunc_quotient(a.to_float() as i64, bi))
+}
+
+/// Truncating `a / b` for a nonzero `b`. The one i64 overflow, `i64::MIN / -1`,
+/// yields its exact quotient 2^63 (representable as f64) instead of panicking.
+fn trunc_quotient(a: i64, b: i64) -> f64 {
+    match a.checked_div(b) {
+        Some(q) => q as f64,
+        None => -(a as f64),
+    }
 }
