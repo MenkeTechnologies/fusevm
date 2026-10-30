@@ -12,10 +12,36 @@
 
 use fusevm::{ChunkBuilder, DefaultHost, Op, ShellHost, VMResult, Value, VM};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::thread::LocalKey;
 
-/// Serializes tests that share static atomics (Rust runs #[test] in parallel).
-static PIN_TEST_LOCK: Mutex<()> = Mutex::new(());
+/// A call counter private to the test that touches it. libtest runs every
+/// `#[test]` on its own thread, and a VM calls its `ShellHost` methods and
+/// builtin handlers on the thread that runs it, so a thread-local count is
+/// per-test: concurrent tests can neither observe nor disturb each other's
+/// counts, whatever order the harness schedules them in.
+struct TestCounter(&'static LocalKey<AtomicU32>);
+
+impl TestCounter {
+    fn load(&self, order: Ordering) -> u32 {
+        self.0.with(|c| c.load(order))
+    }
+    fn store(&self, value: u32, order: Ordering) {
+        self.0.with(|c| c.store(value, order))
+    }
+    fn fetch_add(&self, value: u32, order: Ordering) -> u32 {
+        self.0.with(|c| c.fetch_add(value, order))
+    }
+}
+
+/// Declare a [`TestCounter`] backed by its own thread-local.
+macro_rules! test_counter {
+    ($name:ident) => {
+        static $name: TestCounter = {
+    thread_local!(static COUNT: AtomicU32 = const { AtomicU32::new(0) });
+            TestCounter(&COUNT)
+        };
+    };
+}
 
 // ─── ShellHost::subshell_end Option<i32> contract ──────────────────────
 
@@ -446,7 +472,7 @@ fn subshell_then_custom_pipelineend_uses_host_pipeline_result() {
     assert_eq!(vm.last_status, 127);
 }
 
-static SUBSHELL_END_CALLS: AtomicU32 = AtomicU32::new(0);
+test_counter!(SUBSHELL_END_CALLS);
 
 struct CountingSubshellEndHost(i32);
 
@@ -459,7 +485,6 @@ impl ShellHost for CountingSubshellEndHost {
 
 #[test]
 fn subshell_end_without_host_does_not_call_host() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -472,7 +497,6 @@ fn subshell_end_without_host_does_not_call_host() {
 
 #[test]
 fn subshell_end_with_host_invokes_host_once_per_op() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -487,7 +511,7 @@ fn subshell_end_with_host_invokes_host_once_per_op() {
     );
 }
 
-static SUBSHELL_BEGIN_CALLS: AtomicU32 = AtomicU32::new(0);
+test_counter!(SUBSHELL_BEGIN_CALLS);
 
 struct BeginEndCountingHost(i32);
 
@@ -503,7 +527,6 @@ impl ShellHost for BeginEndCountingHost {
 
 #[test]
 fn subshell_begin_end_pair_invokes_begin_once_per_begin_op() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -713,7 +736,6 @@ fn subshell_end_some_on_third_none_before_preserves_until_some() {
 
 #[test]
 fn subshell_double_begin_single_end_still_updates_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -736,7 +758,7 @@ fn subshell_double_begin_single_end_still_updates_status() {
     );
 }
 
-static PIPELINE_END_CALLS: AtomicU32 = AtomicU32::new(0);
+test_counter!(PIPELINE_END_CALLS);
 
 struct CountingPipelineHost;
 
@@ -749,10 +771,10 @@ impl ShellHost for CountingPipelineHost {
 
 // ─── VM::request_halt contract ──────────────────────────────────────────
 
-// Static counters — BuiltinHandler is a raw fn pointer (no captures),
-// so test state lives in static atomics. Tests reset before each use.
-static AFTER_HALT_COUNT: AtomicU32 = AtomicU32::new(0);
-static TOUCHED: AtomicU32 = AtomicU32::new(0);
+// Counters — BuiltinHandler is a raw fn pointer (no captures), so test state
+// lives in per-test `TestCounter`s rather than in the handler.
+test_counter!(AFTER_HALT_COUNT);
+test_counter!(TOUCHED);
 
 fn builtin_request_halt(vm: &mut VM, _argc: u8) -> Value {
     vm.request_halt();
@@ -786,7 +808,6 @@ fn builtin_halt_only(vm: &mut VM, _argc: u8) -> Value {
 
 #[test]
 fn request_halt_from_builtin_stops_dispatch() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     // Builtin id 100: requests halt.
@@ -829,7 +850,6 @@ fn request_halt_is_idempotent() {
 
 #[test]
 fn request_halt_before_run_short_circuits_immediately() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(7, 0), 1);
@@ -874,7 +894,6 @@ fn request_halt_preserves_prior_last_status() {
 
 #[test]
 fn request_halt_reset_clears_halt_and_allows_rerun() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(7, 0), 1);
@@ -898,7 +917,6 @@ fn request_halt_reset_clears_halt_and_allows_rerun() {
 
 #[test]
 fn request_halt_stops_before_subsequent_ops_leave_stack_intact() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(11), 1);
@@ -939,7 +957,6 @@ fn request_halt_from_builtin_with_only_undef_on_stack() {
 
 #[test]
 fn request_halt_from_extension_handler_stops_dispatch() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::Extended(1, 0), 1);
@@ -964,7 +981,6 @@ fn request_halt_from_extension_handler_stops_dispatch() {
 
 #[test]
 fn request_halt_second_run_without_reset_does_not_resume() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -991,7 +1007,6 @@ fn request_halt_second_run_without_reset_does_not_resume() {
 
 #[test]
 fn request_halt_from_nested_call_stops_caller_ops() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("haltfn");
@@ -1041,7 +1056,6 @@ fn request_halt_reset_preserves_shell_host() {
 
 #[test]
 fn request_halt_reset_preserves_registered_builtins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(7, 0), 1);
@@ -1079,7 +1093,6 @@ fn request_halt_does_not_clear_setstatus_during_run() {
 
 #[test]
 fn request_halt_from_extension_wide_handler_stops_dispatch() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::ExtendedWide(9, 0xBEEF), 1);
@@ -1100,7 +1113,6 @@ fn request_halt_from_extension_wide_handler_stops_dispatch() {
 
 #[test]
 fn request_halt_stops_before_jump_target() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1127,7 +1139,6 @@ fn request_halt_allows_ops_before_halt_to_complete() {
         vm.request_halt();
         Value::Int(0)
     }
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PRE_HALT.store(0, Ordering::SeqCst);
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
 
@@ -1232,7 +1243,6 @@ fn request_halt_mid_chunk_then_reset_allows_subshell_end() {
 
 #[test]
 fn request_halt_stops_before_conditional_jump_target() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1256,7 +1266,6 @@ fn request_halt_stops_before_conditional_jump_target() {
 
 #[test]
 fn request_halt_stops_before_push_frame() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1280,7 +1289,6 @@ fn builtin_halt_report_argc(vm: &mut VM, argc: u8) -> Value {
 
 #[test]
 fn request_halt_from_builtin_with_args_still_halts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -1302,7 +1310,6 @@ fn request_halt_from_builtin_with_args_still_halts() {
 
 #[test]
 fn request_halt_reset_preserves_extension_handler() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_TOUCHED: AtomicU32 = AtomicU32::new(0);
     let mut halt_chunk = ChunkBuilder::new();
     halt_chunk.emit(Op::CallBuiltin(100, 0), 1);
@@ -1337,7 +1344,6 @@ fn request_halt_multiple_ops_before_all_complete() {
         vm.request_halt();
         Value::Int(0)
     }
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PRE_COUNT.store(0, Ordering::SeqCst);
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
 
@@ -1392,7 +1398,6 @@ fn subshell_end_then_request_halt_getstatus_not_reached() {
 
 #[test]
 fn request_halt_stops_before_jump_if_false_target() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1416,7 +1421,6 @@ fn request_halt_stops_before_jump_if_false_target() {
 
 #[test]
 fn request_halt_stops_before_pop_frame() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -1436,7 +1440,6 @@ fn request_halt_stops_before_pop_frame() {
 
 #[test]
 fn request_halt_prevents_subshell_begin_from_running() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1455,7 +1458,6 @@ fn request_halt_prevents_subshell_begin_from_running() {
 
 #[test]
 fn request_halt_prevents_pipeline_end_from_running() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1488,7 +1490,6 @@ fn request_halt_as_first_op_returns_ok_not_halted() {
 
 #[test]
 fn request_halt_reset_preserves_extension_wide_handler() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_WIDE_TOUCHED: AtomicU32 = AtomicU32::new(0);
     let mut halt_chunk = ChunkBuilder::new();
     halt_chunk.emit(Op::CallBuiltin(100, 0), 1);
@@ -1517,7 +1518,6 @@ fn request_halt_reset_preserves_extension_wide_handler() {
 
 #[test]
 fn request_halt_nested_call_does_not_return_to_caller() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("inner");
@@ -1544,7 +1544,6 @@ fn request_halt_nested_call_does_not_return_to_caller() {
 
 #[test]
 fn request_halt_pre_run_then_reset_runs_chunk_normally() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(7, 0), 1);
@@ -1570,7 +1569,6 @@ fn request_halt_pre_run_then_reset_runs_chunk_normally() {
 
 #[test]
 fn subshell_end_and_halt_in_same_chunk_subshell_runs_first() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -1668,7 +1666,7 @@ fn subshell_end_manual_last_status_write_visible_to_getstatus() {
     }
 }
 
-static SUBSHELL_END_NONE_CALLS: AtomicU32 = AtomicU32::new(0);
+test_counter!(SUBSHELL_END_NONE_CALLS);
 
 struct NoneThenStatusHost(i32);
 
@@ -1685,7 +1683,6 @@ impl ShellHost for NoneThenStatusHost {
 
 #[test]
 fn subshell_end_orphan_end_after_none_still_applies_some() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_NONE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -1703,7 +1700,7 @@ fn subshell_end_orphan_end_after_none_still_applies_some() {
     }
 }
 
-static PIPELINE_BEGIN_CALLS: AtomicU32 = AtomicU32::new(0);
+test_counter!(PIPELINE_BEGIN_CALLS);
 
 struct CountingPipelineBeginHost;
 
@@ -1713,9 +1710,38 @@ impl ShellHost for CountingPipelineBeginHost {
     }
 }
 
+/// A host call counted by one test is invisible to every other test: a VM run
+/// on another thread (as a concurrently scheduled test is) bumps that thread's
+/// count and leaves this one untouched. A test that reads a counter it never
+/// reset therefore starts from zero no matter which tests ran before it.
+#[test]
+fn counters_are_private_to_the_test_that_counts() {
+    let pipeline = || {
+        let mut b = ChunkBuilder::new();
+        b.emit(Op::PipelineBegin(2), 1);
+        b.emit(Op::PipelineEnd, 1);
+        let mut vm = VM::new(b.build());
+        vm.set_shell_host(Box::new(CountingPipelineBeginHost));
+        let _ = vm.run();
+        PIPELINE_BEGIN_CALLS.load(Ordering::SeqCst)
+    };
+    let other = std::thread::spawn(move || {
+        let first = pipeline();
+        (first, pipeline())
+    })
+    .join()
+    .unwrap();
+    assert_eq!(other, (1, 2), "the other thread counts its own two runs");
+    assert_eq!(
+        PIPELINE_BEGIN_CALLS.load(Ordering::SeqCst),
+        0,
+        "runs on another thread must not leak into this test's count"
+    );
+    assert_eq!(pipeline(), 1);
+}
+
 #[test]
 fn request_halt_stops_before_top_level_return() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1734,7 +1760,6 @@ fn request_halt_stops_before_top_level_return() {
 
 #[test]
 fn request_halt_stops_before_pipeline_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1790,7 +1815,6 @@ fn request_halt_skips_getstatus_after_subshell_wrote_status() {
 
 #[test]
 fn request_halt_stops_before_later_callbuiltin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1808,7 +1832,6 @@ fn request_halt_stops_before_later_callbuiltin() {
 
 #[test]
 fn request_halt_both_extension_handlers_only_first_runs() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_NARROW: AtomicU32 = AtomicU32::new(0);
     static EXT_WIDE: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -1833,7 +1856,7 @@ fn request_halt_both_extension_handlers_only_first_runs() {
     );
 }
 
-static PIPELINE_STAGE_CALLS: AtomicU32 = AtomicU32::new(0);
+test_counter!(PIPELINE_STAGE_CALLS);
 
 struct CountingPipelineStageHost;
 
@@ -1845,7 +1868,6 @@ impl ShellHost for CountingPipelineStageHost {
 
 #[test]
 fn request_halt_stops_before_pipeline_stage() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1896,7 +1918,6 @@ fn subshell_end_getstatus_leaves_prior_status_on_stack_below() {
 
 #[test]
 fn request_halt_stops_before_return_value_top_level() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(55), 1);
@@ -1918,7 +1939,6 @@ fn request_halt_stops_before_return_value_top_level() {
 
 #[test]
 fn request_halt_wide_extension_halts_before_narrow() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_N: AtomicU32 = AtomicU32::new(0);
     static EXT_W: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -1961,7 +1981,6 @@ fn subshell_end_some_overwrites_setstatus_zero() {
 
 #[test]
 fn request_halt_prevents_subshell_end_host_invocation() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -1998,7 +2017,6 @@ fn subshell_triple_begin_end_updates_to_last_some() {
 
 #[test]
 fn request_halt_stops_before_jump_if_true_keep() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -2032,7 +2050,6 @@ fn subshell_end_last_status_set_even_when_run_returns_halted() {
 
 #[test]
 fn request_halt_stops_second_extension_in_chain() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_A: AtomicU32 = AtomicU32::new(0);
     static EXT_B: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -2099,7 +2116,6 @@ fn request_halt_reset_clears_setstatus_from_halted_run() {
 
 #[test]
 fn subshell_end_between_pipeline_ops_does_not_call_pipeline_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -2118,7 +2134,6 @@ fn subshell_end_between_pipeline_ops_does_not_call_pipeline_end() {
 
 #[test]
 fn request_halt_nested_call_with_args_still_halts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("fn");
@@ -2161,7 +2176,6 @@ fn subshell_end_without_host_orphan_leaves_last_status() {
 
 #[test]
 fn request_halt_three_consecutive_runs_never_resume() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -2226,7 +2240,6 @@ fn request_halt_reset_subshell_getstatus_lifecycle() {
 
 #[test]
 fn subshell_halt_reset_subshell_preserves_host_and_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
 
     let mut chunk_a = ChunkBuilder::new();
@@ -2261,7 +2274,6 @@ fn subshell_halt_reset_subshell_preserves_host_and_status() {
 
 #[test]
 fn request_halt_stops_before_jump_if_false_keep() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -2297,7 +2309,6 @@ fn subshell_end_exit_code_2_propagates() {
 
 #[test]
 fn request_halt_after_pushframe_popframe_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -2335,7 +2346,6 @@ fn subshell_end_with_loadint_only_on_stack_returns_int() {
 
 #[test]
 fn request_halt_stops_before_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -2386,7 +2396,6 @@ fn subshell_four_end_ops_incrementing_status() {
 
 #[test]
 fn request_halt_after_pipeline_begin_before_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -2424,7 +2433,6 @@ fn subshell_setstatus_then_end_getstatus_chain() {
 
 #[test]
 fn request_halt_stops_subshell_begin_after_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -2443,7 +2451,6 @@ fn request_halt_stops_subshell_begin_after_loadint() {
 
 #[test]
 fn request_halt_only_wide_handler_no_narrow() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static ONLY_WIDE: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::ExtendedWide(3, 1), 1);
@@ -2489,7 +2496,6 @@ fn subshell_end_some_zero_after_some_negative() {
 
 #[test]
 fn request_halt_double_pre_run_reset_then_executes() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let noop = ChunkBuilder::new();
     let noop_chunk = noop.build();
@@ -2531,7 +2537,6 @@ fn subshell_some_max_then_none_preserves_max() {
 
 #[test]
 fn request_halt_callee_return_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("f");
@@ -2571,7 +2576,6 @@ fn subshell_one_begin_two_end_second_status_wins() {
 
 #[test]
 fn request_halt_reset_extension_handler_runs_on_new_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_RUNS: AtomicU32 = AtomicU32::new(0);
     let halt_chunk = ChunkBuilder::new().build();
     let mut ext_b = ChunkBuilder::new();
@@ -2659,7 +2663,6 @@ fn subshell_two_begin_end_pairs_last_status_wins() {
 
 #[test]
 fn request_halt_stops_before_setstatus_op() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
     b.emit(Op::LoadInt(88), 1);
@@ -2727,7 +2730,6 @@ fn subshell_end_two_loadints_top_value_returned() {
 
 #[test]
 fn request_halt_between_pipeline_begin_and_stage() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -2746,7 +2748,6 @@ fn request_halt_between_pipeline_begin_and_stage() {
 
 #[test]
 fn subshell_end_invokes_host_every_time_regardless_of_value() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -2764,7 +2765,6 @@ fn subshell_end_invokes_host_every_time_regardless_of_value() {
 
 #[test]
 fn request_halt_extension_handler_reads_subshell_last_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static SEEN_STATUS: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -2817,7 +2817,6 @@ fn subshell_setstatus_after_end_overwrites_subshell_status() {
 
 #[test]
 fn request_halt_stops_before_call_op() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("fn");
@@ -2842,7 +2841,6 @@ fn request_halt_stops_before_call_op() {
 
 #[test]
 fn request_halt_double_reset_then_run() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let noop = ChunkBuilder::new().build();
     let mut run_b = ChunkBuilder::new();
@@ -2900,7 +2898,6 @@ fn subshell_getstatus_subshell_getstatus_two_updates() {
 
 #[test]
 fn request_halt_nested_two_level_call_stops_at_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let inner = b.add_name("inner");
@@ -2949,7 +2946,6 @@ fn subshell_five_end_incrementing_status() {
 
 #[test]
 fn request_halt_pre_run_many_ops_none_execute() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(7, 0), 1);
@@ -2987,7 +2983,6 @@ fn request_halt_after_getstatus_on_stack_returns_builtin_not_status() {
 
 #[test]
 fn subshell_begin_end_halt_begin_count_is_one() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -3056,7 +3051,6 @@ fn subshell_none_none_some_via_third_host() {
 
 #[test]
 fn request_halt_after_subshell_begin_before_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -3107,7 +3101,6 @@ fn subshell_six_end_incrementing_status() {
 
 #[test]
 fn request_halt_stops_before_backward_jump_target() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -3127,7 +3120,6 @@ fn request_halt_stops_before_backward_jump_target() {
 
 #[test]
 fn request_halt_wide_handler_reads_setstatus_last_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static WIDE_SEEN: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(37), 1);
@@ -3174,7 +3166,6 @@ fn subshell_replaced_host_none_on_second_reset_chunk() {
 
 #[test]
 fn request_halt_stops_before_top_level_return_value() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(88), 1);
@@ -3206,7 +3197,6 @@ fn subshell_end_status_minus_two_propagates() {
 
 #[test]
 fn request_halt_triple_reset_then_run() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let noop = ChunkBuilder::new().build();
     let mut run_b = ChunkBuilder::new();
@@ -3226,7 +3216,6 @@ fn request_halt_triple_reset_then_run() {
 
 #[test]
 fn subshell_three_begins_one_end_still_applies_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -3266,7 +3255,6 @@ fn subshell_getstatus_loadint_getstatus_final_is_loadint() {
 
 #[test]
 fn request_halt_between_two_subshell_begins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -3319,7 +3307,6 @@ fn subshell_max_then_min_second_wins() {
 
 #[test]
 fn request_halt_halt_flag_persists_after_ok_return() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -3353,7 +3340,6 @@ fn subshell_incrementing_from_100_to_104() {
 
 #[test]
 fn request_halt_stops_pipeline_end_without_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -3385,7 +3371,6 @@ fn subshell_halt_subshell_getstatus_same_vm_no_reset() {
 
 #[test]
 fn request_halt_extension_handler_receives_id_and_arg() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static SEEN_ID: AtomicU32 = AtomicU32::new(0);
     static SEEN_ARG: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -3457,7 +3442,6 @@ fn subshell_end_exit_code_125_propagates() {
 
 #[test]
 fn request_halt_between_two_subshell_ends() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -3487,7 +3471,6 @@ fn request_halt_three_builtins_before_halt_all_run() {
         vm.request_halt();
         Value::Int(0)
     }
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PRE.store(0, Ordering::SeqCst);
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -3522,7 +3505,6 @@ fn subshell_seven_end_incrementing_status() {
 
 #[test]
 fn request_halt_wide_extension_receives_id_and_payload() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static SEEN_ID: AtomicU32 = AtomicU32::new(0);
     static SEEN_PAYLOAD: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -3540,7 +3522,6 @@ fn request_halt_wide_extension_receives_id_and_payload() {
 
 #[test]
 fn subshell_pipeline_stage_does_not_change_last_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -3570,7 +3551,6 @@ fn subshell_pipeline_stage_does_not_change_last_status() {
 
 #[test]
 fn request_halt_stops_before_second_push_frame() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -3646,7 +3626,6 @@ fn subshell_getstatus_twice_without_intervening_end() {
 
 #[test]
 fn request_halt_after_subshell_begin_end_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -3717,7 +3696,6 @@ fn subshell_min_then_max_second_wins() {
 
 #[test]
 fn request_halt_four_consecutive_runs_never_resume() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -3748,7 +3726,6 @@ fn subshell_twelve_end_incrementing_from_one() {
 
 #[test]
 fn request_halt_extended_without_handler_continues() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::Extended(1, 0), 1);
@@ -3765,7 +3742,6 @@ fn request_halt_extended_without_handler_continues() {
 
 #[test]
 fn subshell_after_pipeline_begin_stage_without_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -3795,7 +3771,6 @@ fn subshell_after_pipeline_begin_stage_without_end() {
 
 #[test]
 fn request_halt_with_host_set_builtin_still_halts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -3880,7 +3855,6 @@ fn subshell_end_exit_code_3_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_ne_conditional_jump() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -3916,7 +3890,6 @@ fn subshell_end_exit_code_4_propagates() {
 
 #[test]
 fn request_halt_triple_halt_still_blocks_following_builtin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(50, 0), 1);
@@ -3948,7 +3921,6 @@ fn subshell_end_exit_code_5_propagates() {
 
 #[test]
 fn request_halt_halt_only_pushes_undef_and_blocks_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(61, 0), 1);
@@ -3982,7 +3954,6 @@ fn subshell_end_exit_code_7_propagates() {
 
 #[test]
 fn request_halt_pre_run_subshell_chunk_skips_host_until_reset() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -4022,7 +3993,6 @@ fn subshell_end_exit_code_9_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_true_after_halt_point() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -4050,7 +4020,6 @@ fn subshell_end_exit_code_11_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_false_after_halt_point() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -4079,7 +4048,6 @@ fn subshell_end_exit_code_12_propagates() {
 
 #[test]
 fn request_halt_between_two_pipeline_stages_blocks_second_stage() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(3), 1);
@@ -4112,7 +4080,6 @@ fn subshell_end_exit_code_13_propagates() {
 
 #[test]
 fn request_halt_after_first_pipeline_end_blocks_second_pipeline_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineEnd, 1);
@@ -4145,7 +4112,6 @@ fn subshell_end_exit_code_14_propagates() {
 
 #[test]
 fn request_halt_callee_with_two_args_halts_before_caller_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     let name = b.add_name("halt_callee");
     b.emit(Op::LoadInt(10), 1);
@@ -4184,7 +4150,6 @@ fn subshell_end_exit_code_15_propagates() {
 
 #[test]
 fn request_halt_narrow_extension_blocks_following_wide_on_same_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static NARROW_RAN: AtomicU32 = AtomicU32::new(0);
     static WIDE_RAN: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -4219,7 +4184,6 @@ fn subshell_end_exit_code_16_propagates() {
 
 #[test]
 fn request_halt_wide_extension_blocks_following_narrow_on_same_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static NARROW_RAN: AtomicU32 = AtomicU32::new(0);
     static WIDE_RAN: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -4293,7 +4257,6 @@ fn subshell_end_exit_code_18_propagates() {
 
 #[test]
 fn request_halt_pre_run_double_reset_then_subshell_end_runs() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let noop = ChunkBuilder::new().build();
     let mut sub_b = ChunkBuilder::new();
@@ -4326,7 +4289,6 @@ fn subshell_end_exit_code_19_propagates() {
 
 #[test]
 fn request_halt_stops_before_top_level_return_on_nonempty_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(44), 1);
@@ -4389,7 +4351,6 @@ fn subshell_end_exit_code_21_propagates() {
 
 #[test]
 fn request_halt_callbuiltin_three_args_reports_argc_before_stop() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -4423,7 +4384,6 @@ fn subshell_end_exit_code_22_propagates() {
 
 #[test]
 fn request_halt_second_subshell_begin_in_same_chunk_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -4485,7 +4445,6 @@ fn subshell_end_exit_code_131_propagates() {
 
 #[test]
 fn request_halt_five_consecutive_runs_never_advance_past_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -4514,7 +4473,6 @@ fn subshell_end_exit_code_132_propagates() {
 
 #[test]
 fn request_halt_after_pipeline_begin_only_one_begin_call() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -4547,7 +4505,6 @@ fn subshell_end_exit_code_133_propagates() {
 
 #[test]
 fn request_halt_blocks_loadint_between_two_subshell_ends() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -4581,7 +4538,6 @@ fn subshell_end_exit_code_134_propagates() {
 
 #[test]
 fn request_halt_extended_without_handler_still_blocks_following_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::Extended(9, 0), 1);
@@ -4611,7 +4567,6 @@ fn subshell_end_status_minus_three_propagates() {
 
 #[test]
 fn request_halt_jump_if_true_keep_with_true_condition_not_taken_before_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(0), 1);
@@ -4643,7 +4598,6 @@ fn subshell_end_status_minus_four_propagates() {
 
 #[test]
 fn request_halt_jump_if_false_keep_with_false_condition_not_taken_before_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -4709,7 +4663,6 @@ fn subshell_nine_end_incrementing_from_forty() {
 
 #[test]
 fn request_halt_reset_then_wide_handler_runs_on_fresh_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static WIDE_TOUCHED: AtomicU32 = AtomicU32::new(0);
     let halt_chunk = {
         let mut b = ChunkBuilder::new();
@@ -4795,7 +4748,6 @@ fn subshell_thirteen_end_incrementing_from_seven() {
 
 #[test]
 fn request_halt_callee_return_not_reached_when_halt_before_return_value() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     let name = b.add_name("inner_ret");
     b.emit(Op::Call(name, 0), 1);
@@ -4835,7 +4787,6 @@ fn subshell_fifteen_end_incrementing_from_twelve() {
 
 #[test]
 fn request_halt_host_subshell_end_count_one_when_halt_after_first() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -4906,7 +4857,6 @@ fn subshell_none_then_some_second_end_updates_from_eleven() {
 
 #[test]
 fn request_halt_between_two_getstatus_ops_second_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(25), 1);
     b.emit(Op::SetStatus, 1);
@@ -4977,7 +4927,6 @@ fn subshell_pipeline_end_before_subshell_end_getstatus_reads_subshell() {
 
 #[test]
 fn request_halt_after_open_pipeline_begin_blocks_pipeline_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -5011,7 +4960,6 @@ fn subshell_setstatus_between_two_ends_second_end_wins() {
 
 #[test]
 fn request_halt_three_level_nested_call_stops_at_innermost_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let outer = b.add_name("outer");
@@ -5105,7 +5053,6 @@ fn subshell_host_swap_none_then_status_on_second_reset_chunk() {
 
 #[test]
 fn request_halt_after_subshell_begin_before_end_leaves_status_zero() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -5177,7 +5124,6 @@ fn subshell_custom_pipeline_negative_exit_on_stack() {
 
 #[test]
 fn request_halt_extension_handler_can_read_vm_last_status_before_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static SEEN: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(41), 1);
@@ -5221,7 +5167,6 @@ fn subshell_zero_after_max_on_single_vm_overwrites() {
 
 #[test]
 fn request_halt_pre_run_nonempty_stack_still_halts_before_first_op() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(7, 0), 1);
@@ -5268,7 +5213,6 @@ fn subshell_negative_after_zero_overwrites() {
 
 #[test]
 fn request_halt_between_pushframe_and_popframe_pop_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -5303,7 +5247,6 @@ fn subshell_fourteen_end_incrementing_from_eighteen() {
 
 #[test]
 fn request_halt_full_pipeline_begin_stage_end_then_halt_before_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -5352,7 +5295,6 @@ fn subshell_default_host_on_second_chunk_after_status_host_first() {
 
 #[test]
 fn request_halt_subshell_status_visible_to_extension_after_end_before_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static SEEN: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -5382,7 +5324,6 @@ fn subshell_end_exit_code_135_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_undef_after_halt_point() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -5411,7 +5352,6 @@ fn subshell_end_exit_code_136_propagates() {
 
 #[test]
 fn request_halt_stops_before_pop_on_nonempty_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(5), 1);
@@ -5442,7 +5382,6 @@ fn subshell_sixteen_end_incrementing_from_twenty_two() {
 
 #[test]
 fn request_halt_after_callee_returnvalue_before_second_builtin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("ret_one");
@@ -5499,7 +5438,6 @@ fn subshell_third_some_host_on_fifth_end_applies_fifty() {
 
 #[test]
 fn request_halt_between_two_extended_ops_second_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static FIRST: AtomicU32 = AtomicU32::new(0);
     static SECOND: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -5538,7 +5476,6 @@ fn subshell_getstatus_after_begin_without_end_reads_prior_status() {
 
 #[test]
 fn request_halt_reset_then_extension_handler_runs_extended_op() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_RAN: AtomicU32 = AtomicU32::new(0);
     let halt = {
         let mut b = ChunkBuilder::new();
@@ -5566,7 +5503,6 @@ fn request_halt_reset_then_extension_handler_runs_extended_op() {
 
 #[test]
 fn subshell_end_after_two_pipeline_stages_without_pipeline_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(3), 1);
@@ -5597,7 +5533,6 @@ fn subshell_end_after_two_pipeline_stages_without_pipeline_end() {
 
 #[test]
 fn request_halt_after_subshell_end_and_before_pipeline_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -5626,7 +5561,6 @@ fn subshell_end_status_minus_five_propagates() {
 
 #[test]
 fn request_halt_halt_flag_survives_ok_return_from_empty_halt_only_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(61, 0), 1);
@@ -5641,7 +5575,6 @@ fn request_halt_halt_flag_survives_ok_return_from_empty_halt_only_chunk() {
 
 #[test]
 fn subshell_orphan_end_counting_host_invoked_without_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -5661,7 +5594,6 @@ fn subshell_orphan_end_counting_host_invoked_without_begin() {
 
 #[test]
 fn request_halt_between_subshell_begin_and_subshell_end_no_status_change() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -5693,7 +5625,6 @@ fn subshell_end_exit_code_23_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_lt_conditional_jump() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -5726,7 +5657,6 @@ fn subshell_end_exit_code_24_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_gt_conditional_jump() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -5758,7 +5688,6 @@ fn subshell_end_exit_code_25_propagates() {
 
 #[test]
 fn request_halt_stops_before_dup_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(42), 1);
@@ -5788,7 +5717,6 @@ fn subshell_end_exit_code_26_propagates() {
 
 #[test]
 fn request_halt_stops_before_swap_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -5818,7 +5746,6 @@ fn subshell_end_exit_code_27_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_const() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let c = b.add_constant(Value::Int(99));
@@ -5848,7 +5775,6 @@ fn subshell_end_exit_code_28_propagates() {
 
 #[test]
 fn request_halt_after_subshell_in_open_pipeline_before_stage() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     struct SubshellStageHost39;
     impl ShellHost for SubshellStageHost39 {
@@ -5887,7 +5813,6 @@ fn subshell_end_exit_code_29_propagates() {
 
 #[test]
 fn request_halt_quadruple_reset_then_touched_builtin_runs() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let noop = ChunkBuilder::new().build();
     let run = {
@@ -5923,7 +5848,6 @@ fn subshell_end_exit_code_30_propagates() {
 
 #[test]
 fn request_halt_between_callbuiltin_and_loadint_blocks_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -5951,7 +5875,6 @@ fn subshell_end_exit_code_137_propagates() {
 
 #[test]
 fn request_halt_stops_before_top_level_returnvalue_after_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(63), 1);
@@ -5982,7 +5905,6 @@ fn subshell_end_exit_code_138_propagates() {
 
 #[test]
 fn request_halt_extension_wide_reads_subshell_status_in_handler() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static SEEN: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -6012,7 +5934,6 @@ fn subshell_end_exit_code_139_propagates() {
 
 #[test]
 fn request_halt_pre_run_halt_reset_pre_run_halt_reset_then_runs() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let chunk = {
         let mut b = ChunkBuilder::new();
@@ -6047,7 +5968,6 @@ fn subshell_end_status_minus_six_propagates() {
 
 #[test]
 fn request_halt_stops_before_negate_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(5), 1);
@@ -6110,7 +6030,6 @@ fn subshell_seventeen_end_incrementing_from_nine() {
 
 #[test]
 fn request_halt_three_stage_pipeline_halt_before_second_stage() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(3), 1);
@@ -6149,7 +6068,6 @@ fn subshell_eighteen_end_incrementing_from_eleven() {
 
 #[test]
 fn request_halt_nested_call_depth_four_halts_at_level_two() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let l1 = b.add_name("l1");
@@ -6198,7 +6116,6 @@ fn subshell_nineteen_end_incrementing_from_four() {
 
 #[test]
 fn request_halt_callbuiltin_argc_one_reports_one() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(9), 1);
@@ -6231,7 +6148,6 @@ fn subshell_getstatus_before_end_stays_on_stack_below_updated_getstatus() {
 
 #[test]
 fn request_halt_chain_of_three_extended_no_handler_then_halt_builtin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::Extended(1, 0), 1);
@@ -6301,7 +6217,6 @@ fn subshell_begin_end_begin_end_alternating_status_second_wins() {
 
 #[test]
 fn request_halt_subshell_end_then_pipeline_begin_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -6336,7 +6251,6 @@ fn subshell_setstatus_before_begin_end_getstatus_reads_subshell() {
 
 #[test]
 fn request_halt_reset_after_halt_allows_second_subshell_end_on_new_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let halt_chunk = {
         let mut b = ChunkBuilder::new();
@@ -6380,7 +6294,6 @@ fn subshell_end_after_loadtrue_stack_top_is_true() {
 
 #[test]
 fn request_halt_halt_between_two_return_ops_in_flat_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -6411,7 +6324,6 @@ fn subshell_end_after_loadfalse_stack_top_is_false() {
 
 #[test]
 fn request_halt_six_consecutive_runs_without_reset_never_resume() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -6446,7 +6358,6 @@ fn subshell_two_setstatus_between_ends_last_end_wins() {
 
 #[test]
 fn request_halt_between_subshell_end_and_pipeline_stage_in_open_pipeline() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -6487,7 +6398,6 @@ fn subshell_end_exit_code_140_propagates() {
 
 #[test]
 fn request_halt_stops_before_add_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(3), 1);
@@ -6518,7 +6428,6 @@ fn subshell_end_exit_code_141_propagates() {
 
 #[test]
 fn request_halt_stops_before_sub_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(10), 1);
@@ -6548,7 +6457,6 @@ fn subshell_end_exit_code_142_propagates() {
 
 #[test]
 fn request_halt_after_pipeline_stage_before_pipeline_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -6578,7 +6486,6 @@ fn subshell_end_exit_code_143_propagates() {
 
 #[test]
 fn request_halt_mid_chunk_subshell_end_runs_before_halt_point() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -6606,7 +6513,6 @@ fn subshell_end_exit_code_144_propagates() {
 
 #[test]
 fn request_halt_stops_before_inc_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(7), 1);
@@ -6636,7 +6542,6 @@ fn subshell_end_exit_code_145_propagates() {
 
 #[test]
 fn request_halt_stops_before_dec_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(7), 1);
@@ -6670,7 +6575,6 @@ fn subshell_twenty_one_end_incrementing_from_zero() {
 
 #[test]
 fn request_halt_callee_returns_before_halt_in_caller_second_builtin_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("add_one");
@@ -6716,7 +6620,6 @@ fn subshell_twenty_two_end_incrementing_from_six() {
 
 #[test]
 fn request_halt_extension_handler_on_reset_chunk_sees_zero_last_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static SEEN: AtomicU32 = AtomicU32::new(0);
     let halt = {
         let mut b = ChunkBuilder::new();
@@ -6761,7 +6664,6 @@ fn subshell_twenty_three_end_incrementing_from_eight() {
 
 #[test]
 fn request_halt_between_two_subshell_begins_without_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -6795,7 +6697,6 @@ fn subshell_twenty_four_end_incrementing_from_one() {
 
 #[test]
 fn request_halt_stops_before_forward_jump_over_halt_target() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -6876,7 +6777,6 @@ fn subshell_sixth_none_then_some_on_seventh_applies_sixty_three() {
 
 #[test]
 fn request_halt_two_subshell_ends_then_halt_third_end_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -6893,7 +6793,6 @@ fn request_halt_two_subshell_ends_then_halt_third_end_blocked() {
 
 #[test]
 fn subshell_pipeline_begin_without_end_subshell_end_status_persists() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -6922,7 +6821,6 @@ fn subshell_pipeline_begin_without_end_subshell_end_status_persists() {
 
 #[test]
 fn request_halt_stops_before_mul_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(6), 1);
@@ -6952,7 +6850,6 @@ fn subshell_end_status_minus_eight_propagates() {
 
 #[test]
 fn request_halt_stops_before_div_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(20), 1);
@@ -7016,7 +6913,6 @@ fn subshell_custom_pipeline_zero_after_subshell_four_on_stack() {
 
 #[test]
 fn request_halt_reset_clears_halt_three_subshell_ends_on_fresh_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let halt = {
         let mut b = ChunkBuilder::new();
@@ -7059,7 +6955,6 @@ fn subshell_end_after_manual_last_status_ninety_one() {
 
 #[test]
 fn request_halt_stops_before_mod_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(10), 1);
@@ -7105,7 +7000,6 @@ fn subshell_none_host_first_chunk_status_host_second_after_reset() {
 
 #[test]
 fn request_halt_between_subshell_end_and_subshell_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -7145,7 +7039,6 @@ fn subshell_halt_reset_subshell_end_twice_same_host() {
 
 #[test]
 fn request_halt_stops_before_num_le_conditional_jump() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7178,7 +7071,6 @@ fn subshell_end_exit_code_150_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_ge_conditional_jump() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7197,7 +7089,6 @@ fn request_halt_stops_before_num_ge_conditional_jump() {
 
 #[test]
 fn subshell_begin_end_halt_reset_begin_end_runs_again() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let chunk = {
         let mut b = ChunkBuilder::new();
@@ -7220,7 +7111,6 @@ fn subshell_begin_end_halt_reset_begin_end_runs_again() {
 
 #[test]
 fn request_halt_with_pipeline_host_and_builtin_in_same_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7250,7 +7140,6 @@ fn subshell_max_alone_on_single_end_getstatus() {
 
 #[test]
 fn request_halt_seventh_consecutive_run_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7350,7 +7239,6 @@ fn subshell_end_exit_code_31_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_undef_between_two_loadints() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -7381,7 +7269,6 @@ fn subshell_end_exit_code_32_propagates() {
 
 #[test]
 fn request_halt_after_two_push_frames_before_third_push() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -7411,7 +7298,6 @@ fn subshell_end_exit_code_33_propagates() {
 
 #[test]
 fn request_halt_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7443,7 +7329,6 @@ fn subshell_end_exit_code_34_propagates() {
 
 #[test]
 fn request_halt_stops_before_dup2_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(7), 1);
@@ -7472,7 +7357,6 @@ fn subshell_end_exit_code_35_propagates() {
 
 #[test]
 fn request_halt_stops_before_rot_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -7504,7 +7388,6 @@ fn subshell_end_exit_code_36_propagates() {
 
 #[test]
 fn request_halt_stops_before_pow_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(2), 1);
@@ -7534,7 +7417,6 @@ fn subshell_end_exit_code_37_propagates() {
 
 #[test]
 fn request_halt_stops_before_spaceship_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -7565,7 +7447,6 @@ fn subshell_end_exit_code_38_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_float() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7593,7 +7474,6 @@ fn subshell_end_exit_code_39_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_eq_on_string_consts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("a"));
@@ -7626,7 +7506,6 @@ fn subshell_end_exit_code_40_propagates() {
 
 #[test]
 fn request_halt_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7655,7 +7534,6 @@ fn subshell_end_exit_code_41_propagates() {
 
 #[test]
 fn request_halt_ten_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7685,7 +7563,6 @@ fn subshell_end_exit_code_42_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_eq_jump_if_false_keep() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(5), 1);
@@ -7717,7 +7594,6 @@ fn subshell_end_exit_code_43_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_eq_jump_if_true_keep() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -7780,7 +7656,6 @@ fn subshell_end_exit_code_45_propagates() {
 
 #[test]
 fn request_halt_between_loadint_and_setstatus() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(70), 1);
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -7808,7 +7683,6 @@ fn subshell_end_exit_code_46_propagates() {
 
 #[test]
 fn request_halt_reset_twice_then_subshell_end_on_third_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let noop = ChunkBuilder::new().build();
     let sub = {
@@ -7842,7 +7716,6 @@ fn subshell_end_exit_code_47_propagates() {
 
 #[test]
 fn request_halt_callee_halt_before_return_caller_gets_builtin_result() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     let name = b.add_name("halt_fn");
     b.emit(Op::Call(name, 0), 1);
@@ -7907,7 +7780,6 @@ fn subshell_end_exit_code_49_propagates() {
 
 #[test]
 fn request_halt_three_extended_handlers_first_halts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static COUNTS: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::Extended(1, 0), 1);
@@ -7940,7 +7812,6 @@ fn subshell_end_exit_code_50_propagates() {
 
 #[test]
 fn request_halt_pipeline_begin_stage_halt_before_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -7969,7 +7840,6 @@ fn subshell_end_exit_code_146_propagates() {
 
 #[test]
 fn request_halt_after_open_pipeline_subshell_end_before_stage() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     struct SubshellStageHost60;
     impl ShellHost for SubshellStageHost60 {
@@ -8009,7 +7879,6 @@ fn subshell_end_exit_code_147_propagates() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_first_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -8038,7 +7907,6 @@ fn subshell_end_exit_code_148_propagates() {
 
 #[test]
 fn request_halt_wide_handler_halts_before_subsequent_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::ExtendedWide(5, 0), 1);
@@ -8068,7 +7936,6 @@ fn subshell_end_exit_code_149_propagates() {
 
 #[test]
 fn request_halt_pre_run_then_reset_subshell_getstatus_lifecycle() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let sub = {
         let mut b = ChunkBuilder::new();
         b.emit(Op::SubshellEnd, 1);
@@ -8104,7 +7971,6 @@ fn subshell_end_status_minus_nine_propagates() {
 
 #[test]
 fn request_halt_stops_before_third_push_frame() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -8136,7 +8002,6 @@ fn subshell_end_status_minus_ten_propagates() {
 
 #[test]
 fn request_halt_between_two_pipeline_end_ops_in_flat_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineEnd, 1);
@@ -8173,7 +8038,6 @@ fn subshell_twenty_six_end_incrementing_from_ten() {
 
 #[test]
 fn request_halt_extension_reads_subshell_status_then_halts_before_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static SEEN: AtomicU32 = AtomicU32::new(0);
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -8228,7 +8092,6 @@ fn subshell_end_exit_code_151_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_ne_keep_conditional_jump() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(5), 1);
@@ -8261,7 +8124,6 @@ fn subshell_end_exit_code_152_propagates() {
 
 #[test]
 fn request_halt_stops_before_backward_jump_if_true() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -8295,7 +8157,6 @@ fn subshell_end_exit_code_153_propagates() {
 
 #[test]
 fn request_halt_after_first_of_three_subshell_ends() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -8355,7 +8216,6 @@ fn subshell_end_exit_code_155_propagates() {
 
 #[test]
 fn request_halt_five_push_frames_halt_before_pop_frame() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     for _ in 0..5 {
@@ -8391,7 +8251,6 @@ fn subshell_twenty_eight_end_incrementing_from_five() {
 
 #[test]
 fn request_halt_call_op_in_caller_blocked_after_callee_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let inner = b.add_name("inner_h");
@@ -8435,7 +8294,6 @@ fn subshell_twenty_nine_end_incrementing_from_seventeen() {
 
 #[test]
 fn request_halt_reset_preserves_counting_subshell_host_across_three_chunks() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let halt = {
         let mut b = ChunkBuilder::new();
@@ -8476,7 +8334,6 @@ fn subshell_thirty_end_incrementing_from_nineteen() {
 
 #[test]
 fn request_halt_between_getstatus_and_loadint_blocks_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(71), 1);
@@ -8552,7 +8409,6 @@ fn subshell_eighth_some_on_eighth_end_applies_seventy() {
 
 #[test]
 fn request_halt_stops_before_second_call_in_caller_after_callee_returns() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static OUTER_CALLS: AtomicU32 = AtomicU32::new(0);
     fn outer_fn(_vm: &mut VM, _argc: u8) -> Value {
         OUTER_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -8601,7 +8457,6 @@ fn subshell_pipeline_end_then_subshell_end_getstatus_reads_subshell() {
 
 #[test]
 fn request_halt_after_subshell_end_in_nested_begin_end_pair() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -8638,7 +8493,6 @@ fn subshell_setstatus_after_begin_before_end_overwritten_by_end() {
 
 #[test]
 fn request_halt_stops_before_load_true_between_two_loadints() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(10), 1);
@@ -8670,7 +8524,6 @@ fn subshell_two_orphan_ends_none_then_some_host() {
 
 #[test]
 fn request_halt_after_pipeline_end_subshell_end_both_complete_before_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -8742,7 +8595,6 @@ fn subshell_four_begin_two_end_incrementing_status() {
 
 #[test]
 fn request_halt_stops_before_second_extended_wide() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static WIDE1: AtomicU32 = AtomicU32::new(0);
     static WIDE2: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -8764,7 +8616,6 @@ fn request_halt_stops_before_second_extended_wide() {
 
 #[test]
 fn subshell_halt_reset_halt_reset_subshell_end_third_run() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -8791,7 +8642,6 @@ fn subshell_halt_reset_halt_reset_subshell_end_third_run() {
 
 #[test]
 fn request_halt_empty_chunk_after_reset_on_pre_run_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let empty = ChunkBuilder::new().build();
     let run = {
@@ -8839,7 +8689,6 @@ fn subshell_none_host_reset_then_status_host_on_same_chunk_type() {
 
 #[test]
 fn request_halt_stops_before_call_with_one_arg_in_caller() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("noop");
@@ -8882,7 +8731,6 @@ fn subshell_end_between_two_setstatus_second_end_wins() {
 
 #[test]
 fn request_halt_subshell_begin_count_one_when_halt_after_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -8914,7 +8762,6 @@ fn subshell_triple_getstatus_after_single_end_all_read_same() {
 
 #[test]
 fn request_halt_eleven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -8944,7 +8791,6 @@ fn subshell_end_exit_code_156_propagates() {
 
 #[test]
 fn request_halt_twelve_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -9030,7 +8876,6 @@ fn request_halt_full_lifecycle_host_swap_reset_getstatus() {
 
 #[test]
 fn subshell_end_after_halt_reset_on_same_vm_reads_new_host_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let run = {
         let mut b = ChunkBuilder::new();
         b.emit(Op::CallBuiltin(100, 0), 1);
@@ -9059,7 +8904,6 @@ fn subshell_end_after_halt_reset_on_same_vm_reads_new_host_status() {
 
 #[test]
 fn request_halt_between_subshell_end_and_pipeline_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -9091,7 +8935,6 @@ fn subshell_loadint_getstatus_subshell_end_final_getstatus_wins() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_end_after_first_updates_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -9120,7 +8963,6 @@ fn subshell_end_exit_code_159_propagates() {
 
 #[test]
 fn request_halt_triple_halt_from_builtin_still_single_clean_stop() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(50, 0), 1);
@@ -9226,7 +9068,6 @@ fn subshell_end_exit_code_51_propagates() {
 
 #[test]
 fn request_halt_stops_before_concat_on_string_consts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("foo"));
@@ -9259,7 +9100,6 @@ fn subshell_end_exit_code_52_propagates() {
 
 #[test]
 fn request_halt_stops_before_string_len() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let s = b.add_constant(Value::str("hello"));
@@ -9289,7 +9129,6 @@ fn subshell_end_exit_code_53_propagates() {
 
 #[test]
 fn request_halt_stops_before_string_repeat() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let s = b.add_constant(Value::str("x"));
@@ -9321,7 +9160,6 @@ fn subshell_end_exit_code_54_propagates() {
 
 #[test]
 fn request_halt_thirteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -9350,7 +9188,6 @@ fn subshell_end_exit_code_55_propagates() {
 
 #[test]
 fn request_halt_fourteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -9380,7 +9217,6 @@ fn subshell_end_exit_code_56_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_ne_on_consts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("a"));
@@ -9412,7 +9248,6 @@ fn subshell_end_exit_code_57_propagates() {
 
 #[test]
 fn request_halt_after_subshell_end_before_pipeline_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_BEGIN_CALLS.store(0, Ordering::SeqCst);
     struct SubshellBeginHost88;
     impl ShellHost for SubshellBeginHost88 {
@@ -9464,7 +9299,6 @@ fn subshell_end_exit_code_59_propagates() {
 
 #[test]
 fn request_halt_reset_then_subshell_begin_end_on_fresh_chunk() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let halt = {
         let mut b = ChunkBuilder::new();
@@ -9503,7 +9337,6 @@ fn subshell_end_exit_code_60_propagates() {
 
 #[test]
 fn request_halt_between_two_load_const_ops() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let c1 = b.add_constant(Value::Int(1));
@@ -9534,7 +9367,6 @@ fn subshell_end_exit_code_61_propagates() {
 
 #[test]
 fn request_halt_callee_returnvalue_before_halt_in_caller_stack_top_is_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     let name = b.add_name("rv3");
     b.emit(Op::Call(name, 0), 1);
@@ -9572,7 +9404,6 @@ fn subshell_end_exit_code_62_propagates() {
 
 #[test]
 fn request_halt_after_pipeline_stage_before_pipeline_end_in_open_pipeline() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -9601,7 +9432,6 @@ fn subshell_end_exit_code_63_propagates() {
 
 #[test]
 fn request_halt_stops_before_second_extended_after_first_halts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static FIRST: AtomicU32 = AtomicU32::new(0);
     static SECOND: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -9637,7 +9467,6 @@ fn subshell_end_exit_code_64_propagates() {
 
 #[test]
 fn request_halt_pre_run_halt_reset_halt_reset_then_subshell_runs() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let noop = ChunkBuilder::new().build();
     let sub = {
@@ -9673,7 +9502,6 @@ fn subshell_end_exit_code_65_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_false_after_load_true() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadTrue, 1);
@@ -9702,7 +9530,6 @@ fn subshell_end_status_minus_twelve_propagates() {
 
 #[test]
 fn request_halt_between_subshell_end_and_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -9734,7 +9561,6 @@ fn subshell_end_status_minus_thirteen_propagates() {
 
 #[test]
 fn request_halt_fifteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -9768,7 +9594,6 @@ fn subshell_thirty_one_end_incrementing_from_twenty_one() {
 
 #[test]
 fn request_halt_stops_before_num_lt_keep_when_condition_true() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(2), 1);
@@ -9805,7 +9630,6 @@ fn subshell_thirty_two_end_incrementing_from_fourteen() {
 
 #[test]
 fn request_halt_stops_before_num_gt_keep_when_condition_false() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(2), 1);
@@ -9880,7 +9704,6 @@ fn subshell_end_exit_code_66_propagates() {
 
 #[test]
 fn request_halt_three_subshell_begins_halt_before_any_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -9911,7 +9734,6 @@ fn subshell_end_exit_code_67_propagates() {
 
 #[test]
 fn request_halt_wide_then_narrow_extension_first_halts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static WIDE: AtomicU32 = AtomicU32::new(0);
     static NARROW: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
@@ -9945,7 +9767,6 @@ fn subshell_end_exit_code_68_propagates() {
 
 #[test]
 fn request_halt_after_subshell_end_before_subshell_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -9975,7 +9796,6 @@ fn subshell_end_exit_code_69_propagates() {
 
 #[test]
 fn request_halt_reset_clears_halt_four_subshell_ends_on_two_resets() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let halt = {
         let mut b = ChunkBuilder::new();
@@ -10015,7 +9835,6 @@ fn subshell_end_exit_code_70_propagates() {
 
 #[test]
 fn request_halt_stops_before_pop_after_dup_on_stack() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(8), 1);
@@ -10047,7 +9866,6 @@ fn subshell_end_exit_code_161_propagates() {
 
 #[test]
 fn request_halt_sixteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -10077,7 +9895,6 @@ fn subshell_end_exit_code_162_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_le_keep_when_condition_false() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(5), 1);
@@ -10109,7 +9926,6 @@ fn subshell_end_exit_code_163_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_ge_keep_when_condition_false() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(2), 1);
@@ -10142,7 +9958,6 @@ fn subshell_end_exit_code_164_propagates() {
 
 #[test]
 fn request_halt_between_two_subshell_ends_with_loadint_between() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -10172,7 +9987,6 @@ fn subshell_end_exit_code_165_propagates() {
 
 #[test]
 fn request_halt_seventeen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -10201,7 +10015,6 @@ fn subshell_end_status_minus_fourteen_propagates() {
 
 #[test]
 fn request_halt_stops_before_swap_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -10270,7 +10083,6 @@ fn subshell_thirty_three_end_incrementing_from_sixteen() {
 
 #[test]
 fn request_halt_stops_before_loadint_after_full_subshell_begin_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -10307,7 +10119,6 @@ fn subshell_thirty_four_end_incrementing_from_nineteen() {
 
 #[test]
 fn request_halt_nested_callee_halt_caller_never_reaches_loadint() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     let name = b.add_name("inner_h2");
     b.emit(Op::Call(name, 0), 1);
@@ -10349,7 +10160,6 @@ fn subshell_thirty_five_end_incrementing_from_twenty_three() {
 
 #[test]
 fn request_halt_extension_handler_halts_before_subshell_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::Extended(20, 0), 1);
@@ -10378,7 +10188,6 @@ fn subshell_end_exit_code_166_propagates() {
 
 #[test]
 fn request_halt_after_subshell_end_before_pipeline_stage_in_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     struct StageAfterSubshellHost;
     impl ShellHost for StageAfterSubshellHost {
@@ -10446,7 +10255,6 @@ fn subshell_end_exit_code_168_propagates() {
 
 #[test]
 fn request_halt_double_subshell_end_then_halt_third_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -10515,7 +10323,6 @@ fn subshell_end_exit_code_170_propagates() {
 
 #[test]
 fn request_halt_eighteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -10560,7 +10367,6 @@ fn subshell_tenth_some_on_tenth_end_applies_one_seven() {
 
 #[test]
 fn request_halt_between_pipeline_begin_and_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineBegin(2), 1);
@@ -10593,7 +10399,6 @@ fn subshell_setstatus_after_end_before_getstatus_reads_setstatus() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -10626,7 +10431,6 @@ fn subshell_two_pipeline_ends_subshell_end_getstatus_reads_subshell() {
 
 #[test]
 fn request_halt_callee_with_one_arg_before_halt_in_caller() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let mut b = ChunkBuilder::new();
     let name = b.add_name("take1");
     b.emit(Op::LoadInt(7), 1);
@@ -10647,7 +10451,6 @@ fn request_halt_callee_with_one_arg_before_halt_in_caller() {
 
 #[test]
 fn subshell_begin_end_reset_begin_end_same_host_twice() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let chunk = {
         let mut b = ChunkBuilder::new();
@@ -10666,7 +10469,6 @@ fn subshell_begin_end_reset_begin_end_same_host_twice() {
 
 #[test]
 fn request_halt_stops_before_add_after_subshell_wrote_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -10699,7 +10501,6 @@ fn subshell_loadint_subshell_end_getstatus_order_final_status() {
 
 #[test]
 fn request_halt_nineteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -10733,7 +10534,6 @@ fn subshell_alternating_host_fifth_end_none_keeps_nine() {
 
 #[test]
 fn request_halt_twenty_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -10872,7 +10672,6 @@ fn subshell_end_exit_code_172_propagates() {
 
 #[test]
 fn request_halt_stops_before_pop_frame_after_three_push_frames() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -10890,7 +10689,6 @@ fn request_halt_stops_before_pop_frame_after_three_push_frames() {
 
 #[test]
 fn subshell_triple_begin_single_end_applies_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -10909,7 +10707,6 @@ fn subshell_triple_begin_single_end_applies_status() {
 
 #[test]
 fn request_halt_after_subshell_end_extension_handler_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_RAN: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -10967,7 +10764,6 @@ fn subshell_end_exit_code_174_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_lt_jump_if_false_keep() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("a"));
@@ -11002,7 +10798,6 @@ fn subshell_end_exit_code_175_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_gt_jump_if_true_keep_when_false() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("a"));
@@ -11036,7 +10831,6 @@ fn subshell_end_exit_code_176_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_le_jump_if_false_keep() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("mid"));
@@ -11071,7 +10865,6 @@ fn subshell_end_exit_code_177_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_ge_jump_if_false_keep() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("z"));
@@ -11105,7 +10898,6 @@ fn subshell_end_exit_code_178_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_ne_jump_if_false_keep_when_true() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(4), 1);
@@ -11138,7 +10930,6 @@ fn subshell_end_exit_code_179_propagates() {
 
 #[test]
 fn request_halt_twenty_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -11167,7 +10958,6 @@ fn subshell_end_exit_code_180_propagates() {
 
 #[test]
 fn request_halt_twenty_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -11197,7 +10987,6 @@ fn subshell_end_exit_code_181_propagates() {
 
 #[test]
 fn request_halt_twenty_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -11226,7 +11015,6 @@ fn subshell_end_exit_code_182_propagates() {
 
 #[test]
 fn request_halt_twenty_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -11256,7 +11044,6 @@ fn subshell_end_exit_code_183_propagates() {
 
 #[test]
 fn request_halt_twenty_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -11619,7 +11406,6 @@ fn subshell_end_exit_code_195_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_wrote_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -11650,7 +11436,6 @@ fn subshell_end_exit_code_196_propagates() {
 
 #[test]
 fn request_halt_after_subshell_end_before_str_eq_on_consts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -11686,7 +11471,6 @@ fn subshell_end_exit_code_197_propagates() {
 
 #[test]
 fn subshell_halt_reset_halt_reset_subshell_end_fourth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -11728,7 +11512,6 @@ fn subshell_end_exit_code_198_propagates() {
 
 #[test]
 fn request_halt_between_subshell_end_and_second_subshell_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -11759,7 +11542,6 @@ fn subshell_end_exit_code_199_propagates() {
 
 #[test]
 fn request_halt_stops_before_backward_jump_if_false_keep() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -11834,7 +11616,6 @@ fn subshell_end_exit_code_201_propagates() {
 
 #[test]
 fn request_halt_after_pipeline_begin_before_subshell_end_host() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     struct PipelineBeginSubshellEndHost202;
     impl ShellHost for PipelineBeginSubshellEndHost202 {
@@ -11905,7 +11686,6 @@ fn subshell_end_exit_code_203_propagates() {
 
 #[test]
 fn subshell_four_begins_three_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -11953,7 +11733,6 @@ fn subshell_end_exit_code_204_propagates() {
 
 #[test]
 fn request_halt_pre_run_then_subshell_chunk_after_reset_runs_host() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let empty = ChunkBuilder::new().build();
     let sub = {
@@ -12018,7 +11797,6 @@ fn subshell_end_exit_code_206_propagates() {
 
 #[test]
 fn request_halt_stops_before_pop_after_two_push_frames() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PushFrame, 1);
@@ -12048,7 +11826,6 @@ fn subshell_end_exit_code_207_propagates() {
 
 #[test]
 fn subshell_counting_end_host_two_ends_same_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -12082,7 +11859,6 @@ fn subshell_end_exit_code_208_propagates() {
 
 #[test]
 fn request_halt_extension_no_handler_after_subshell_end_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_TOUCHED: AtomicU32 = AtomicU32::new(0);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -12143,7 +11919,6 @@ fn subshell_end_exit_code_210_propagates() {
 
 #[test]
 fn request_halt_callee_two_args_return_before_caller_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("pair");
@@ -12218,7 +11993,6 @@ fn subshell_end_exit_code_212_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_int_after_getstatus_read() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(214), 1);
@@ -12280,7 +12054,6 @@ fn subshell_end_exit_code_214_propagates() {
 
 #[test]
 fn request_halt_between_two_extension_wide_handlers_second_not_reached() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static WIDE_A: AtomicU32 = AtomicU32::new(0);
     static WIDE_B: AtomicU32 = AtomicU32::new(0);
     WIDE_A.store(0, Ordering::SeqCst);
@@ -12349,7 +12122,6 @@ fn subshell_end_exit_code_216_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_eq_jump_if_true_when_false() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(6), 1);
@@ -12412,7 +12184,6 @@ fn subshell_end_exit_code_218_propagates() {
 
 #[test]
 fn request_halt_reset_twice_then_subshell_end_runs_host() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let halt = {
         let mut b = ChunkBuilder::new();
@@ -12451,7 +12222,6 @@ fn subshell_end_exit_code_219_propagates() {
 
 #[test]
 fn subshell_begin_counting_host_without_matching_end_leaves_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -12486,7 +12256,6 @@ fn subshell_end_exit_code_220_propagates() {
 
 #[test]
 fn request_halt_after_first_of_three_callbuiltins_blocks_rest() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -12517,7 +12286,6 @@ fn subshell_end_exit_code_221_propagates() {
 
 #[test]
 fn subshell_halt_same_vm_second_subshell_end_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -12547,7 +12315,6 @@ fn subshell_end_exit_code_222_propagates() {
 
 #[test]
 fn request_halt_twenty_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -12594,7 +12361,6 @@ fn subshell_forty_one_end_incrementing_from_two() {
 
 #[test]
 fn request_halt_stops_before_str_ne_jump_if_true_keep_when_false() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("same"));
@@ -12628,7 +12394,6 @@ fn subshell_end_status_minus_twenty_one_propagates() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_halt_point() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::LoadInt(1), 1);
@@ -12704,7 +12469,6 @@ fn subshell_end_exit_code_224_propagates() {
 
 #[test]
 fn request_halt_twenty_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -12734,7 +12498,6 @@ fn subshell_end_exit_code_225_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_lt_on_consts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("alpha"));
@@ -12766,7 +12529,6 @@ fn subshell_end_exit_code_226_propagates() {
 
 #[test]
 fn request_halt_twenty_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -12796,7 +12558,6 @@ fn subshell_end_exit_code_227_propagates() {
 
 #[test]
 fn request_halt_stops_before_make_hash_after_halt_point() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let k = b.add_constant(Value::str("k"));
@@ -12828,7 +12589,6 @@ fn subshell_end_exit_code_228_propagates() {
 
 #[test]
 fn request_halt_twenty_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -12858,7 +12618,6 @@ fn subshell_end_exit_code_229_propagates() {
 
 #[test]
 fn request_halt_subshell_status230_blocks_following_pipeline_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     struct SubshellThenPipelineEndHost230;
     impl ShellHost for SubshellThenPipelineEndHost230 {
@@ -12897,7 +12656,6 @@ fn subshell_end_exit_code_230_propagates() {
 
 #[test]
 fn request_halt_thirty_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -12958,7 +12716,6 @@ fn subshell_end_exit_code_232_propagates() {
 
 #[test]
 fn request_halt_thirty_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -13144,7 +12901,6 @@ fn subshell_end_exit_code_238_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_ge_on_consts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("zeta"));
@@ -13261,7 +13017,6 @@ fn subshell_end_exit_code_242_propagates() {
 
 #[test]
 fn subshell_halt_reset_halt_reset_subshell_end_fifth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -13370,7 +13125,6 @@ fn subshell_end_exit_code_245_propagates() {
 
 #[test]
 fn request_halt_between_pipeline_stage_and_pipeline_end_after_subshell() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_STAGE_CALLS.store(0, Ordering::SeqCst);
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     struct SubshellStagePipelineHost246;
@@ -13448,7 +13202,6 @@ fn subshell_end_exit_code_247_propagates() {
 
 #[test]
 fn request_halt_after_subshell_end_before_load_true() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -13479,7 +13232,6 @@ fn subshell_end_exit_code_248_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_undef_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -13511,7 +13263,6 @@ fn subshell_end_exit_code_249_propagates() {
 
 #[test]
 fn request_halt_thirty_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -13541,7 +13292,6 @@ fn subshell_end_exit_code_250_propagates() {
 
 #[test]
 fn request_halt_thirty_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -13570,7 +13320,6 @@ fn subshell_end_exit_code_251_propagates() {
 
 #[test]
 fn request_halt_thirty_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -13600,7 +13349,6 @@ fn subshell_end_exit_code_252_propagates() {
 
 #[test]
 fn request_halt_thirty_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -13875,7 +13623,6 @@ fn subshell_end_exit_code_262_propagates() {
 
 #[test]
 fn request_halt_callee_zero_args_return_before_caller_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("noop");
@@ -13946,7 +13693,6 @@ fn subshell_end_exit_code_264_propagates() {
 
 #[test]
 fn request_halt_stops_before_pow_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -13980,7 +13726,6 @@ fn subshell_end_exit_code_265_propagates() {
 
 #[test]
 fn request_halt_between_two_subshell_ends_second_host_not_called() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -14009,7 +13754,6 @@ fn subshell_end_exit_code_266_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_le_on_consts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("abc"));
@@ -14042,7 +13786,6 @@ fn subshell_end_exit_code_267_propagates() {
 
 #[test]
 fn request_halt_after_subshell_end_before_narrow_extension() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     static EXT_RAN: AtomicU32 = AtomicU32::new(0);
     EXT_RAN.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -14108,7 +13851,6 @@ fn subshell_end_exit_code_269_propagates() {
 
 #[test]
 fn request_halt_subshell_status270_blocks_following_pipeline_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_BEGIN_CALLS.store(0, Ordering::SeqCst);
     struct SubshellPipelineBeginHost270;
     impl ShellHost for SubshellPipelineBeginHost270 {
@@ -14146,7 +13888,6 @@ fn subshell_end_exit_code_270_propagates() {
 
 #[test]
 fn request_halt_thirty_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -14219,7 +13960,6 @@ fn subshell_end_exit_code_272_propagates() {
 
 #[test]
 fn request_halt_between_two_loadints_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -14252,7 +13992,6 @@ fn subshell_end_exit_code_273_propagates() {
 
 #[test]
 fn request_halt_between_two_pipeline_ends_blocks_second() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     PIPELINE_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::PipelineEnd, 1);
@@ -14312,7 +14051,6 @@ fn subshell_fifteenth_some_host_applies_on_fifteenth_end() {
 
 #[test]
 fn request_halt_stops_before_str_gt_on_consts() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let a = b.add_constant(Value::str("longer"));
@@ -14362,7 +14100,6 @@ fn subshell_forty_nine_end_incrementing_from_thirteen() {
 
 #[test]
 fn request_halt_thirty_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -14391,7 +14128,6 @@ fn subshell_end_status_minus_thirty_one_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_getstatus_on_fourth_reset_run() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let halt = {
         let mut b = ChunkBuilder::new();
         b.emit(Op::CallBuiltin(100, 0), 1);
@@ -14434,7 +14170,6 @@ fn subshell_end_exit_code_277_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_false_after_subshell_wrote_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -14479,7 +14214,6 @@ fn subshell_end_exit_code_279_propagates() {
 
 #[test]
 fn request_halt_thirty_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -14509,7 +14243,6 @@ fn subshell_end_exit_code_280_propagates() {
 
 #[test]
 fn request_halt_thirty_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -14538,7 +14271,6 @@ fn subshell_end_exit_code_281_propagates() {
 
 #[test]
 fn request_halt_forty_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -14806,7 +14538,6 @@ fn subshell_end_exit_code_290_propagates() {
 
 #[test]
 fn request_halt_stops_before_mod_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -14840,7 +14571,6 @@ fn subshell_end_exit_code_291_propagates() {
 
 #[test]
 fn request_halt_stops_before_div_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -14873,7 +14603,6 @@ fn subshell_end_exit_code_292_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_sixth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -14920,7 +14649,6 @@ fn subshell_end_exit_code_293_propagates() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_wrote_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -14952,7 +14680,6 @@ fn subshell_end_exit_code_294_propagates() {
 
 #[test]
 fn subshell_five_begins_two_ends_applies_last_end_status() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -14998,7 +14725,6 @@ fn subshell_end_exit_code_295_propagates() {
 
 #[test]
 fn request_halt_between_second_subshell_begin_and_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellBegin, 1);
@@ -15061,7 +14787,6 @@ fn subshell_end_exit_code_297_propagates() {
 
 #[test]
 fn request_halt_pre_run_double_reset_then_subshell_end_runs_host298() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let empty = ChunkBuilder::new().build();
     let sub = {
@@ -15097,7 +14822,6 @@ fn subshell_end_exit_code_298_propagates() {
 
 #[test]
 fn request_halt_stops_before_dup2_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -15163,7 +14887,6 @@ fn subshell_end_exit_code_300_propagates() {
 
 #[test]
 fn request_halt_stops_before_spaceship_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -15225,7 +14948,6 @@ fn subshell_end_exit_code_302_propagates() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -15273,7 +14995,6 @@ fn subshell_end_exit_code_304_propagates() {
 
 #[test]
 fn request_halt_forty_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -15303,7 +15024,6 @@ fn subshell_end_exit_code_305_propagates() {
 
 #[test]
 fn request_halt_forty_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -15332,7 +15052,6 @@ fn subshell_end_exit_code_306_propagates() {
 
 #[test]
 fn request_halt_forty_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -15649,7 +15368,6 @@ fn subshell_end_exit_code_316_propagates() {
 
 #[test]
 fn request_halt_stops_before_mul_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -15713,7 +15431,6 @@ fn subshell_end_exit_code_318_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_seventh_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -15757,7 +15474,6 @@ fn subshell_end_exit_code_319_propagates() {
 
 #[test]
 fn request_halt_callee_one_arg_before_caller_halt() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     let name = b.add_name("take1");
@@ -15844,7 +15560,6 @@ fn subshell_end_exit_code_321_propagates() {
 
 #[test]
 fn request_halt_stops_before_jump_if_false_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -15910,7 +15625,6 @@ fn subshell_end_exit_code_323_propagates() {
 
 #[test]
 fn request_halt_forty_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -15983,7 +15697,6 @@ fn subshell_end_exit_code_325_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16016,7 +15729,6 @@ fn subshell_end_exit_code_326_propagates() {
 
 #[test]
 fn request_halt_stops_before_sub_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16081,7 +15793,6 @@ fn subshell_end_exit_code_328_propagates() {
 
 #[test]
 fn request_halt_stops_before_rot_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16161,7 +15872,6 @@ fn subshell_end_exit_code_330_propagates() {
 
 #[test]
 fn request_halt_stops_before_inc_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16193,7 +15903,6 @@ fn subshell_end_exit_code_331_propagates() {
 
 #[test]
 fn request_halt_forty_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -16236,7 +15945,6 @@ fn subshell_end_status_minus_forty_two_propagates() {
 
 #[test]
 fn request_halt_stops_before_dec_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16282,7 +15990,6 @@ fn subshell_end_exit_code_334_propagates() {
 
 #[test]
 fn request_halt_forty_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -16312,7 +16019,6 @@ fn subshell_end_exit_code_335_propagates() {
 
 #[test]
 fn request_halt_forty_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -16341,7 +16047,6 @@ fn subshell_end_exit_code_336_propagates() {
 
 #[test]
 fn request_halt_forty_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -16371,7 +16076,6 @@ fn subshell_end_exit_code_337_propagates() {
 
 #[test]
 fn request_halt_forty_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -16400,7 +16104,6 @@ fn subshell_end_exit_code_338_propagates() {
 
 #[test]
 fn request_halt_fifty_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -16671,7 +16374,6 @@ fn subshell_end_exit_code_347_propagates() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16707,7 +16409,6 @@ fn subshell_end_exit_code_348_propagates() {
 
 #[test]
 fn request_halt_stops_before_string_repeat_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16741,7 +16442,6 @@ fn subshell_end_exit_code_349_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_eighth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -16786,7 +16486,6 @@ fn subshell_end_exit_code_350_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status351() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16817,7 +16516,6 @@ fn subshell_end_exit_code_351_propagates() {
 
 #[test]
 fn subshell_six_begins_three_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -16864,7 +16562,6 @@ fn subshell_end_exit_code_352_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_ne_on_consts_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16932,7 +16629,6 @@ fn subshell_end_exit_code_354_propagates() {
 
 #[test]
 fn request_halt_stops_before_add_after_subshell_end_status355() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -16997,7 +16693,6 @@ fn subshell_end_exit_code_356_propagates() {
 
 #[test]
 fn request_halt_stops_before_string_len_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -17076,7 +16771,6 @@ fn subshell_end_exit_code_359_propagates() {
 
 #[test]
 fn request_halt_fifty_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -17106,7 +16800,6 @@ fn subshell_end_exit_code_360_propagates() {
 
 #[test]
 fn request_halt_fifty_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -17135,7 +16828,6 @@ fn subshell_end_exit_code_361_propagates() {
 
 #[test]
 fn request_halt_fifty_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -17367,7 +17059,6 @@ fn subshell_end_exit_code_368_propagates() {
 
 #[test]
 fn request_halt_stops_before_make_hash_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -17403,7 +17094,6 @@ fn subshell_end_exit_code_369_propagates() {
 
 #[test]
 fn request_halt_stops_before_spaceship_after_subshell_end_status370() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -17436,7 +17126,6 @@ fn subshell_end_exit_code_370_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_ninth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -17481,7 +17170,6 @@ fn subshell_end_exit_code_371_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_true_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -17556,7 +17244,6 @@ fn subshell_end_exit_code_373_propagates() {
 
 #[test]
 fn request_halt_fifty_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -17617,7 +17304,6 @@ fn subshell_end_exit_code_375_propagates() {
 
 #[test]
 fn request_halt_between_third_subshell_end_and_fourth_subshell_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     struct CountingBeginEndHost376;
@@ -17661,7 +17347,6 @@ fn subshell_end_exit_code_376_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_eq_on_consts_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -17729,7 +17414,6 @@ fn subshell_end_exit_code_378_propagates() {
 
 #[test]
 fn request_halt_stops_before_pop_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -17788,7 +17472,6 @@ fn subshell_end_exit_code_380_propagates() {
 
 #[test]
 fn request_halt_fifty_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -17846,7 +17529,6 @@ fn subshell_end_exit_code_382_propagates() {
 
 #[test]
 fn request_halt_stops_before_swap_after_subshell_end_status383() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -17893,7 +17575,6 @@ fn subshell_end_status_minus_fifty_two_propagates() {
 
 #[test]
 fn request_halt_stops_before_dup_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -17971,7 +17652,6 @@ fn subshell_end_exit_code_385_propagates() {
 
 #[test]
 fn request_halt_fifty_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18000,7 +17680,6 @@ fn subshell_end_exit_code_386_propagates() {
 
 #[test]
 fn subshell_halt_reset_getstatus_on_fifth_reset_run() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let halt = {
         let mut b = ChunkBuilder::new();
         b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18045,7 +17724,6 @@ fn subshell_end_exit_code_387_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_undef_after_subshell_end_status388() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -18090,7 +17768,6 @@ fn subshell_end_exit_code_389_propagates() {
 
 #[test]
 fn request_halt_fifty_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18120,7 +17797,6 @@ fn subshell_end_exit_code_390_propagates() {
 
 #[test]
 fn request_halt_fifty_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18149,7 +17825,6 @@ fn subshell_end_exit_code_391_propagates() {
 
 #[test]
 fn request_halt_fifty_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18179,7 +17854,6 @@ fn subshell_end_exit_code_392_propagates() {
 
 #[test]
 fn request_halt_sixty_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18208,7 +17882,6 @@ fn subshell_end_exit_code_393_propagates() {
 
 #[test]
 fn request_halt_sixty_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18479,7 +18152,6 @@ fn subshell_end_exit_code_402_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_tenth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -18524,7 +18196,6 @@ fn subshell_end_exit_code_403_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_lt_on_consts_after_subshell_end_status404() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -18559,7 +18230,6 @@ fn subshell_end_exit_code_404_propagates() {
 
 #[test]
 fn subshell_seven_begins_four_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -18606,7 +18276,6 @@ fn subshell_end_exit_code_405_propagates() {
 
 #[test]
 fn request_halt_between_pipeline_end_and_subshell_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     struct PipelineEndSubshellBeginHost406;
     impl ShellHost for PipelineEndSubshellBeginHost406 {
@@ -18681,7 +18350,6 @@ fn subshell_end_exit_code_407_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_gt_on_consts_after_subshell_end_status408() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -18748,7 +18416,6 @@ fn subshell_end_exit_code_409_propagates() {
 
 #[test]
 fn request_halt_stops_before_pow_after_subshell_end_status410() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -18813,7 +18480,6 @@ fn subshell_end_exit_code_411_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_false_after_subshell_end_status412() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -18844,7 +18510,6 @@ fn subshell_end_exit_code_412_propagates() {
 
 #[test]
 fn request_halt_stops_before_rot_after_subshell_end_status413() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -18893,7 +18558,6 @@ fn subshell_end_exit_code_414_propagates() {
 
 #[test]
 fn request_halt_sixty_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18923,7 +18587,6 @@ fn subshell_end_exit_code_415_propagates() {
 
 #[test]
 fn request_halt_sixty_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18952,7 +18615,6 @@ fn subshell_end_exit_code_416_propagates() {
 
 #[test]
 fn request_halt_sixty_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -18982,7 +18644,6 @@ fn subshell_end_exit_code_417_propagates() {
 
 #[test]
 fn request_halt_sixty_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -19011,7 +18672,6 @@ fn subshell_end_exit_code_418_propagates() {
 
 #[test]
 fn request_halt_sixty_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -19243,7 +18903,6 @@ fn subshell_end_exit_code_425_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_eleventh_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -19288,7 +18947,6 @@ fn subshell_end_exit_code_426_propagates() {
 
 #[test]
 fn request_halt_stops_before_jump_if_true_after_subshell_end() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -19367,7 +19025,6 @@ fn subshell_end_exit_code_428_propagates() {
 
 #[test]
 fn request_halt_sixty_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -19428,7 +19085,6 @@ fn subshell_end_exit_code_430_propagates() {
 
 #[test]
 fn request_halt_between_fourth_subshell_end_and_fifth_subshell_begin() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     struct CountingBeginEndHost431;
@@ -19472,7 +19128,6 @@ fn subshell_end_exit_code_431_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_le_on_consts_after_subshell_end_status432() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -19540,7 +19195,6 @@ fn subshell_end_exit_code_433_propagates() {
 
 #[test]
 fn request_halt_stops_before_inc_after_subshell_end_status434() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -19599,7 +19253,6 @@ fn subshell_end_exit_code_435_propagates() {
 
 #[test]
 fn request_halt_sixty_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -19660,7 +19313,6 @@ fn subshell_end_exit_code_437_propagates() {
 
 #[test]
 fn request_halt_stops_before_dec_after_subshell_end_status438() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -19738,7 +19390,6 @@ fn subshell_end_exit_code_439_propagates() {
 
 #[test]
 fn request_halt_stops_before_make_hash_after_subshell_end_status440() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -19774,7 +19425,6 @@ fn subshell_end_exit_code_440_propagates() {
 
 #[test]
 fn subshell_halt_reset_getstatus_on_sixth_reset_run() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     let halt = {
         let mut b = ChunkBuilder::new();
         b.emit(Op::CallBuiltin(100, 0), 1);
@@ -19820,7 +19470,6 @@ fn subshell_end_exit_code_441_propagates() {
 
 #[test]
 fn request_halt_sixty_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -19863,7 +19512,6 @@ fn subshell_end_status_minus_sixty_two_propagates() {
 
 #[test]
 fn request_halt_stops_before_dup2_after_subshell_end_status443() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -19911,7 +19559,6 @@ fn subshell_end_exit_code_444_propagates() {
 
 #[test]
 fn request_halt_seventy_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -19941,7 +19588,6 @@ fn subshell_end_exit_code_445_propagates() {
 
 #[test]
 fn request_halt_seventy_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -19970,7 +19616,6 @@ fn subshell_end_exit_code_446_propagates() {
 
 #[test]
 fn request_halt_seventy_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -20000,7 +19645,6 @@ fn subshell_end_exit_code_447_propagates() {
 
 #[test]
 fn request_halt_seventy_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -20029,7 +19673,6 @@ fn subshell_end_exit_code_448_propagates() {
 
 #[test]
 fn request_halt_seventy_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -20300,7 +19943,6 @@ fn subshell_end_exit_code_457_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twelfth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -20345,7 +19987,6 @@ fn subshell_end_exit_code_458_propagates() {
 
 #[test]
 fn request_halt_stops_before_mod_after_subshell_end_status459() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -20378,7 +20019,6 @@ fn subshell_end_exit_code_459_propagates() {
 
 #[test]
 fn subshell_eight_begins_five_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -20425,7 +20065,6 @@ fn subshell_end_exit_code_460_propagates() {
 
 #[test]
 fn request_halt_stops_before_div_after_subshell_end_status461() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -20522,7 +20161,6 @@ fn subshell_end_exit_code_463_propagates() {
 
 #[test]
 fn request_halt_stops_before_mul_after_subshell_end_status464() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -20587,7 +20225,6 @@ fn subshell_end_exit_code_465_propagates() {
 
 #[test]
 fn request_halt_stops_before_sub_after_subshell_end_status466() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -20621,7 +20258,6 @@ fn subshell_end_exit_code_466_propagates() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status467() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -20654,7 +20290,6 @@ fn subshell_end_exit_code_467_propagates() {
 
 #[test]
 fn request_halt_seventy_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -20699,7 +20334,6 @@ fn subshell_end_exit_code_469_propagates() {
 
 #[test]
 fn request_halt_seventy_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -20729,7 +20363,6 @@ fn subshell_end_exit_code_470_propagates() {
 
 #[test]
 fn request_halt_seventy_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -20758,7 +20391,6 @@ fn subshell_end_exit_code_471_propagates() {
 
 #[test]
 fn request_halt_seventy_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -20788,7 +20420,6 @@ fn subshell_end_exit_code_472_propagates() {
 
 #[test]
 fn request_halt_seventy_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -20817,7 +20448,6 @@ fn subshell_end_exit_code_473_propagates() {
 
 #[test]
 fn request_halt_eighty_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -21043,7 +20673,6 @@ fn subshell_end_exit_code_480_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_thirteenth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -21088,7 +20717,6 @@ fn subshell_end_exit_code_481_propagates() {
 
 #[test]
 fn request_halt_stops_before_add_after_subshell_end_status482() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -21121,7 +20749,6 @@ fn subshell_end_exit_code_482_propagates() {
 
 #[test]
 fn subshell_nine_begins_six_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -21168,7 +20795,6 @@ fn subshell_end_exit_code_483_propagates() {
 
 #[test]
 fn request_halt_stops_before_neg_after_subshell_end_status484() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -21267,7 +20893,6 @@ fn subshell_end_exit_code_486_propagates() {
 
 #[test]
 fn request_halt_stops_before_not_after_subshell_end_status487() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -21331,7 +20956,6 @@ fn subshell_end_exit_code_488_propagates() {
 
 #[test]
 fn request_halt_stops_before_eq_after_subshell_end_status489() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -21365,7 +20989,6 @@ fn subshell_end_exit_code_489_propagates() {
 
 #[test]
 fn request_halt_stops_before_lt_after_subshell_end_status490() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -21398,7 +21021,6 @@ fn subshell_end_exit_code_490_propagates() {
 
 #[test]
 fn request_halt_stops_before_gt_after_subshell_end_status491() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -21432,7 +21054,6 @@ fn subshell_end_exit_code_491_propagates() {
 
 #[test]
 fn request_halt_eighty_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -21654,7 +21275,6 @@ fn subshell_end_exit_code_497_propagates() {
 
 #[test]
 fn request_halt_eighty_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -21698,7 +21318,6 @@ fn subshell_end_exit_code_499_propagates() {
 
 #[test]
 fn request_halt_eighty_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -21728,7 +21347,6 @@ fn subshell_end_exit_code_500_propagates() {
 
 #[test]
 fn request_halt_eighty_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -21757,7 +21375,6 @@ fn subshell_end_exit_code_501_propagates() {
 
 #[test]
 fn request_halt_eighty_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -21917,7 +21534,6 @@ fn subshell_end_exit_code_506_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_fourteenth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -21961,7 +21577,6 @@ fn subshell_end_exit_code_507_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_ne_after_subshell_end_status508() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -21995,7 +21610,6 @@ fn subshell_end_exit_code_508_propagates() {
 
 #[test]
 fn subshell_ten_begins_seven_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -22041,7 +21655,6 @@ fn subshell_end_exit_code_509_propagates() {
 
 #[test]
 fn request_halt_stops_before_spaceship_after_subshell_end_status510() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22139,7 +21752,6 @@ fn subshell_end_exit_code_512_propagates() {
 
 #[test]
 fn request_halt_stops_before_bit_and_after_subshell_end_status513() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22204,7 +21816,6 @@ fn subshell_end_exit_code_514_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_true_after_subshell_end_status515() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22235,7 +21846,6 @@ fn subshell_end_exit_code_515_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_false_after_subshell_end_status516() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22267,7 +21877,6 @@ fn subshell_end_exit_code_516_propagates() {
 
 #[test]
 fn request_halt_eighty_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -22296,7 +21905,6 @@ fn subshell_end_exit_code_517_propagates() {
 
 #[test]
 fn request_halt_eighty_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -22326,7 +21934,6 @@ fn subshell_end_exit_code_518_propagates() {
 
 #[test]
 fn request_halt_stops_before_dup_after_subshell_end_status519() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22358,7 +21965,6 @@ fn subshell_end_exit_code_519_propagates() {
 
 #[test]
 fn request_halt_stops_before_swap_after_subshell_end_status520() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22392,7 +21998,6 @@ fn subshell_end_exit_code_520_propagates() {
 
 #[test]
 fn subshell_nine_begins_eight_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -22470,7 +22075,6 @@ fn subshell_end_exit_code_522_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_undef_after_subshell_end_status523() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22516,7 +22120,6 @@ fn subshell_end_exit_code_524_propagates() {
 
 #[test]
 fn request_halt_eighty_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -22546,7 +22149,6 @@ fn subshell_end_exit_code_525_propagates() {
 
 #[test]
 fn request_halt_eighty_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -22575,7 +22177,6 @@ fn subshell_end_exit_code_526_propagates() {
 
 #[test]
 fn request_halt_ninety_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -22762,7 +22363,6 @@ fn subshell_end_exit_code_532_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_fifteenth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -22806,7 +22406,6 @@ fn subshell_end_exit_code_533_propagates() {
 
 #[test]
 fn request_halt_stops_before_bit_or_after_subshell_end_status534() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22840,7 +22439,6 @@ fn subshell_end_exit_code_534_propagates() {
 
 #[test]
 fn subshell_eleven_begins_nine_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -22886,7 +22484,6 @@ fn subshell_end_exit_code_535_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status536() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -22952,7 +22549,6 @@ fn subshell_end_exit_code_537_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status538() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -23017,7 +22613,6 @@ fn subshell_end_exit_code_539_propagates() {
 
 #[test]
 fn request_halt_stops_before_inc_after_subshell_end_status540() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -23050,7 +22645,6 @@ fn subshell_end_exit_code_540_propagates() {
 
 #[test]
 fn request_halt_stops_before_dec_after_subshell_end_status541() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -23082,7 +22676,6 @@ fn subshell_end_exit_code_541_propagates() {
 
 #[test]
 fn request_halt_ninety_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -23192,7 +22785,6 @@ fn subshell_end_exit_code_544_propagates() {
 
 #[test]
 fn request_halt_stops_before_pow_after_subshell_end_status545() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -23301,7 +22893,6 @@ fn subshell_end_exit_code_547_propagates() {
 
 #[test]
 fn request_halt_stops_before_rot_after_subshell_end_status548() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -23336,7 +22927,6 @@ fn subshell_end_exit_code_548_propagates() {
 
 #[test]
 fn request_halt_ninety_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -23424,7 +23014,6 @@ fn subshell_end_exit_code_550_propagates() {
 
 #[test]
 fn request_halt_stops_before_dup2_after_subshell_end_status551() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -23457,7 +23046,6 @@ fn subshell_end_exit_code_551_propagates() {
 
 #[test]
 fn request_halt_ninety_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -23533,7 +23121,6 @@ fn subshell_end_exit_code_554_propagates() {
 
 #[test]
 fn request_halt_ninety_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -23563,7 +23150,6 @@ fn subshell_end_exit_code_555_propagates() {
 
 #[test]
 fn request_halt_ninety_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -23592,7 +23178,6 @@ fn subshell_end_exit_code_556_propagates() {
 
 #[test]
 fn request_halt_ninety_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -23752,7 +23337,6 @@ fn subshell_end_exit_code_561_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_sixteenth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -23796,7 +23380,6 @@ fn subshell_end_exit_code_562_propagates() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status563() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -23830,7 +23413,6 @@ fn subshell_end_exit_code_563_propagates() {
 
 #[test]
 fn subshell_twelve_begins_ten_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -23876,7 +23458,6 @@ fn subshell_end_exit_code_564_propagates() {
 
 #[test]
 fn request_halt_stops_before_bit_not_after_subshell_end_status565() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -23941,7 +23522,6 @@ fn subshell_end_exit_code_566_propagates() {
 
 #[test]
 fn request_halt_stops_before_shl_after_subshell_end_status567() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -24006,7 +23586,6 @@ fn subshell_end_exit_code_568_propagates() {
 
 #[test]
 fn request_halt_stops_before_shr_after_subshell_end_status569() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -24040,7 +23619,6 @@ fn subshell_end_exit_code_569_propagates() {
 
 #[test]
 fn request_halt_ninety_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -24069,7 +23647,6 @@ fn subshell_end_exit_code_570_propagates() {
 
 #[test]
 fn request_halt_ninety_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -24099,7 +23676,6 @@ fn subshell_end_exit_code_571_propagates() {
 
 #[test]
 fn request_halt_stops_before_pop_after_subshell_end_status572() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -24160,7 +23736,6 @@ fn subshell_end_exit_code_573_propagates() {
 
 #[test]
 fn request_halt_stops_before_log_and_after_subshell_end_status574() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -24220,7 +23795,6 @@ fn subshell_end_exit_code_575_propagates() {
 
 #[test]
 fn request_halt_stops_before_log_or_after_subshell_end_status576() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -24335,7 +23909,6 @@ fn subshell_end_exit_code_579_propagates() {
 
 #[test]
 fn request_halt_ninety_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -24365,7 +23938,6 @@ fn subshell_end_exit_code_580_propagates() {
 
 #[test]
 fn request_halt_one_hundred_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -24394,7 +23966,6 @@ fn subshell_end_exit_code_581_propagates() {
 
 #[test]
 fn request_halt_one_hundred_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -24554,7 +24125,6 @@ fn subshell_end_exit_code_586_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_seventeenth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -24598,7 +24168,6 @@ fn subshell_end_exit_code_587_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status588() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -24630,7 +24199,6 @@ fn subshell_end_exit_code_588_propagates() {
 
 #[test]
 fn subshell_thirteen_begins_eleven_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -24676,7 +24244,6 @@ fn subshell_end_exit_code_589_propagates() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status590() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -24747,7 +24314,6 @@ fn subshell_end_exit_code_591_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_eq_after_subshell_end_status592() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -24817,7 +24383,6 @@ fn subshell_end_exit_code_593_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_ne_after_subshell_end_status594() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -24899,7 +24464,6 @@ fn subshell_end_exit_code_595_propagates() {
 
 #[test]
 fn request_halt_one_hundred_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -25006,7 +24570,6 @@ fn subshell_end_exit_code_598_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_lt_after_subshell_end_status599() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -25085,7 +24648,6 @@ fn subshell_end_exit_code_600_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_gt_after_subshell_end_status601() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -25155,7 +24717,6 @@ fn subshell_end_exit_code_602_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_le_after_subshell_end_status603() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -25193,7 +24754,6 @@ fn subshell_end_exit_code_603_propagates() {
 
 #[test]
 fn request_halt_one_hundred_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -25223,7 +24783,6 @@ fn subshell_end_exit_code_604_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_ge_after_subshell_end_status605() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -25360,7 +24919,6 @@ fn subshell_end_exit_code_608_propagates() {
 
 #[test]
 fn request_halt_one_hundred_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -25404,7 +24962,6 @@ fn subshell_end_exit_code_610_propagates() {
 
 #[test]
 fn request_halt_one_hundred_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -25434,7 +24991,6 @@ fn subshell_end_exit_code_611_propagates() {
 
 #[test]
 fn request_halt_one_hundred_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -25463,7 +25019,6 @@ fn subshell_end_exit_code_612_propagates() {
 
 #[test]
 fn request_halt_one_hundred_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -25623,7 +25178,6 @@ fn subshell_end_exit_code_617_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_eighteenth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -25667,7 +25221,6 @@ fn subshell_end_exit_code_618_propagates() {
 
 #[test]
 fn request_halt_stops_before_string_len_after_subshell_end_status619() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -25704,7 +25257,6 @@ fn subshell_end_exit_code_619_propagates() {
 
 #[test]
 fn subshell_fourteen_begins_twelve_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -25750,7 +25302,6 @@ fn subshell_end_exit_code_620_propagates() {
 
 #[test]
 fn request_halt_stops_before_string_repeat_after_subshell_end_status621() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -25820,7 +25371,6 @@ fn subshell_end_exit_code_622_propagates() {
 
 #[test]
 fn request_halt_stops_before_range_after_subshell_end_status623() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -25885,7 +25435,6 @@ fn subshell_end_exit_code_624_propagates() {
 
 #[test]
 fn request_halt_stops_before_range_step_after_subshell_end_status625() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -25920,7 +25469,6 @@ fn subshell_end_exit_code_625_propagates() {
 
 #[test]
 fn request_halt_one_hundred_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -25949,7 +25497,6 @@ fn subshell_end_exit_code_626_propagates() {
 
 #[test]
 fn request_halt_one_hundred_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -25979,7 +25526,6 @@ fn subshell_end_exit_code_627_propagates() {
 
 #[test]
 fn request_halt_stops_before_make_hash_after_subshell_end_status628() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -26142,7 +25688,6 @@ fn subshell_end_exit_code_632_propagates() {
 
 #[test]
 fn request_halt_stops_before_setstatus_after_subshell_end_status633() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -26221,7 +25766,6 @@ fn subshell_end_exit_code_635_propagates() {
 
 #[test]
 fn request_halt_one_hundred_ten_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -26251,7 +25795,6 @@ fn subshell_end_exit_code_636_propagates() {
 
 #[test]
 fn request_halt_one_hundred_eleven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -26280,7 +25823,6 @@ fn subshell_end_exit_code_637_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twelve_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -26440,7 +25982,6 @@ fn subshell_end_exit_code_642_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_nineteenth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -26484,7 +26025,6 @@ fn subshell_end_exit_code_643_propagates() {
 
 #[test]
 fn request_halt_stops_before_push_frame_after_subshell_end_status644() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -26516,7 +26056,6 @@ fn subshell_end_exit_code_644_propagates() {
 
 #[test]
 fn subshell_fifteen_begins_thirteen_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -26565,7 +26104,6 @@ fn subshell_end_exit_code_645_propagates() {
 
 #[test]
 fn request_halt_stops_before_pop_frame_after_subshell_end_status646() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -26630,7 +26168,6 @@ fn subshell_end_exit_code_647_propagates() {
 
 #[test]
 fn request_halt_stops_before_return_after_subshell_end_status648() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -26693,7 +26230,6 @@ fn subshell_end_exit_code_649_propagates() {
 
 #[test]
 fn request_halt_stops_before_return_value_after_subshell_end_status650() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -26769,7 +26305,6 @@ fn subshell_end_exit_code_651_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -26876,7 +26411,6 @@ fn subshell_end_exit_code_654_propagates() {
 
 #[test]
 fn request_halt_stops_before_pipeline_begin_after_subshell_end_status655() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -26907,7 +26441,6 @@ fn subshell_end_exit_code_655_propagates() {
 
 #[test]
 fn request_halt_stops_before_pipeline_stage_after_subshell_end_status656() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -26968,7 +26501,6 @@ fn subshell_end_exit_code_657_propagates() {
 
 #[test]
 fn request_halt_stops_before_pipeline_end_after_subshell_end_status658() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -27001,7 +26533,6 @@ fn subshell_end_exit_code_658_propagates() {
 
 #[test]
 fn request_halt_one_hundred_fourteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -27215,7 +26746,6 @@ fn subshell_end_exit_code_664_propagates() {
 
 #[test]
 fn request_halt_one_hundred_fifteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -27259,7 +26789,6 @@ fn subshell_end_exit_code_666_propagates() {
 
 #[test]
 fn request_halt_one_hundred_sixteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -27289,7 +26818,6 @@ fn subshell_end_exit_code_667_propagates() {
 
 #[test]
 fn request_halt_one_hundred_seventeen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -27318,7 +26846,6 @@ fn subshell_end_exit_code_668_propagates() {
 
 #[test]
 fn request_halt_one_hundred_eighteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -27478,7 +27005,6 @@ fn subshell_end_exit_code_673_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twentieth_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -27522,7 +27048,6 @@ fn subshell_end_exit_code_674_propagates() {
 
 #[test]
 fn request_halt_stops_before_subshell_begin_after_subshell_end_status675() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -27554,7 +27079,6 @@ fn subshell_end_exit_code_675_propagates() {
 
 #[test]
 fn subshell_sixteen_begins_fourteen_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -27603,7 +27127,6 @@ fn subshell_end_exit_code_676_propagates() {
 
 #[test]
 fn request_halt_stops_before_nop_after_subshell_end_status677() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -27667,7 +27190,6 @@ fn subshell_end_exit_code_678_propagates() {
 
 #[test]
 fn request_halt_stops_before_str_cmp_after_subshell_end_status679() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -27737,7 +27259,6 @@ fn subshell_end_exit_code_680_propagates() {
 
 #[test]
 fn request_halt_stops_before_second_getstatus_after_subshell_end_status681() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -27770,7 +27291,6 @@ fn subshell_end_exit_code_681_propagates() {
 
 #[test]
 fn request_halt_one_hundred_nineteen_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -27799,7 +27319,6 @@ fn subshell_end_exit_code_682_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -27985,7 +27504,6 @@ fn subshell_end_exit_code_688_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_const_after_subshell_end_status689() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -28079,7 +27597,6 @@ fn subshell_end_exit_code_691_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -28109,7 +27626,6 @@ fn subshell_end_exit_code_692_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -28138,7 +27654,6 @@ fn subshell_end_exit_code_693_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -28298,7 +27813,6 @@ fn subshell_end_exit_code_698_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_first_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -28342,7 +27856,6 @@ fn subshell_end_exit_code_699_propagates() {
 
 #[test]
 fn request_halt_stops_before_jump_if_true_after_subshell_end_status700() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -28378,7 +27891,6 @@ fn subshell_end_exit_code_700_propagates() {
 
 #[test]
 fn subshell_seventeen_begins_fifteen_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -28427,7 +27939,6 @@ fn subshell_end_exit_code_701_propagates() {
 
 #[test]
 fn request_halt_stops_before_jump_if_false_after_subshell_end_status702() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -28495,7 +28006,6 @@ fn subshell_end_exit_code_703_propagates() {
 
 #[test]
 fn request_halt_stops_before_jump_if_true_keep_after_subshell_end_status704() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -28560,7 +28070,6 @@ fn subshell_end_exit_code_705_propagates() {
 
 #[test]
 fn request_halt_stops_before_jump_if_false_keep_after_subshell_end_status706() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -28594,7 +28103,6 @@ fn subshell_end_exit_code_706_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -28700,7 +28208,6 @@ fn subshell_end_exit_code_709_propagates() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_end_after_subshell_end_status710() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -28765,7 +28272,6 @@ fn subshell_end_exit_code_711_propagates() {
 
 #[test]
 fn request_halt_stops_before_spaceship_after_subshell_end_status712() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -28866,7 +28372,6 @@ fn subshell_end_exit_code_714_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -29080,7 +28585,6 @@ fn subshell_end_exit_code_720_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -29124,7 +28628,6 @@ fn subshell_end_exit_code_722_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -29154,7 +28657,6 @@ fn subshell_end_exit_code_723_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_eight_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -29183,7 +28685,6 @@ fn subshell_end_exit_code_724_propagates() {
 
 #[test]
 fn request_halt_one_hundred_twenty_nine_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -29343,7 +28844,6 @@ fn subshell_end_exit_code_729_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -29387,7 +28887,6 @@ fn subshell_end_exit_code_730_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status731() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -29420,7 +28919,6 @@ fn subshell_end_exit_code_731_propagates() {
 
 #[test]
 fn subshell_eighteen_begins_sixteen_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -29469,7 +28967,6 @@ fn subshell_end_exit_code_732_propagates() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status733() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -29544,7 +29041,6 @@ fn subshell_end_exit_code_734_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status735() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -29609,7 +29105,6 @@ fn subshell_end_exit_code_736_propagates() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status737() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -29643,7 +29138,6 @@ fn subshell_end_exit_code_737_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirty_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -29672,7 +29166,6 @@ fn subshell_end_exit_code_738_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirty_one_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -29902,7 +29395,6 @@ fn subshell_end_exit_code_745_propagates() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status746() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -29950,7 +29442,6 @@ fn subshell_end_exit_code_747_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirty_two_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -29980,7 +29471,6 @@ fn subshell_end_exit_code_748_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirty_three_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -30009,7 +29499,6 @@ fn subshell_end_exit_code_749_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirty_four_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -30169,7 +29658,6 @@ fn subshell_end_exit_code_754_propagates() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_applies() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -30213,7 +29701,6 @@ fn subshell_end_exit_code_755_propagates() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status756() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -30246,7 +29733,6 @@ fn subshell_end_exit_code_756_propagates() {
 
 #[test]
 fn subshell_nineteen_begins_seventeen_ends_last_end_status_wins() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -30295,7 +29781,6 @@ fn subshell_end_exit_code_757_propagates() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status758() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -30360,7 +29845,6 @@ fn subshell_end_exit_code_759_propagates() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status760() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -30425,7 +29909,6 @@ fn subshell_end_exit_code_761_propagates() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status762() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -30464,7 +29947,6 @@ fn subshell_end_exit_code_762_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirty_five_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -30570,7 +30052,6 @@ fn subshell_end_exit_code_765_propagates() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status766() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -30700,7 +30181,6 @@ fn subshell_end_exit_code_769_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirty_six_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -30914,7 +30394,6 @@ fn subshell_end_exit_code_775_propagates() {
 
 #[test]
 fn request_halt_one_hundred_thirty_seven_consecutive_runs_without_reset_still_blocked() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -31002,7 +30481,6 @@ fn subshell_end_exit_code_778_propagatesEx778() {
 
 #[test]
 fn request_halt_one_hundred_thirty_eight_consecutive_runs_without_reset_still_blockedEx778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -31032,7 +30510,6 @@ fn subshell_end_exit_code_779_propagatesEx778() {
 
 #[test]
 fn request_halt_one_hundred_thirty_nine_consecutive_runs_without_reset_still_blockedEx778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -31061,7 +30538,6 @@ fn subshell_end_exit_code_780_propagatesEx778() {
 
 #[test]
 fn request_halt_one_hundred_forty_consecutive_runs_without_reset_still_blockedEx778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -31221,7 +30697,6 @@ fn subshell_end_exit_code_785_propagatesEx778() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -31265,7 +30740,6 @@ fn subshell_end_exit_code_786_propagatesEx778() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status787Ex778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -31298,7 +30772,6 @@ fn subshell_end_exit_code_787_propagatesEx778() {
 
 #[test]
 fn subshell_twenty_begins_eighteen_ends_last_end_status_winsEx778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -31347,7 +30820,6 @@ fn subshell_end_exit_code_788_propagatesEx778() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status789Ex778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -31422,7 +30894,6 @@ fn subshell_end_exit_code_790_propagatesEx778() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status791Ex778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -31487,7 +30958,6 @@ fn subshell_end_exit_code_792_propagatesEx778() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status793Ex778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -31521,7 +30991,6 @@ fn subshell_end_exit_code_793_propagatesEx778() {
 
 #[test]
 fn request_halt_one_hundred_forty_one_consecutive_runs_without_reset_still_blockedEx778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -31550,7 +31019,6 @@ fn subshell_end_exit_code_794_propagatesEx778() {
 
 #[test]
 fn request_halt_one_hundred_forty_two_consecutive_runs_without_reset_still_blockedEx778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -31780,7 +31248,6 @@ fn subshell_end_exit_code_801_propagatesEx778() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status802Ex778() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -31828,7 +31295,6 @@ fn subshell_end_exit_code_803_propagatesEx803() {
 
 #[test]
 fn request_halt_one_hundred_forty_three_consecutive_runs_without_reset_still_blockedEx803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -31858,7 +31324,6 @@ fn subshell_end_exit_code_804_propagatesEx803() {
 
 #[test]
 fn request_halt_one_hundred_forty_four_consecutive_runs_without_reset_still_blockedEx803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -31887,7 +31352,6 @@ fn subshell_end_exit_code_805_propagatesEx803() {
 
 #[test]
 fn request_halt_one_hundred_forty_five_consecutive_runs_without_reset_still_blockedEx803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -32047,7 +31511,6 @@ fn subshell_end_exit_code_810_propagatesEx803() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -32091,7 +31554,6 @@ fn subshell_end_exit_code_811_propagatesEx803() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status812Ex803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -32124,7 +31586,6 @@ fn subshell_end_exit_code_812_propagatesEx803() {
 
 #[test]
 fn subshell_twenty_one_begins_nineteen_ends_last_end_status_winsEx803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -32173,7 +31634,6 @@ fn subshell_end_exit_code_813_propagatesEx803() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status814Ex803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -32238,7 +31698,6 @@ fn subshell_end_exit_code_815_propagatesEx803() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status816Ex803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -32303,7 +31762,6 @@ fn subshell_end_exit_code_817_propagatesEx803() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status818Ex803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -32342,7 +31800,6 @@ fn subshell_end_exit_code_818_propagatesEx803() {
 
 #[test]
 fn request_halt_one_hundred_forty_six_consecutive_runs_without_reset_still_blockedEx803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -32448,7 +31905,6 @@ fn subshell_end_exit_code_821_propagatesEx803() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status822Ex803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -32578,7 +32034,6 @@ fn subshell_end_exit_code_825_propagatesEx803() {
 
 #[test]
 fn request_halt_one_hundred_forty_seven_consecutive_runs_without_reset_still_blockedEx803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -32792,7 +32247,6 @@ fn subshell_end_exit_code_831_propagatesEx803() {
 
 #[test]
 fn request_halt_one_hundred_forty_eight_consecutive_runs_without_reset_still_blockedEx803() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -32880,7 +32334,6 @@ fn subshell_end_exit_code_834_propagatesEx834() {
 
 #[test]
 fn request_halt_one_hundred_forty_nine_consecutive_runs_without_reset_still_blockedEx834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -32910,7 +32363,6 @@ fn subshell_end_exit_code_835_propagatesEx834() {
 
 #[test]
 fn request_halt_one_hundred_fifty_consecutive_runs_without_reset_still_blockedEx834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -32939,7 +32391,6 @@ fn subshell_end_exit_code_836_propagatesEx834() {
 
 #[test]
 fn request_halt_one_hundred_fifty_one_consecutive_runs_without_reset_still_blockedEx834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -33099,7 +32550,6 @@ fn subshell_end_exit_code_841_propagatesEx834() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -33143,7 +32593,6 @@ fn subshell_end_exit_code_842_propagatesEx834() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status843Ex834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -33176,7 +32625,6 @@ fn subshell_end_exit_code_843_propagatesEx834() {
 
 #[test]
 fn subshell_twenty_two_begins_twenty_ends_last_end_status_winsEx834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -33225,7 +32673,6 @@ fn subshell_end_exit_code_844_propagatesEx834() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status845Ex834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -33300,7 +32747,6 @@ fn subshell_end_exit_code_846_propagatesEx834() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status847Ex834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -33365,7 +32811,6 @@ fn subshell_end_exit_code_848_propagatesEx834() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status849Ex834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -33399,7 +32844,6 @@ fn subshell_end_exit_code_849_propagatesEx834() {
 
 #[test]
 fn request_halt_one_hundred_fifty_two_consecutive_runs_without_reset_still_blockedEx834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -33428,7 +32872,6 @@ fn subshell_end_exit_code_850_propagatesEx834() {
 
 #[test]
 fn request_halt_one_hundred_fifty_three_consecutive_runs_without_reset_still_blockedEx834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -33658,7 +33101,6 @@ fn subshell_end_exit_code_857_propagatesEx834() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status858Ex834() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -33706,7 +33148,6 @@ fn subshell_end_exit_code_859_propagatesEx859() {
 
 #[test]
 fn request_halt_one_hundred_fifty_four_consecutive_runs_without_reset_still_blockedEx859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -33736,7 +33177,6 @@ fn subshell_end_exit_code_860_propagatesEx859() {
 
 #[test]
 fn request_halt_one_hundred_fifty_five_consecutive_runs_without_reset_still_blockedEx859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -33765,7 +33205,6 @@ fn subshell_end_exit_code_861_propagatesEx859() {
 
 #[test]
 fn request_halt_one_hundred_fifty_six_consecutive_runs_without_reset_still_blockedEx859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -33925,7 +33364,6 @@ fn subshell_end_exit_code_866_propagatesEx859() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -33969,7 +33407,6 @@ fn subshell_end_exit_code_867_propagatesEx859() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status868Ex859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -34002,7 +33439,6 @@ fn subshell_end_exit_code_868_propagatesEx859() {
 
 #[test]
 fn subshell_twenty_three_begins_twenty_one_ends_last_end_status_winsEx859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -34051,7 +33487,6 @@ fn subshell_end_exit_code_869_propagatesEx859() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status870Ex859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -34116,7 +33551,6 @@ fn subshell_end_exit_code_871_propagatesEx859() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status872Ex859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -34181,7 +33615,6 @@ fn subshell_end_exit_code_873_propagatesEx859() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status874Ex859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -34220,7 +33653,6 @@ fn subshell_end_exit_code_874_propagatesEx859() {
 
 #[test]
 fn request_halt_one_hundred_fifty_seven_consecutive_runs_without_reset_still_blockedEx859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -34326,7 +33758,6 @@ fn subshell_end_exit_code_877_propagatesEx859() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status878Ex859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -34456,7 +33887,6 @@ fn subshell_end_exit_code_881_propagatesEx859() {
 
 #[test]
 fn request_halt_one_hundred_fifty_eight_consecutive_runs_without_reset_still_blockedEx859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -34670,7 +34100,6 @@ fn subshell_end_exit_code_887_propagatesEx859() {
 
 #[test]
 fn request_halt_one_hundred_fifty_nine_consecutive_runs_without_reset_still_blockedEx859() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -34758,7 +34187,6 @@ fn subshell_end_exit_code_890_propagatesEx890() {
 
 #[test]
 fn request_halt_one_hundred_sixty_consecutive_runs_without_reset_still_blockedEx890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -34788,7 +34216,6 @@ fn subshell_end_exit_code_891_propagatesEx890() {
 
 #[test]
 fn request_halt_one_hundred_sixty_one_consecutive_runs_without_reset_still_blockedEx890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -34817,7 +34244,6 @@ fn subshell_end_exit_code_892_propagatesEx890() {
 
 #[test]
 fn request_halt_one_hundred_sixty_two_consecutive_runs_without_reset_still_blockedEx890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -34977,7 +34403,6 @@ fn subshell_end_exit_code_897_propagatesEx890() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -35021,7 +34446,6 @@ fn subshell_end_exit_code_898_propagatesEx890() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status899Ex890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -35054,7 +34478,6 @@ fn subshell_end_exit_code_899_propagatesEx890() {
 
 #[test]
 fn subshell_twenty_four_begins_twenty_two_ends_last_end_status_winsEx890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -35103,7 +34526,6 @@ fn subshell_end_exit_code_900_propagatesEx890() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status901Ex890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -35178,7 +34600,6 @@ fn subshell_end_exit_code_902_propagatesEx890() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status903Ex890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -35243,7 +34664,6 @@ fn subshell_end_exit_code_904_propagatesEx890() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status905Ex890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -35277,7 +34697,6 @@ fn subshell_end_exit_code_905_propagatesEx890() {
 
 #[test]
 fn request_halt_one_hundred_sixty_three_consecutive_runs_without_reset_still_blockedEx890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -35306,7 +34725,6 @@ fn subshell_end_exit_code_906_propagatesEx890() {
 
 #[test]
 fn request_halt_one_hundred_sixty_four_consecutive_runs_without_reset_still_blockedEx890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -35536,7 +34954,6 @@ fn subshell_end_exit_code_913_propagatesEx890() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status914Ex890() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -35584,7 +35001,6 @@ fn subshell_end_exit_code_915_propagatesEx915() {
 
 #[test]
 fn request_halt_one_hundred_sixty_five_consecutive_runs_without_reset_still_blockedEx915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -35614,7 +35030,6 @@ fn subshell_end_exit_code_916_propagatesEx915() {
 
 #[test]
 fn request_halt_one_hundred_sixty_six_consecutive_runs_without_reset_still_blockedEx915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -35643,7 +35058,6 @@ fn subshell_end_exit_code_917_propagatesEx915() {
 
 #[test]
 fn request_halt_one_hundred_sixty_seven_consecutive_runs_without_reset_still_blockedEx915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -35803,7 +35217,6 @@ fn subshell_end_exit_code_922_propagatesEx915() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -35847,7 +35260,6 @@ fn subshell_end_exit_code_923_propagatesEx915() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status924Ex915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -35880,7 +35292,6 @@ fn subshell_end_exit_code_924_propagatesEx915() {
 
 #[test]
 fn subshell_twenty_five_begins_twenty_three_ends_last_end_status_winsEx915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -35929,7 +35340,6 @@ fn subshell_end_exit_code_925_propagatesEx915() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status926Ex915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -35994,7 +35404,6 @@ fn subshell_end_exit_code_927_propagatesEx915() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status928Ex915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -36059,7 +35468,6 @@ fn subshell_end_exit_code_929_propagatesEx915() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status930Ex915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -36098,7 +35506,6 @@ fn subshell_end_exit_code_930_propagatesEx915() {
 
 #[test]
 fn request_halt_one_hundred_sixty_eight_consecutive_runs_without_reset_still_blockedEx915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -36204,7 +35611,6 @@ fn subshell_end_exit_code_933_propagatesEx915() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status934Ex915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -36334,7 +35740,6 @@ fn subshell_end_exit_code_937_propagatesEx915() {
 
 #[test]
 fn request_halt_one_hundred_sixty_nine_consecutive_runs_without_reset_still_blockedEx915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -36548,7 +35953,6 @@ fn subshell_end_exit_code_943_propagatesEx915() {
 
 #[test]
 fn request_halt_one_hundred_seventy_consecutive_runs_without_reset_still_blockedEx915() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -36636,7 +36040,6 @@ fn subshell_end_exit_code_946_propagatesEx946() {
 
 #[test]
 fn request_halt_one_hundred_seventy_one_consecutive_runs_without_reset_still_blockedEx946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -36666,7 +36069,6 @@ fn subshell_end_exit_code_947_propagatesEx946() {
 
 #[test]
 fn request_halt_one_hundred_seventy_two_consecutive_runs_without_reset_still_blockedEx946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -36695,7 +36097,6 @@ fn subshell_end_exit_code_948_propagatesEx946() {
 
 #[test]
 fn request_halt_one_hundred_seventy_three_consecutive_runs_without_reset_still_blockedEx946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -36855,7 +36256,6 @@ fn subshell_end_exit_code_953_propagatesEx946() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -36899,7 +36299,6 @@ fn subshell_end_exit_code_954_propagatesEx946() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status955Ex946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -36932,7 +36331,6 @@ fn subshell_end_exit_code_955_propagatesEx946() {
 
 #[test]
 fn subshell_twenty_six_begins_twenty_four_ends_last_end_status_winsEx946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -36981,7 +36379,6 @@ fn subshell_end_exit_code_956_propagatesEx946() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status957Ex946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -37056,7 +36453,6 @@ fn subshell_end_exit_code_958_propagatesEx946() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status959Ex946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -37121,7 +36517,6 @@ fn subshell_end_exit_code_960_propagatesEx946() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status961Ex946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -37155,7 +36550,6 @@ fn subshell_end_exit_code_961_propagatesEx946() {
 
 #[test]
 fn request_halt_one_hundred_seventy_four_consecutive_runs_without_reset_still_blockedEx946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -37184,7 +36578,6 @@ fn subshell_end_exit_code_962_propagatesEx946() {
 
 #[test]
 fn request_halt_one_hundred_seventy_five_consecutive_runs_without_reset_still_blockedEx946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -37414,7 +36807,6 @@ fn subshell_end_exit_code_969_propagatesEx946() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status970Ex946() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -37462,7 +36854,6 @@ fn subshell_end_exit_code_971_propagatesEx971() {
 
 #[test]
 fn request_halt_one_hundred_seventy_six_consecutive_runs_without_reset_still_blockedEx971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -37492,7 +36883,6 @@ fn subshell_end_exit_code_972_propagatesEx971() {
 
 #[test]
 fn request_halt_one_hundred_seventy_seven_consecutive_runs_without_reset_still_blockedEx971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -37521,7 +36911,6 @@ fn subshell_end_exit_code_973_propagatesEx971() {
 
 #[test]
 fn request_halt_one_hundred_seventy_eight_consecutive_runs_without_reset_still_blockedEx971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -37681,7 +37070,6 @@ fn subshell_end_exit_code_978_propagatesEx971() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -37725,7 +37113,6 @@ fn subshell_end_exit_code_979_propagatesEx971() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status980Ex971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -37758,7 +37145,6 @@ fn subshell_end_exit_code_980_propagatesEx971() {
 
 #[test]
 fn subshell_twenty_seven_begins_twenty_five_ends_last_end_status_winsEx971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -37807,7 +37193,6 @@ fn subshell_end_exit_code_981_propagatesEx971() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status982Ex971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -37872,7 +37257,6 @@ fn subshell_end_exit_code_983_propagatesEx971() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status984Ex971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -37937,7 +37321,6 @@ fn subshell_end_exit_code_985_propagatesEx971() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status986Ex971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -37976,7 +37359,6 @@ fn subshell_end_exit_code_986_propagatesEx971() {
 
 #[test]
 fn request_halt_one_hundred_seventy_nine_consecutive_runs_without_reset_still_blockedEx971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -38082,7 +37464,6 @@ fn subshell_end_exit_code_989_propagatesEx971() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status990Ex971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -38212,7 +37593,6 @@ fn subshell_end_exit_code_993_propagatesEx971() {
 
 #[test]
 fn request_halt_one_hundred_eighty_consecutive_runs_without_reset_still_blockedEx971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -38426,7 +37806,6 @@ fn subshell_end_exit_code_999_propagatesEx971() {
 
 #[test]
 fn request_halt_one_hundred_eighty_one_consecutive_runs_without_reset_still_blockedEx971() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -38514,7 +37893,6 @@ fn subshell_end_exit_code_1002_propagatesEx1002() {
 
 #[test]
 fn request_halt_one_hundred_eighty_two_consecutive_runs_without_reset_still_blockedEx1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -38544,7 +37922,6 @@ fn subshell_end_exit_code_1003_propagatesEx1002() {
 
 #[test]
 fn request_halt_one_hundred_eighty_three_consecutive_runs_without_reset_still_blockedEx1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -38573,7 +37950,6 @@ fn subshell_end_exit_code_1004_propagatesEx1002() {
 
 #[test]
 fn request_halt_one_hundred_eighty_four_consecutive_runs_without_reset_still_blockedEx1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -38733,7 +38109,6 @@ fn subshell_end_exit_code_1009_propagatesEx1002() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -38777,7 +38152,6 @@ fn subshell_end_exit_code_1010_propagatesEx1002() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1011Ex1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -38810,7 +38184,6 @@ fn subshell_end_exit_code_1011_propagatesEx1002() {
 
 #[test]
 fn subshell_twenty_eight_begins_twenty_six_ends_last_end_status_winsEx1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -38859,7 +38232,6 @@ fn subshell_end_exit_code_1012_propagatesEx1002() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1013Ex1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -38934,7 +38306,6 @@ fn subshell_end_exit_code_1014_propagatesEx1002() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1015Ex1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -38999,7 +38370,6 @@ fn subshell_end_exit_code_1016_propagatesEx1002() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1017Ex1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -39033,7 +38403,6 @@ fn subshell_end_exit_code_1017_propagatesEx1002() {
 
 #[test]
 fn request_halt_one_hundred_eighty_five_consecutive_runs_without_reset_still_blockedEx1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -39062,7 +38431,6 @@ fn subshell_end_exit_code_1018_propagatesEx1002() {
 
 #[test]
 fn request_halt_one_hundred_eighty_six_consecutive_runs_without_reset_still_blockedEx1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -39292,7 +38660,6 @@ fn subshell_end_exit_code_1025_propagatesEx1002() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1026Ex1002() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -39340,7 +38707,6 @@ fn subshell_end_exit_code_1027_propagatesEx1027() {
 
 #[test]
 fn request_halt_one_hundred_eighty_seven_consecutive_runs_without_reset_still_blockedEx1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -39370,7 +38736,6 @@ fn subshell_end_exit_code_1028_propagatesEx1027() {
 
 #[test]
 fn request_halt_one_hundred_eighty_eight_consecutive_runs_without_reset_still_blockedEx1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -39399,7 +38764,6 @@ fn subshell_end_exit_code_1029_propagatesEx1027() {
 
 #[test]
 fn request_halt_one_hundred_eighty_nine_consecutive_runs_without_reset_still_blockedEx1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -39559,7 +38923,6 @@ fn subshell_end_exit_code_1034_propagatesEx1027() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -39603,7 +38966,6 @@ fn subshell_end_exit_code_1035_propagatesEx1027() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1036Ex1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -39636,7 +38998,6 @@ fn subshell_end_exit_code_1036_propagatesEx1027() {
 
 #[test]
 fn subshell_twenty_nine_begins_twenty_seven_ends_last_end_status_winsEx1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -39685,7 +39046,6 @@ fn subshell_end_exit_code_1037_propagatesEx1027() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1038Ex1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -39750,7 +39110,6 @@ fn subshell_end_exit_code_1039_propagatesEx1027() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1040Ex1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -39815,7 +39174,6 @@ fn subshell_end_exit_code_1041_propagatesEx1027() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1042Ex1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -39854,7 +39212,6 @@ fn subshell_end_exit_code_1042_propagatesEx1027() {
 
 #[test]
 fn request_halt_one_hundred_ninety_consecutive_runs_without_reset_still_blockedEx1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -39960,7 +39317,6 @@ fn subshell_end_exit_code_1045_propagatesEx1027() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1046Ex1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -40090,7 +39446,6 @@ fn subshell_end_exit_code_1049_propagatesEx1027() {
 
 #[test]
 fn request_halt_one_hundred_ninety_one_consecutive_runs_without_reset_still_blockedEx1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -40304,7 +39659,6 @@ fn subshell_end_exit_code_1055_propagatesEx1027() {
 
 #[test]
 fn request_halt_one_hundred_ninety_two_consecutive_runs_without_reset_still_blockedEx1027() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -40392,7 +39746,6 @@ fn subshell_end_exit_code_1058_propagatesEx1058() {
 
 #[test]
 fn request_halt_one_hundred_ninety_three_consecutive_runs_without_reset_still_blockedEx1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -40422,7 +39775,6 @@ fn subshell_end_exit_code_1059_propagatesEx1058() {
 
 #[test]
 fn request_halt_one_hundred_ninety_four_consecutive_runs_without_reset_still_blockedEx1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -40451,7 +39803,6 @@ fn subshell_end_exit_code_1060_propagatesEx1058() {
 
 #[test]
 fn request_halt_one_hundred_ninety_five_consecutive_runs_without_reset_still_blockedEx1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -40611,7 +39962,6 @@ fn subshell_end_exit_code_1065_propagatesEx1058() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -40655,7 +40005,6 @@ fn subshell_end_exit_code_1066_propagatesEx1058() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1067Ex1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -40688,7 +40037,6 @@ fn subshell_end_exit_code_1067_propagatesEx1058() {
 
 #[test]
 fn subshell_thirty_begins_twenty_eight_ends_last_end_status_winsEx1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -40737,7 +40085,6 @@ fn subshell_end_exit_code_1068_propagatesEx1058() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1069Ex1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -40812,7 +40159,6 @@ fn subshell_end_exit_code_1070_propagatesEx1058() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1071Ex1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -40877,7 +40223,6 @@ fn subshell_end_exit_code_1072_propagatesEx1058() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1073Ex1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -40911,7 +40256,6 @@ fn subshell_end_exit_code_1073_propagatesEx1058() {
 
 #[test]
 fn request_halt_one_hundred_ninety_six_consecutive_runs_without_reset_still_blockedEx1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -40940,7 +40284,6 @@ fn subshell_end_exit_code_1074_propagatesEx1058() {
 
 #[test]
 fn request_halt_one_hundred_ninety_seven_consecutive_runs_without_reset_still_blockedEx1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -41170,7 +40513,6 @@ fn subshell_end_exit_code_1081_propagatesEx1058() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1082Ex1058() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -41218,7 +40560,6 @@ fn subshell_end_exit_code_1083_propagatesEx1083() {
 
 #[test]
 fn request_halt_one_hundred_ninety_eight_consecutive_runs_without_reset_still_blockedEx1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -41248,7 +40589,6 @@ fn subshell_end_exit_code_1084_propagatesEx1083() {
 
 #[test]
 fn request_halt_one_hundred_ninety_nine_consecutive_runs_without_reset_still_blockedEx1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -41277,7 +40617,6 @@ fn subshell_end_exit_code_1085_propagatesEx1083() {
 
 #[test]
 fn request_halt_two_hundred_consecutive_runs_without_reset_still_blockedEx1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -41437,7 +40776,6 @@ fn subshell_end_exit_code_1090_propagatesEx1083() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -41481,7 +40819,6 @@ fn subshell_end_exit_code_1091_propagatesEx1083() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1092Ex1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -41514,7 +40851,6 @@ fn subshell_end_exit_code_1092_propagatesEx1083() {
 
 #[test]
 fn subshell_thirty_one_begins_twenty_nine_ends_last_end_status_winsEx1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -41563,7 +40899,6 @@ fn subshell_end_exit_code_1093_propagatesEx1083() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1094Ex1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -41628,7 +40963,6 @@ fn subshell_end_exit_code_1095_propagatesEx1083() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1096Ex1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -41693,7 +41027,6 @@ fn subshell_end_exit_code_1097_propagatesEx1083() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1098Ex1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -41732,7 +41065,6 @@ fn subshell_end_exit_code_1098_propagatesEx1083() {
 
 #[test]
 fn request_halt_two_hundred_one_consecutive_runs_without_reset_still_blockedEx1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -41838,7 +41170,6 @@ fn subshell_end_exit_code_1101_propagatesEx1083() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1102Ex1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -41968,7 +41299,6 @@ fn subshell_end_exit_code_1105_propagatesEx1083() {
 
 #[test]
 fn request_halt_two_hundred_two_consecutive_runs_without_reset_still_blockedEx1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -42182,7 +41512,6 @@ fn subshell_end_exit_code_1111_propagatesEx1083() {
 
 #[test]
 fn request_halt_two_hundred_three_consecutive_runs_without_reset_still_blockedEx1083() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -42270,7 +41599,6 @@ fn subshell_end_exit_code_1114_propagatesEx1114() {
 
 #[test]
 fn request_halt_two_hundred_four_consecutive_runs_without_reset_still_blockedEx1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -42300,7 +41628,6 @@ fn subshell_end_exit_code_1115_propagatesEx1114() {
 
 #[test]
 fn request_halt_two_hundred_five_consecutive_runs_without_reset_still_blockedEx1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -42329,7 +41656,6 @@ fn subshell_end_exit_code_1116_propagatesEx1114() {
 
 #[test]
 fn request_halt_two_hundred_six_consecutive_runs_without_reset_still_blockedEx1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -42489,7 +41815,6 @@ fn subshell_end_exit_code_1121_propagatesEx1114() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -42533,7 +41858,6 @@ fn subshell_end_exit_code_1122_propagatesEx1114() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1123Ex1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -42566,7 +41890,6 @@ fn subshell_end_exit_code_1123_propagatesEx1114() {
 
 #[test]
 fn subshell_thirty_two_begins_thirty_ends_last_end_status_winsEx1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -42615,7 +41938,6 @@ fn subshell_end_exit_code_1124_propagatesEx1114() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1125Ex1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -42690,7 +42012,6 @@ fn subshell_end_exit_code_1126_propagatesEx1114() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1127Ex1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -42755,7 +42076,6 @@ fn subshell_end_exit_code_1128_propagatesEx1114() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1129Ex1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -42789,7 +42109,6 @@ fn subshell_end_exit_code_1129_propagatesEx1114() {
 
 #[test]
 fn request_halt_two_hundred_seven_consecutive_runs_without_reset_still_blockedEx1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -42818,7 +42137,6 @@ fn subshell_end_exit_code_1130_propagatesEx1114() {
 
 #[test]
 fn request_halt_two_hundred_eight_consecutive_runs_without_reset_still_blockedEx1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -43048,7 +42366,6 @@ fn subshell_end_exit_code_1137_propagatesEx1114() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1138Ex1114() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -43096,7 +42413,6 @@ fn subshell_end_exit_code_1139_propagatesEx1139() {
 
 #[test]
 fn request_halt_two_hundred_nine_consecutive_runs_without_reset_still_blockedEx1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -43126,7 +42442,6 @@ fn subshell_end_exit_code_1140_propagatesEx1139() {
 
 #[test]
 fn request_halt_two_hundred_ten_consecutive_runs_without_reset_still_blockedEx1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -43155,7 +42470,6 @@ fn subshell_end_exit_code_1141_propagatesEx1139() {
 
 #[test]
 fn request_halt_two_hundred_eleven_consecutive_runs_without_reset_still_blockedEx1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -43315,7 +42629,6 @@ fn subshell_end_exit_code_1146_propagatesEx1139() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -43359,7 +42672,6 @@ fn subshell_end_exit_code_1147_propagatesEx1139() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1148Ex1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -43392,7 +42704,6 @@ fn subshell_end_exit_code_1148_propagatesEx1139() {
 
 #[test]
 fn subshell_thirty_three_begins_thirty_one_ends_last_end_status_winsEx1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -43441,7 +42752,6 @@ fn subshell_end_exit_code_1149_propagatesEx1139() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1150Ex1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -43506,7 +42816,6 @@ fn subshell_end_exit_code_1151_propagatesEx1139() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1152Ex1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -43571,7 +42880,6 @@ fn subshell_end_exit_code_1153_propagatesEx1139() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1154Ex1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -43610,7 +42918,6 @@ fn subshell_end_exit_code_1154_propagatesEx1139() {
 
 #[test]
 fn request_halt_two_hundred_twelve_consecutive_runs_without_reset_still_blockedEx1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -43716,7 +43023,6 @@ fn subshell_end_exit_code_1157_propagatesEx1139() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1158Ex1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -43846,7 +43152,6 @@ fn subshell_end_exit_code_1161_propagatesEx1139() {
 
 #[test]
 fn request_halt_two_hundred_thirteen_consecutive_runs_without_reset_still_blockedEx1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -44060,7 +43365,6 @@ fn subshell_end_exit_code_1167_propagatesEx1139() {
 
 #[test]
 fn request_halt_two_hundred_fourteen_consecutive_runs_without_reset_still_blockedEx1139() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -44148,7 +43452,6 @@ fn subshell_end_exit_code_1170_propagatesEx1170() {
 
 #[test]
 fn request_halt_two_hundred_fifteen_consecutive_runs_without_reset_still_blockedEx1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -44178,7 +43481,6 @@ fn subshell_end_exit_code_1171_propagatesEx1170() {
 
 #[test]
 fn request_halt_two_hundred_sixteen_consecutive_runs_without_reset_still_blockedEx1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -44207,7 +43509,6 @@ fn subshell_end_exit_code_1172_propagatesEx1170() {
 
 #[test]
 fn request_halt_two_hundred_seventeen_consecutive_runs_without_reset_still_blockedEx1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -44367,7 +43668,6 @@ fn subshell_end_exit_code_1177_propagatesEx1170() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -44411,7 +43711,6 @@ fn subshell_end_exit_code_1178_propagatesEx1170() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1179Ex1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -44444,7 +43743,6 @@ fn subshell_end_exit_code_1179_propagatesEx1170() {
 
 #[test]
 fn subshell_thirty_four_begins_thirty_two_ends_last_end_status_winsEx1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -44493,7 +43791,6 @@ fn subshell_end_exit_code_1180_propagatesEx1170() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1181Ex1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -44568,7 +43865,6 @@ fn subshell_end_exit_code_1182_propagatesEx1170() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1183Ex1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -44633,7 +43929,6 @@ fn subshell_end_exit_code_1184_propagatesEx1170() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1185Ex1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -44667,7 +43962,6 @@ fn subshell_end_exit_code_1185_propagatesEx1170() {
 
 #[test]
 fn request_halt_two_hundred_eighteen_consecutive_runs_without_reset_still_blockedEx1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -44696,7 +43990,6 @@ fn subshell_end_exit_code_1186_propagatesEx1170() {
 
 #[test]
 fn request_halt_two_hundred_nineteen_consecutive_runs_without_reset_still_blockedEx1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -44926,7 +44219,6 @@ fn subshell_end_exit_code_1193_propagatesEx1170() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1194Ex1170() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -44974,7 +44266,6 @@ fn subshell_end_exit_code_1195_propagatesEx1195() {
 
 #[test]
 fn request_halt_two_hundred_twenty_consecutive_runs_without_reset_still_blockedEx1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -45004,7 +44295,6 @@ fn subshell_end_exit_code_1196_propagatesEx1195() {
 
 #[test]
 fn request_halt_two_hundred_twenty_one_consecutive_runs_without_reset_still_blockedEx1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -45033,7 +44323,6 @@ fn subshell_end_exit_code_1197_propagatesEx1195() {
 
 #[test]
 fn request_halt_two_hundred_twenty_two_consecutive_runs_without_reset_still_blockedEx1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -45193,7 +44482,6 @@ fn subshell_end_exit_code_1202_propagatesEx1195() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -45237,7 +44525,6 @@ fn subshell_end_exit_code_1203_propagatesEx1195() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1204Ex1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -45270,7 +44557,6 @@ fn subshell_end_exit_code_1204_propagatesEx1195() {
 
 #[test]
 fn subshell_thirty_five_begins_thirty_three_ends_last_end_status_winsEx1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -45319,7 +44605,6 @@ fn subshell_end_exit_code_1205_propagatesEx1195() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1206Ex1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -45384,7 +44669,6 @@ fn subshell_end_exit_code_1207_propagatesEx1195() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1208Ex1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -45449,7 +44733,6 @@ fn subshell_end_exit_code_1209_propagatesEx1195() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1210Ex1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -45488,7 +44771,6 @@ fn subshell_end_exit_code_1210_propagatesEx1195() {
 
 #[test]
 fn request_halt_two_hundred_twenty_three_consecutive_runs_without_reset_still_blockedEx1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -45594,7 +44876,6 @@ fn subshell_end_exit_code_1213_propagatesEx1195() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1214Ex1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -45724,7 +45005,6 @@ fn subshell_end_exit_code_1217_propagatesEx1195() {
 
 #[test]
 fn request_halt_two_hundred_twenty_four_consecutive_runs_without_reset_still_blockedEx1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -45938,7 +45218,6 @@ fn subshell_end_exit_code_1223_propagatesEx1195() {
 
 #[test]
 fn request_halt_two_hundred_twenty_five_consecutive_runs_without_reset_still_blockedEx1195() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -46026,7 +45305,6 @@ fn subshell_end_exit_code_1226_propagatesEx1226() {
 
 #[test]
 fn request_halt_two_hundred_twenty_six_consecutive_runs_without_reset_still_blockedEx1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -46056,7 +45334,6 @@ fn subshell_end_exit_code_1227_propagatesEx1226() {
 
 #[test]
 fn request_halt_two_hundred_twenty_seven_consecutive_runs_without_reset_still_blockedEx1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -46085,7 +45362,6 @@ fn subshell_end_exit_code_1228_propagatesEx1226() {
 
 #[test]
 fn request_halt_two_hundred_twenty_eight_consecutive_runs_without_reset_still_blockedEx1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -46245,7 +45521,6 @@ fn subshell_end_exit_code_1233_propagatesEx1226() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -46289,7 +45564,6 @@ fn subshell_end_exit_code_1234_propagatesEx1226() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1235Ex1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -46322,7 +45596,6 @@ fn subshell_end_exit_code_1235_propagatesEx1226() {
 
 #[test]
 fn subshell_thirty_six_begins_thirty_four_ends_last_end_status_winsEx1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -46371,7 +45644,6 @@ fn subshell_end_exit_code_1236_propagatesEx1226() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1237Ex1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -46446,7 +45718,6 @@ fn subshell_end_exit_code_1238_propagatesEx1226() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1239Ex1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -46511,7 +45782,6 @@ fn subshell_end_exit_code_1240_propagatesEx1226() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1241Ex1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -46545,7 +45815,6 @@ fn subshell_end_exit_code_1241_propagatesEx1226() {
 
 #[test]
 fn request_halt_two_hundred_twenty_nine_consecutive_runs_without_reset_still_blockedEx1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -46574,7 +45843,6 @@ fn subshell_end_exit_code_1242_propagatesEx1226() {
 
 #[test]
 fn request_halt_two_hundred_thirty_consecutive_runs_without_reset_still_blockedEx1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -46804,7 +46072,6 @@ fn subshell_end_exit_code_1249_propagatesEx1226() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1250Ex1226() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -46852,7 +46119,6 @@ fn subshell_end_exit_code_1251_propagatesEx1251() {
 
 #[test]
 fn request_halt_two_hundred_thirty_one_consecutive_runs_without_reset_still_blockedEx1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -46882,7 +46148,6 @@ fn subshell_end_exit_code_1252_propagatesEx1251() {
 
 #[test]
 fn request_halt_two_hundred_thirty_two_consecutive_runs_without_reset_still_blockedEx1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -46911,7 +46176,6 @@ fn subshell_end_exit_code_1253_propagatesEx1251() {
 
 #[test]
 fn request_halt_two_hundred_thirty_three_consecutive_runs_without_reset_still_blockedEx1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -47071,7 +46335,6 @@ fn subshell_end_exit_code_1258_propagatesEx1251() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -47115,7 +46378,6 @@ fn subshell_end_exit_code_1259_propagatesEx1251() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1260Ex1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -47148,7 +46410,6 @@ fn subshell_end_exit_code_1260_propagatesEx1251() {
 
 #[test]
 fn subshell_thirty_seven_begins_thirty_five_ends_last_end_status_winsEx1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -47197,7 +46458,6 @@ fn subshell_end_exit_code_1261_propagatesEx1251() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1262Ex1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -47262,7 +46522,6 @@ fn subshell_end_exit_code_1263_propagatesEx1251() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1264Ex1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -47327,7 +46586,6 @@ fn subshell_end_exit_code_1265_propagatesEx1251() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1266Ex1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -47366,7 +46624,6 @@ fn subshell_end_exit_code_1266_propagatesEx1251() {
 
 #[test]
 fn request_halt_two_hundred_thirty_four_consecutive_runs_without_reset_still_blockedEx1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -47472,7 +46729,6 @@ fn subshell_end_exit_code_1269_propagatesEx1251() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1270Ex1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -47602,7 +46858,6 @@ fn subshell_end_exit_code_1273_propagatesEx1251() {
 
 #[test]
 fn request_halt_two_hundred_thirty_five_consecutive_runs_without_reset_still_blockedEx1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -47816,7 +47071,6 @@ fn subshell_end_exit_code_1279_propagatesEx1251() {
 
 #[test]
 fn request_halt_two_hundred_thirty_six_consecutive_runs_without_reset_still_blockedEx1251() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -47904,7 +47158,6 @@ fn subshell_end_exit_code_1282_propagatesEx1282() {
 
 #[test]
 fn request_halt_two_hundred_thirty_seven_consecutive_runs_without_reset_still_blockedEx1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -47934,7 +47187,6 @@ fn subshell_end_exit_code_1283_propagatesEx1282() {
 
 #[test]
 fn request_halt_two_hundred_thirty_eight_consecutive_runs_without_reset_still_blockedEx1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -47963,7 +47215,6 @@ fn subshell_end_exit_code_1284_propagatesEx1282() {
 
 #[test]
 fn request_halt_two_hundred_thirty_nine_consecutive_runs_without_reset_still_blockedEx1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -48123,7 +47374,6 @@ fn subshell_end_exit_code_1289_propagatesEx1282() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -48167,7 +47417,6 @@ fn subshell_end_exit_code_1290_propagatesEx1282() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1291Ex1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -48200,7 +47449,6 @@ fn subshell_end_exit_code_1291_propagatesEx1282() {
 
 #[test]
 fn subshell_thirty_eight_begins_thirty_six_ends_last_end_status_winsEx1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -48249,7 +47497,6 @@ fn subshell_end_exit_code_1292_propagatesEx1282() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1293Ex1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -48324,7 +47571,6 @@ fn subshell_end_exit_code_1294_propagatesEx1282() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1295Ex1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -48389,7 +47635,6 @@ fn subshell_end_exit_code_1296_propagatesEx1282() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1297Ex1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -48423,7 +47668,6 @@ fn subshell_end_exit_code_1297_propagatesEx1282() {
 
 #[test]
 fn request_halt_two_hundred_forty_consecutive_runs_without_reset_still_blockedEx1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -48452,7 +47696,6 @@ fn subshell_end_exit_code_1298_propagatesEx1282() {
 
 #[test]
 fn request_halt_two_hundred_forty_one_consecutive_runs_without_reset_still_blockedEx1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -48682,7 +47925,6 @@ fn subshell_end_exit_code_1305_propagatesEx1282() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1306Ex1282() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -48730,7 +47972,6 @@ fn subshell_end_exit_code_1307_propagatesEx1307() {
 
 #[test]
 fn request_halt_two_hundred_forty_two_consecutive_runs_without_reset_still_blockedEx1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -48760,7 +48001,6 @@ fn subshell_end_exit_code_1308_propagatesEx1307() {
 
 #[test]
 fn request_halt_two_hundred_forty_three_consecutive_runs_without_reset_still_blockedEx1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -48789,7 +48029,6 @@ fn subshell_end_exit_code_1309_propagatesEx1307() {
 
 #[test]
 fn request_halt_two_hundred_forty_four_consecutive_runs_without_reset_still_blockedEx1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -48949,7 +48188,6 @@ fn subshell_end_exit_code_1314_propagatesEx1307() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -48993,7 +48231,6 @@ fn subshell_end_exit_code_1315_propagatesEx1307() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1316Ex1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -49026,7 +48263,6 @@ fn subshell_end_exit_code_1316_propagatesEx1307() {
 
 #[test]
 fn subshell_thirty_nine_begins_thirty_seven_ends_last_end_status_winsEx1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -49075,7 +48311,6 @@ fn subshell_end_exit_code_1317_propagatesEx1307() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1318Ex1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -49140,7 +48375,6 @@ fn subshell_end_exit_code_1319_propagatesEx1307() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1320Ex1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -49205,7 +48439,6 @@ fn subshell_end_exit_code_1321_propagatesEx1307() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1322Ex1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -49244,7 +48477,6 @@ fn subshell_end_exit_code_1322_propagatesEx1307() {
 
 #[test]
 fn request_halt_two_hundred_forty_five_consecutive_runs_without_reset_still_blockedEx1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -49350,7 +48582,6 @@ fn subshell_end_exit_code_1325_propagatesEx1307() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1326Ex1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -49480,7 +48711,6 @@ fn subshell_end_exit_code_1329_propagatesEx1307() {
 
 #[test]
 fn request_halt_two_hundred_forty_six_consecutive_runs_without_reset_still_blockedEx1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -49694,7 +48924,6 @@ fn subshell_end_exit_code_1335_propagatesEx1307() {
 
 #[test]
 fn request_halt_two_hundred_forty_seven_consecutive_runs_without_reset_still_blockedEx1307() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -49782,7 +49011,6 @@ fn subshell_end_exit_code_1338_propagatesEx1338() {
 
 #[test]
 fn request_halt_two_hundred_forty_eight_consecutive_runs_without_reset_still_blockedEx1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -49812,7 +49040,6 @@ fn subshell_end_exit_code_1339_propagatesEx1338() {
 
 #[test]
 fn request_halt_two_hundred_forty_nine_consecutive_runs_without_reset_still_blockedEx1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -49841,7 +49068,6 @@ fn subshell_end_exit_code_1340_propagatesEx1338() {
 
 #[test]
 fn request_halt_two_hundred_fifty_consecutive_runs_without_reset_still_blockedEx1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -50001,7 +49227,6 @@ fn subshell_end_exit_code_1345_propagatesEx1338() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -50045,7 +49270,6 @@ fn subshell_end_exit_code_1346_propagatesEx1338() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1347Ex1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -50078,7 +49302,6 @@ fn subshell_end_exit_code_1347_propagatesEx1338() {
 
 #[test]
 fn subshell_forty_begins_thirty_eight_ends_last_end_status_winsEx1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -50127,7 +49350,6 @@ fn subshell_end_exit_code_1348_propagatesEx1338() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1349Ex1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -50202,7 +49424,6 @@ fn subshell_end_exit_code_1350_propagatesEx1338() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1351Ex1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -50267,7 +49488,6 @@ fn subshell_end_exit_code_1352_propagatesEx1338() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1353Ex1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -50301,7 +49521,6 @@ fn subshell_end_exit_code_1353_propagatesEx1338() {
 
 #[test]
 fn request_halt_two_hundred_fifty_one_consecutive_runs_without_reset_still_blockedEx1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -50330,7 +49549,6 @@ fn subshell_end_exit_code_1354_propagatesEx1338() {
 
 #[test]
 fn request_halt_two_hundred_fifty_two_consecutive_runs_without_reset_still_blockedEx1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -50560,7 +49778,6 @@ fn subshell_end_exit_code_1361_propagatesEx1338() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1362Ex1338() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -50608,7 +49825,6 @@ fn subshell_end_exit_code_1363_propagatesEx1363() {
 
 #[test]
 fn request_halt_two_hundred_fifty_three_consecutive_runs_without_reset_still_blockedEx1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -50638,7 +49854,6 @@ fn subshell_end_exit_code_1364_propagatesEx1363() {
 
 #[test]
 fn request_halt_two_hundred_fifty_four_consecutive_runs_without_reset_still_blockedEx1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -50667,7 +49882,6 @@ fn subshell_end_exit_code_1365_propagatesEx1363() {
 
 #[test]
 fn request_halt_two_hundred_fifty_five_consecutive_runs_without_reset_still_blockedEx1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -50827,7 +50041,6 @@ fn subshell_end_exit_code_1370_propagatesEx1363() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -50871,7 +50084,6 @@ fn subshell_end_exit_code_1371_propagatesEx1363() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1372Ex1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -50904,7 +50116,6 @@ fn subshell_end_exit_code_1372_propagatesEx1363() {
 
 #[test]
 fn subshell_forty_one_begins_thirty_nine_ends_last_end_status_winsEx1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -50953,7 +50164,6 @@ fn subshell_end_exit_code_1373_propagatesEx1363() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1374Ex1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -51018,7 +50228,6 @@ fn subshell_end_exit_code_1375_propagatesEx1363() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1376Ex1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -51083,7 +50292,6 @@ fn subshell_end_exit_code_1377_propagatesEx1363() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1378Ex1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -51122,7 +50330,6 @@ fn subshell_end_exit_code_1378_propagatesEx1363() {
 
 #[test]
 fn request_halt_two_hundred_fifty_six_consecutive_runs_without_reset_still_blockedEx1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -51228,7 +50435,6 @@ fn subshell_end_exit_code_1381_propagatesEx1363() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1382Ex1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -51358,7 +50564,6 @@ fn subshell_end_exit_code_1385_propagatesEx1363() {
 
 #[test]
 fn request_halt_two_hundred_fifty_seven_consecutive_runs_without_reset_still_blockedEx1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -51572,7 +50777,6 @@ fn subshell_end_exit_code_1391_propagatesEx1363() {
 
 #[test]
 fn request_halt_two_hundred_fifty_eight_consecutive_runs_without_reset_still_blockedEx1363() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -51660,7 +50864,6 @@ fn subshell_end_exit_code_1394_propagatesEx1394() {
 
 #[test]
 fn request_halt_two_hundred_fifty_nine_consecutive_runs_without_reset_still_blockedEx1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -51690,7 +50893,6 @@ fn subshell_end_exit_code_1395_propagatesEx1394() {
 
 #[test]
 fn request_halt_two_hundred_sixty_consecutive_runs_without_reset_still_blockedEx1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -51719,7 +50921,6 @@ fn subshell_end_exit_code_1396_propagatesEx1394() {
 
 #[test]
 fn request_halt_two_hundred_sixty_one_consecutive_runs_without_reset_still_blockedEx1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -51879,7 +51080,6 @@ fn subshell_end_exit_code_1401_propagatesEx1394() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -51923,7 +51123,6 @@ fn subshell_end_exit_code_1402_propagatesEx1394() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1403Ex1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -51956,7 +51155,6 @@ fn subshell_end_exit_code_1403_propagatesEx1394() {
 
 #[test]
 fn subshell_forty_two_begins_forty_ends_last_end_status_winsEx1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -52005,7 +51203,6 @@ fn subshell_end_exit_code_1404_propagatesEx1394() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1405Ex1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -52080,7 +51277,6 @@ fn subshell_end_exit_code_1406_propagatesEx1394() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1407Ex1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -52145,7 +51341,6 @@ fn subshell_end_exit_code_1408_propagatesEx1394() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1409Ex1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -52179,7 +51374,6 @@ fn subshell_end_exit_code_1409_propagatesEx1394() {
 
 #[test]
 fn request_halt_two_hundred_sixty_two_consecutive_runs_without_reset_still_blockedEx1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -52208,7 +51402,6 @@ fn subshell_end_exit_code_1410_propagatesEx1394() {
 
 #[test]
 fn request_halt_two_hundred_sixty_three_consecutive_runs_without_reset_still_blockedEx1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -52438,7 +51631,6 @@ fn subshell_end_exit_code_1417_propagatesEx1394() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1418Ex1394() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -52486,7 +51678,6 @@ fn subshell_end_exit_code_1419_propagatesEx1419() {
 
 #[test]
 fn request_halt_two_hundred_sixty_four_consecutive_runs_without_reset_still_blockedEx1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -52516,7 +51707,6 @@ fn subshell_end_exit_code_1420_propagatesEx1419() {
 
 #[test]
 fn request_halt_two_hundred_sixty_five_consecutive_runs_without_reset_still_blockedEx1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -52545,7 +51735,6 @@ fn subshell_end_exit_code_1421_propagatesEx1419() {
 
 #[test]
 fn request_halt_two_hundred_sixty_six_consecutive_runs_without_reset_still_blockedEx1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -52705,7 +51894,6 @@ fn subshell_end_exit_code_1426_propagatesEx1419() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -52749,7 +51937,6 @@ fn subshell_end_exit_code_1427_propagatesEx1419() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1428Ex1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -52782,7 +51969,6 @@ fn subshell_end_exit_code_1428_propagatesEx1419() {
 
 #[test]
 fn subshell_forty_three_begins_forty_one_ends_last_end_status_winsEx1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -52831,7 +52017,6 @@ fn subshell_end_exit_code_1429_propagatesEx1419() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1430Ex1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -52896,7 +52081,6 @@ fn subshell_end_exit_code_1431_propagatesEx1419() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1432Ex1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -52961,7 +52145,6 @@ fn subshell_end_exit_code_1433_propagatesEx1419() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1434Ex1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -53000,7 +52183,6 @@ fn subshell_end_exit_code_1434_propagatesEx1419() {
 
 #[test]
 fn request_halt_two_hundred_sixty_seven_consecutive_runs_without_reset_still_blockedEx1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -53106,7 +52288,6 @@ fn subshell_end_exit_code_1437_propagatesEx1419() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1438Ex1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -53236,7 +52417,6 @@ fn subshell_end_exit_code_1441_propagatesEx1419() {
 
 #[test]
 fn request_halt_two_hundred_sixty_eight_consecutive_runs_without_reset_still_blockedEx1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -53450,7 +52630,6 @@ fn subshell_end_exit_code_1447_propagatesEx1419() {
 
 #[test]
 fn request_halt_two_hundred_sixty_nine_consecutive_runs_without_reset_still_blockedEx1419() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -53538,7 +52717,6 @@ fn subshell_end_exit_code_1450_propagatesEx1450() {
 
 #[test]
 fn request_halt_two_hundred_seventy_consecutive_runs_without_reset_still_blockedEx1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -53568,7 +52746,6 @@ fn subshell_end_exit_code_1451_propagatesEx1450() {
 
 #[test]
 fn request_halt_two_hundred_seventy_one_consecutive_runs_without_reset_still_blockedEx1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -53597,7 +52774,6 @@ fn subshell_end_exit_code_1452_propagatesEx1450() {
 
 #[test]
 fn request_halt_two_hundred_seventy_two_consecutive_runs_without_reset_still_blockedEx1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -53757,7 +52933,6 @@ fn subshell_end_exit_code_1457_propagatesEx1450() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -53801,7 +52976,6 @@ fn subshell_end_exit_code_1458_propagatesEx1450() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1459Ex1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -53834,7 +53008,6 @@ fn subshell_end_exit_code_1459_propagatesEx1450() {
 
 #[test]
 fn subshell_forty_four_begins_forty_two_ends_last_end_status_winsEx1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -53883,7 +53056,6 @@ fn subshell_end_exit_code_1460_propagatesEx1450() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1461Ex1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -53958,7 +53130,6 @@ fn subshell_end_exit_code_1462_propagatesEx1450() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1463Ex1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -54023,7 +53194,6 @@ fn subshell_end_exit_code_1464_propagatesEx1450() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1465Ex1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -54057,7 +53227,6 @@ fn subshell_end_exit_code_1465_propagatesEx1450() {
 
 #[test]
 fn request_halt_two_hundred_seventy_three_consecutive_runs_without_reset_still_blockedEx1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -54086,7 +53255,6 @@ fn subshell_end_exit_code_1466_propagatesEx1450() {
 
 #[test]
 fn request_halt_two_hundred_seventy_four_consecutive_runs_without_reset_still_blockedEx1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -54316,7 +53484,6 @@ fn subshell_end_exit_code_1473_propagatesEx1450() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1474Ex1450() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -54364,7 +53531,6 @@ fn subshell_end_exit_code_1475_propagatesEx1475() {
 
 #[test]
 fn request_halt_two_hundred_seventy_five_consecutive_runs_without_reset_still_blockedEx1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -54394,7 +53560,6 @@ fn subshell_end_exit_code_1476_propagatesEx1475() {
 
 #[test]
 fn request_halt_two_hundred_seventy_six_consecutive_runs_without_reset_still_blockedEx1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -54423,7 +53588,6 @@ fn subshell_end_exit_code_1477_propagatesEx1475() {
 
 #[test]
 fn request_halt_two_hundred_seventy_seven_consecutive_runs_without_reset_still_blockedEx1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -54583,7 +53747,6 @@ fn subshell_end_exit_code_1482_propagatesEx1475() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -54627,7 +53790,6 @@ fn subshell_end_exit_code_1483_propagatesEx1475() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1484Ex1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -54660,7 +53822,6 @@ fn subshell_end_exit_code_1484_propagatesEx1475() {
 
 #[test]
 fn subshell_forty_five_begins_forty_three_ends_last_end_status_winsEx1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -54709,7 +53870,6 @@ fn subshell_end_exit_code_1485_propagatesEx1475() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1486Ex1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -54774,7 +53934,6 @@ fn subshell_end_exit_code_1487_propagatesEx1475() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1488Ex1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -54839,7 +53998,6 @@ fn subshell_end_exit_code_1489_propagatesEx1475() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1490Ex1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -54878,7 +54036,6 @@ fn subshell_end_exit_code_1490_propagatesEx1475() {
 
 #[test]
 fn request_halt_two_hundred_seventy_eight_consecutive_runs_without_reset_still_blockedEx1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -54984,7 +54141,6 @@ fn subshell_end_exit_code_1493_propagatesEx1475() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1494Ex1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -55114,7 +54270,6 @@ fn subshell_end_exit_code_1497_propagatesEx1475() {
 
 #[test]
 fn request_halt_two_hundred_seventy_nine_consecutive_runs_without_reset_still_blockedEx1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -55328,7 +54483,6 @@ fn subshell_end_exit_code_1503_propagatesEx1475() {
 
 #[test]
 fn request_halt_two_hundred_eighty_consecutive_runs_without_reset_still_blockedEx1475() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -55416,7 +54570,6 @@ fn subshell_end_exit_code_1506_propagatesEx1506() {
 
 #[test]
 fn request_halt_two_hundred_eighty_one_consecutive_runs_without_reset_still_blockedEx1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -55446,7 +54599,6 @@ fn subshell_end_exit_code_1507_propagatesEx1506() {
 
 #[test]
 fn request_halt_two_hundred_eighty_two_consecutive_runs_without_reset_still_blockedEx1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -55475,7 +54627,6 @@ fn subshell_end_exit_code_1508_propagatesEx1506() {
 
 #[test]
 fn request_halt_two_hundred_eighty_three_consecutive_runs_without_reset_still_blockedEx1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -55635,7 +54786,6 @@ fn subshell_end_exit_code_1513_propagatesEx1506() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -55679,7 +54829,6 @@ fn subshell_end_exit_code_1514_propagatesEx1506() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1515Ex1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -55712,7 +54861,6 @@ fn subshell_end_exit_code_1515_propagatesEx1506() {
 
 #[test]
 fn subshell_forty_six_begins_forty_four_ends_last_end_status_winsEx1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -55761,7 +54909,6 @@ fn subshell_end_exit_code_1516_propagatesEx1506() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1517Ex1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -55836,7 +54983,6 @@ fn subshell_end_exit_code_1518_propagatesEx1506() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1519Ex1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -55901,7 +55047,6 @@ fn subshell_end_exit_code_1520_propagatesEx1506() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1521Ex1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -55935,7 +55080,6 @@ fn subshell_end_exit_code_1521_propagatesEx1506() {
 
 #[test]
 fn request_halt_two_hundred_eighty_four_consecutive_runs_without_reset_still_blockedEx1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -55964,7 +55108,6 @@ fn subshell_end_exit_code_1522_propagatesEx1506() {
 
 #[test]
 fn request_halt_two_hundred_eighty_five_consecutive_runs_without_reset_still_blockedEx1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -56194,7 +55337,6 @@ fn subshell_end_exit_code_1529_propagatesEx1506() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1530Ex1506() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -56242,7 +55384,6 @@ fn subshell_end_exit_code_1531_propagatesEx1531() {
 
 #[test]
 fn request_halt_two_hundred_eighty_six_consecutive_runs_without_reset_still_blockedEx1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -56272,7 +55413,6 @@ fn subshell_end_exit_code_1532_propagatesEx1531() {
 
 #[test]
 fn request_halt_two_hundred_eighty_seven_consecutive_runs_without_reset_still_blockedEx1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -56301,7 +55441,6 @@ fn subshell_end_exit_code_1533_propagatesEx1531() {
 
 #[test]
 fn request_halt_two_hundred_eighty_eight_consecutive_runs_without_reset_still_blockedEx1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -56461,7 +55600,6 @@ fn subshell_end_exit_code_1538_propagatesEx1531() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -56505,7 +55643,6 @@ fn subshell_end_exit_code_1539_propagatesEx1531() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1540Ex1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -56538,7 +55675,6 @@ fn subshell_end_exit_code_1540_propagatesEx1531() {
 
 #[test]
 fn subshell_forty_seven_begins_forty_five_ends_last_end_status_winsEx1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -56587,7 +55723,6 @@ fn subshell_end_exit_code_1541_propagatesEx1531() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1542Ex1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -56652,7 +55787,6 @@ fn subshell_end_exit_code_1543_propagatesEx1531() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1544Ex1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -56717,7 +55851,6 @@ fn subshell_end_exit_code_1545_propagatesEx1531() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1546Ex1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -56756,7 +55889,6 @@ fn subshell_end_exit_code_1546_propagatesEx1531() {
 
 #[test]
 fn request_halt_two_hundred_eighty_nine_consecutive_runs_without_reset_still_blockedEx1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -56862,7 +55994,6 @@ fn subshell_end_exit_code_1549_propagatesEx1531() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1550Ex1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -56992,7 +56123,6 @@ fn subshell_end_exit_code_1553_propagatesEx1531() {
 
 #[test]
 fn request_halt_two_hundred_ninety_consecutive_runs_without_reset_still_blockedEx1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -57206,7 +56336,6 @@ fn subshell_end_exit_code_1559_propagatesEx1531() {
 
 #[test]
 fn request_halt_two_hundred_ninety_one_consecutive_runs_without_reset_still_blockedEx1531() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -57294,7 +56423,6 @@ fn subshell_end_exit_code_1562_propagatesEx1562() {
 
 #[test]
 fn request_halt_two_hundred_ninety_two_consecutive_runs_without_reset_still_blockedEx1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -57324,7 +56452,6 @@ fn subshell_end_exit_code_1563_propagatesEx1562() {
 
 #[test]
 fn request_halt_two_hundred_ninety_three_consecutive_runs_without_reset_still_blockedEx1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -57353,7 +56480,6 @@ fn subshell_end_exit_code_1564_propagatesEx1562() {
 
 #[test]
 fn request_halt_two_hundred_ninety_four_consecutive_runs_without_reset_still_blockedEx1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -57513,7 +56639,6 @@ fn subshell_end_exit_code_1569_propagatesEx1562() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -57557,7 +56682,6 @@ fn subshell_end_exit_code_1570_propagatesEx1562() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1571Ex1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -57590,7 +56714,6 @@ fn subshell_end_exit_code_1571_propagatesEx1562() {
 
 #[test]
 fn subshell_forty_eight_begins_forty_six_ends_last_end_status_winsEx1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -57639,7 +56762,6 @@ fn subshell_end_exit_code_1572_propagatesEx1562() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1573Ex1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -57714,7 +56836,6 @@ fn subshell_end_exit_code_1574_propagatesEx1562() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1575Ex1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -57779,7 +56900,6 @@ fn subshell_end_exit_code_1576_propagatesEx1562() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1577Ex1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -57813,7 +56933,6 @@ fn subshell_end_exit_code_1577_propagatesEx1562() {
 
 #[test]
 fn request_halt_two_hundred_ninety_five_consecutive_runs_without_reset_still_blockedEx1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -57842,7 +56961,6 @@ fn subshell_end_exit_code_1578_propagatesEx1562() {
 
 #[test]
 fn request_halt_two_hundred_ninety_six_consecutive_runs_without_reset_still_blockedEx1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -58072,7 +57190,6 @@ fn subshell_end_exit_code_1585_propagatesEx1562() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1586Ex1562() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -58120,7 +57237,6 @@ fn subshell_end_exit_code_1587_propagatesEx1587() {
 
 #[test]
 fn request_halt_two_hundred_ninety_seven_consecutive_runs_without_reset_still_blockedEx1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -58150,7 +57266,6 @@ fn subshell_end_exit_code_1588_propagatesEx1587() {
 
 #[test]
 fn request_halt_two_hundred_ninety_eight_consecutive_runs_without_reset_still_blockedEx1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -58179,7 +57294,6 @@ fn subshell_end_exit_code_1589_propagatesEx1587() {
 
 #[test]
 fn request_halt_two_hundred_ninety_nine_consecutive_runs_without_reset_still_blockedEx1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -58339,7 +57453,6 @@ fn subshell_end_exit_code_1594_propagatesEx1587() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -58383,7 +57496,6 @@ fn subshell_end_exit_code_1595_propagatesEx1587() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1596Ex1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -58416,7 +57528,6 @@ fn subshell_end_exit_code_1596_propagatesEx1587() {
 
 #[test]
 fn subshell_forty_nine_begins_forty_seven_ends_last_end_status_winsEx1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -58465,7 +57576,6 @@ fn subshell_end_exit_code_1597_propagatesEx1587() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1598Ex1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -58530,7 +57640,6 @@ fn subshell_end_exit_code_1599_propagatesEx1587() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1600Ex1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -58595,7 +57704,6 @@ fn subshell_end_exit_code_1601_propagatesEx1587() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1602Ex1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -58634,7 +57742,6 @@ fn subshell_end_exit_code_1602_propagatesEx1587() {
 
 #[test]
 fn request_halt_three_hundred_consecutive_runs_without_reset_still_blockedEx1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -58740,7 +57847,6 @@ fn subshell_end_exit_code_1605_propagatesEx1587() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1606Ex1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -58870,7 +57976,6 @@ fn subshell_end_exit_code_1609_propagatesEx1587() {
 
 #[test]
 fn request_halt_three_hundred_one_consecutive_runs_without_reset_still_blockedEx1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -59084,7 +58189,6 @@ fn subshell_end_exit_code_1615_propagatesEx1587() {
 
 #[test]
 fn request_halt_three_hundred_two_consecutive_runs_without_reset_still_blockedEx1587() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -59172,7 +58276,6 @@ fn subshell_end_exit_code_1618_propagatesEx1618() {
 
 #[test]
 fn request_halt_three_hundred_three_consecutive_runs_without_reset_still_blockedEx1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -59202,7 +58305,6 @@ fn subshell_end_exit_code_1619_propagatesEx1618() {
 
 #[test]
 fn request_halt_three_hundred_four_consecutive_runs_without_reset_still_blockedEx1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -59231,7 +58333,6 @@ fn subshell_end_exit_code_1620_propagatesEx1618() {
 
 #[test]
 fn request_halt_three_hundred_five_consecutive_runs_without_reset_still_blockedEx1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -59391,7 +58492,6 @@ fn subshell_end_exit_code_1625_propagatesEx1618() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -59435,7 +58535,6 @@ fn subshell_end_exit_code_1626_propagatesEx1618() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1627Ex1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -59468,7 +58567,6 @@ fn subshell_end_exit_code_1627_propagatesEx1618() {
 
 #[test]
 fn subshell_fifty_begins_forty_eight_ends_last_end_status_winsEx1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -59517,7 +58615,6 @@ fn subshell_end_exit_code_1628_propagatesEx1618() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1629Ex1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -59592,7 +58689,6 @@ fn subshell_end_exit_code_1630_propagatesEx1618() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1631Ex1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -59657,7 +58753,6 @@ fn subshell_end_exit_code_1632_propagatesEx1618() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1633Ex1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -59691,7 +58786,6 @@ fn subshell_end_exit_code_1633_propagatesEx1618() {
 
 #[test]
 fn request_halt_three_hundred_six_consecutive_runs_without_reset_still_blockedEx1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -59720,7 +58814,6 @@ fn subshell_end_exit_code_1634_propagatesEx1618() {
 
 #[test]
 fn request_halt_three_hundred_seven_consecutive_runs_without_reset_still_blockedEx1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -59950,7 +59043,6 @@ fn subshell_end_exit_code_1641_propagatesEx1618() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1642Ex1618() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -59998,7 +59090,6 @@ fn subshell_end_exit_code_1643_propagatesEx1643() {
 
 #[test]
 fn request_halt_three_hundred_eight_consecutive_runs_without_reset_still_blockedEx1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -60028,7 +59119,6 @@ fn subshell_end_exit_code_1644_propagatesEx1643() {
 
 #[test]
 fn request_halt_three_hundred_nine_consecutive_runs_without_reset_still_blockedEx1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -60057,7 +59147,6 @@ fn subshell_end_exit_code_1645_propagatesEx1643() {
 
 #[test]
 fn request_halt_three_hundred_ten_consecutive_runs_without_reset_still_blockedEx1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -60217,7 +59306,6 @@ fn subshell_end_exit_code_1650_propagatesEx1643() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -60261,7 +59349,6 @@ fn subshell_end_exit_code_1651_propagatesEx1643() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1652Ex1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -60294,7 +59381,6 @@ fn subshell_end_exit_code_1652_propagatesEx1643() {
 
 #[test]
 fn subshell_fifty_one_begins_forty_nine_ends_last_end_status_winsEx1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -60343,7 +59429,6 @@ fn subshell_end_exit_code_1653_propagatesEx1643() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1654Ex1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -60408,7 +59493,6 @@ fn subshell_end_exit_code_1655_propagatesEx1643() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1656Ex1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -60473,7 +59557,6 @@ fn subshell_end_exit_code_1657_propagatesEx1643() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1658Ex1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -60512,7 +59595,6 @@ fn subshell_end_exit_code_1658_propagatesEx1643() {
 
 #[test]
 fn request_halt_three_hundred_eleven_consecutive_runs_without_reset_still_blockedEx1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -60618,7 +59700,6 @@ fn subshell_end_exit_code_1661_propagatesEx1643() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1662Ex1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -60748,7 +59829,6 @@ fn subshell_end_exit_code_1665_propagatesEx1643() {
 
 #[test]
 fn request_halt_three_hundred_twelve_consecutive_runs_without_reset_still_blockedEx1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -60962,7 +60042,6 @@ fn subshell_end_exit_code_1671_propagatesEx1643() {
 
 #[test]
 fn request_halt_three_hundred_thirteen_consecutive_runs_without_reset_still_blockedEx1643() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -61050,7 +60129,6 @@ fn subshell_end_exit_code_1674_propagatesEx1674() {
 
 #[test]
 fn request_halt_three_hundred_fourteen_consecutive_runs_without_reset_still_blockedEx1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -61080,7 +60158,6 @@ fn subshell_end_exit_code_1675_propagatesEx1674() {
 
 #[test]
 fn request_halt_three_hundred_fifteen_consecutive_runs_without_reset_still_blockedEx1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -61109,7 +60186,6 @@ fn subshell_end_exit_code_1676_propagatesEx1674() {
 
 #[test]
 fn request_halt_three_hundred_sixteen_consecutive_runs_without_reset_still_blockedEx1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -61269,7 +60345,6 @@ fn subshell_end_exit_code_1681_propagatesEx1674() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -61313,7 +60388,6 @@ fn subshell_end_exit_code_1682_propagatesEx1674() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1683Ex1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -61346,7 +60420,6 @@ fn subshell_end_exit_code_1683_propagatesEx1674() {
 
 #[test]
 fn subshell_fifty_two_begins_fifty_ends_last_end_status_winsEx1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -61395,7 +60468,6 @@ fn subshell_end_exit_code_1684_propagatesEx1674() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1685Ex1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -61470,7 +60542,6 @@ fn subshell_end_exit_code_1686_propagatesEx1674() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1687Ex1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -61535,7 +60606,6 @@ fn subshell_end_exit_code_1688_propagatesEx1674() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1689Ex1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -61569,7 +60639,6 @@ fn subshell_end_exit_code_1689_propagatesEx1674() {
 
 #[test]
 fn request_halt_three_hundred_seventeen_consecutive_runs_without_reset_still_blockedEx1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -61598,7 +60667,6 @@ fn subshell_end_exit_code_1690_propagatesEx1674() {
 
 #[test]
 fn request_halt_three_hundred_eighteen_consecutive_runs_without_reset_still_blockedEx1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -61828,7 +60896,6 @@ fn subshell_end_exit_code_1697_propagatesEx1674() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1698Ex1674() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -61876,7 +60943,6 @@ fn subshell_end_exit_code_1699_propagatesEx1699() {
 
 #[test]
 fn request_halt_three_hundred_nineteen_consecutive_runs_without_reset_still_blockedEx1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -61906,7 +60972,6 @@ fn subshell_end_exit_code_1700_propagatesEx1699() {
 
 #[test]
 fn request_halt_three_hundred_twenty_consecutive_runs_without_reset_still_blockedEx1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -61935,7 +61000,6 @@ fn subshell_end_exit_code_1701_propagatesEx1699() {
 
 #[test]
 fn request_halt_three_hundred_twenty_one_consecutive_runs_without_reset_still_blockedEx1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -62095,7 +61159,6 @@ fn subshell_end_exit_code_1706_propagatesEx1699() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -62139,7 +61202,6 @@ fn subshell_end_exit_code_1707_propagatesEx1699() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1708Ex1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -62172,7 +61234,6 @@ fn subshell_end_exit_code_1708_propagatesEx1699() {
 
 #[test]
 fn subshell_fifty_three_begins_fifty_one_ends_last_end_status_winsEx1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -62221,7 +61282,6 @@ fn subshell_end_exit_code_1709_propagatesEx1699() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1710Ex1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -62286,7 +61346,6 @@ fn subshell_end_exit_code_1711_propagatesEx1699() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1712Ex1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -62351,7 +61410,6 @@ fn subshell_end_exit_code_1713_propagatesEx1699() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1714Ex1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -62390,7 +61448,6 @@ fn subshell_end_exit_code_1714_propagatesEx1699() {
 
 #[test]
 fn request_halt_three_hundred_twenty_two_consecutive_runs_without_reset_still_blockedEx1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -62496,7 +61553,6 @@ fn subshell_end_exit_code_1717_propagatesEx1699() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1718Ex1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -62626,7 +61682,6 @@ fn subshell_end_exit_code_1721_propagatesEx1699() {
 
 #[test]
 fn request_halt_three_hundred_twenty_three_consecutive_runs_without_reset_still_blockedEx1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -62840,7 +61895,6 @@ fn subshell_end_exit_code_1727_propagatesEx1699() {
 
 #[test]
 fn request_halt_three_hundred_twenty_four_consecutive_runs_without_reset_still_blockedEx1699() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -62928,7 +61982,6 @@ fn subshell_end_exit_code_1730_propagatesEx1730() {
 
 #[test]
 fn request_halt_three_hundred_twenty_five_consecutive_runs_without_reset_still_blockedEx1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -62958,7 +62011,6 @@ fn subshell_end_exit_code_1731_propagatesEx1730() {
 
 #[test]
 fn request_halt_three_hundred_twenty_six_consecutive_runs_without_reset_still_blockedEx1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -62987,7 +62039,6 @@ fn subshell_end_exit_code_1732_propagatesEx1730() {
 
 #[test]
 fn request_halt_three_hundred_twenty_seven_consecutive_runs_without_reset_still_blockedEx1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -63147,7 +62198,6 @@ fn subshell_end_exit_code_1737_propagatesEx1730() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -63191,7 +62241,6 @@ fn subshell_end_exit_code_1738_propagatesEx1730() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1739Ex1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -63224,7 +62273,6 @@ fn subshell_end_exit_code_1739_propagatesEx1730() {
 
 #[test]
 fn subshell_fifty_four_begins_fifty_two_ends_last_end_status_winsEx1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -63273,7 +62321,6 @@ fn subshell_end_exit_code_1740_propagatesEx1730() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1741Ex1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -63348,7 +62395,6 @@ fn subshell_end_exit_code_1742_propagatesEx1730() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1743Ex1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -63413,7 +62459,6 @@ fn subshell_end_exit_code_1744_propagatesEx1730() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1745Ex1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -63447,7 +62492,6 @@ fn subshell_end_exit_code_1745_propagatesEx1730() {
 
 #[test]
 fn request_halt_three_hundred_twenty_eight_consecutive_runs_without_reset_still_blockedEx1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -63476,7 +62520,6 @@ fn subshell_end_exit_code_1746_propagatesEx1730() {
 
 #[test]
 fn request_halt_three_hundred_twenty_nine_consecutive_runs_without_reset_still_blockedEx1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -63706,7 +62749,6 @@ fn subshell_end_exit_code_1753_propagatesEx1730() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1754Ex1730() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -63754,7 +62796,6 @@ fn subshell_end_exit_code_1755_propagatesEx1755() {
 
 #[test]
 fn request_halt_three_hundred_thirty_consecutive_runs_without_reset_still_blockedEx1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -63784,7 +62825,6 @@ fn subshell_end_exit_code_1756_propagatesEx1755() {
 
 #[test]
 fn request_halt_three_hundred_thirty_one_consecutive_runs_without_reset_still_blockedEx1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -63813,7 +62853,6 @@ fn subshell_end_exit_code_1757_propagatesEx1755() {
 
 #[test]
 fn request_halt_three_hundred_thirty_two_consecutive_runs_without_reset_still_blockedEx1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -63973,7 +63012,6 @@ fn subshell_end_exit_code_1762_propagatesEx1755() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -64017,7 +63055,6 @@ fn subshell_end_exit_code_1763_propagatesEx1755() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1764Ex1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -64050,7 +63087,6 @@ fn subshell_end_exit_code_1764_propagatesEx1755() {
 
 #[test]
 fn subshell_fifty_five_begins_fifty_three_ends_last_end_status_winsEx1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -64099,7 +63135,6 @@ fn subshell_end_exit_code_1765_propagatesEx1755() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1766Ex1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -64164,7 +63199,6 @@ fn subshell_end_exit_code_1767_propagatesEx1755() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1768Ex1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -64229,7 +63263,6 @@ fn subshell_end_exit_code_1769_propagatesEx1755() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1770Ex1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -64268,7 +63301,6 @@ fn subshell_end_exit_code_1770_propagatesEx1755() {
 
 #[test]
 fn request_halt_three_hundred_thirty_three_consecutive_runs_without_reset_still_blockedEx1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -64374,7 +63406,6 @@ fn subshell_end_exit_code_1773_propagatesEx1755() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1774Ex1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -64504,7 +63535,6 @@ fn subshell_end_exit_code_1777_propagatesEx1755() {
 
 #[test]
 fn request_halt_three_hundred_thirty_four_consecutive_runs_without_reset_still_blockedEx1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -64718,7 +63748,6 @@ fn subshell_end_exit_code_1783_propagatesEx1755() {
 
 #[test]
 fn request_halt_three_hundred_thirty_five_consecutive_runs_without_reset_still_blockedEx1755() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -64806,7 +63835,6 @@ fn subshell_end_exit_code_1786_propagatesEx1786() {
 
 #[test]
 fn request_halt_three_hundred_thirty_six_consecutive_runs_without_reset_still_blockedEx1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -64836,7 +63864,6 @@ fn subshell_end_exit_code_1787_propagatesEx1786() {
 
 #[test]
 fn request_halt_three_hundred_thirty_seven_consecutive_runs_without_reset_still_blockedEx1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -64865,7 +63892,6 @@ fn subshell_end_exit_code_1788_propagatesEx1786() {
 
 #[test]
 fn request_halt_three_hundred_thirty_eight_consecutive_runs_without_reset_still_blockedEx1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -65025,7 +64051,6 @@ fn subshell_end_exit_code_1793_propagatesEx1786() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -65069,7 +64094,6 @@ fn subshell_end_exit_code_1794_propagatesEx1786() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1795Ex1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -65102,7 +64126,6 @@ fn subshell_end_exit_code_1795_propagatesEx1786() {
 
 #[test]
 fn subshell_fifty_six_begins_fifty_four_ends_last_end_status_winsEx1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -65151,7 +64174,6 @@ fn subshell_end_exit_code_1796_propagatesEx1786() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1797Ex1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -65226,7 +64248,6 @@ fn subshell_end_exit_code_1798_propagatesEx1786() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1799Ex1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -65291,7 +64312,6 @@ fn subshell_end_exit_code_1800_propagatesEx1786() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1801Ex1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -65325,7 +64345,6 @@ fn subshell_end_exit_code_1801_propagatesEx1786() {
 
 #[test]
 fn request_halt_three_hundred_thirty_nine_consecutive_runs_without_reset_still_blockedEx1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -65354,7 +64373,6 @@ fn subshell_end_exit_code_1802_propagatesEx1786() {
 
 #[test]
 fn request_halt_three_hundred_forty_consecutive_runs_without_reset_still_blockedEx1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -65584,7 +64602,6 @@ fn subshell_end_exit_code_1809_propagatesEx1786() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1810Ex1786() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -65632,7 +64649,6 @@ fn subshell_end_exit_code_1811_propagatesEx1811() {
 
 #[test]
 fn request_halt_three_hundred_forty_one_consecutive_runs_without_reset_still_blockedEx1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -65662,7 +64678,6 @@ fn subshell_end_exit_code_1812_propagatesEx1811() {
 
 #[test]
 fn request_halt_three_hundred_forty_two_consecutive_runs_without_reset_still_blockedEx1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -65691,7 +64706,6 @@ fn subshell_end_exit_code_1813_propagatesEx1811() {
 
 #[test]
 fn request_halt_three_hundred_forty_three_consecutive_runs_without_reset_still_blockedEx1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -65851,7 +64865,6 @@ fn subshell_end_exit_code_1818_propagatesEx1811() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -65895,7 +64908,6 @@ fn subshell_end_exit_code_1819_propagatesEx1811() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1820Ex1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -65928,7 +64940,6 @@ fn subshell_end_exit_code_1820_propagatesEx1811() {
 
 #[test]
 fn subshell_fifty_seven_begins_fifty_five_ends_last_end_status_winsEx1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -65977,7 +64988,6 @@ fn subshell_end_exit_code_1821_propagatesEx1811() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1822Ex1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -66042,7 +65052,6 @@ fn subshell_end_exit_code_1823_propagatesEx1811() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1824Ex1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -66107,7 +65116,6 @@ fn subshell_end_exit_code_1825_propagatesEx1811() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1826Ex1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -66146,7 +65154,6 @@ fn subshell_end_exit_code_1826_propagatesEx1811() {
 
 #[test]
 fn request_halt_three_hundred_forty_four_consecutive_runs_without_reset_still_blockedEx1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -66252,7 +65259,6 @@ fn subshell_end_exit_code_1829_propagatesEx1811() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1830Ex1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -66382,7 +65388,6 @@ fn subshell_end_exit_code_1833_propagatesEx1811() {
 
 #[test]
 fn request_halt_three_hundred_forty_five_consecutive_runs_without_reset_still_blockedEx1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -66596,7 +65601,6 @@ fn subshell_end_exit_code_1839_propagatesEx1811() {
 
 #[test]
 fn request_halt_three_hundred_forty_six_consecutive_runs_without_reset_still_blockedEx1811() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -66684,7 +65688,6 @@ fn subshell_end_exit_code_1842_propagatesEx1842() {
 
 #[test]
 fn request_halt_three_hundred_forty_seven_consecutive_runs_without_reset_still_blockedEx1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -66714,7 +65717,6 @@ fn subshell_end_exit_code_1843_propagatesEx1842() {
 
 #[test]
 fn request_halt_three_hundred_forty_eight_consecutive_runs_without_reset_still_blockedEx1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -66743,7 +65745,6 @@ fn subshell_end_exit_code_1844_propagatesEx1842() {
 
 #[test]
 fn request_halt_three_hundred_forty_nine_consecutive_runs_without_reset_still_blockedEx1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -66903,7 +65904,6 @@ fn subshell_end_exit_code_1849_propagatesEx1842() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -66947,7 +65947,6 @@ fn subshell_end_exit_code_1850_propagatesEx1842() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1851Ex1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -66980,7 +65979,6 @@ fn subshell_end_exit_code_1851_propagatesEx1842() {
 
 #[test]
 fn subshell_fifty_eight_begins_fifty_six_ends_last_end_status_winsEx1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -67029,7 +66027,6 @@ fn subshell_end_exit_code_1852_propagatesEx1842() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1853Ex1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -67104,7 +66101,6 @@ fn subshell_end_exit_code_1854_propagatesEx1842() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1855Ex1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -67169,7 +66165,6 @@ fn subshell_end_exit_code_1856_propagatesEx1842() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1857Ex1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -67203,7 +66198,6 @@ fn subshell_end_exit_code_1857_propagatesEx1842() {
 
 #[test]
 fn request_halt_three_hundred_fifty_consecutive_runs_without_reset_still_blockedEx1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -67232,7 +66226,6 @@ fn subshell_end_exit_code_1858_propagatesEx1842() {
 
 #[test]
 fn request_halt_three_hundred_fifty_one_consecutive_runs_without_reset_still_blockedEx1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -67462,7 +66455,6 @@ fn subshell_end_exit_code_1865_propagatesEx1842() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1866Ex1842() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -67510,7 +66502,6 @@ fn subshell_end_exit_code_1867_propagatesEx1867() {
 
 #[test]
 fn request_halt_three_hundred_fifty_two_consecutive_runs_without_reset_still_blockedEx1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -67540,7 +66531,6 @@ fn subshell_end_exit_code_1868_propagatesEx1867() {
 
 #[test]
 fn request_halt_three_hundred_fifty_three_consecutive_runs_without_reset_still_blockedEx1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -67569,7 +66559,6 @@ fn subshell_end_exit_code_1869_propagatesEx1867() {
 
 #[test]
 fn request_halt_three_hundred_fifty_four_consecutive_runs_without_reset_still_blockedEx1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -67729,7 +66718,6 @@ fn subshell_end_exit_code_1874_propagatesEx1867() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -67773,7 +66761,6 @@ fn subshell_end_exit_code_1875_propagatesEx1867() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1876Ex1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -67806,7 +66793,6 @@ fn subshell_end_exit_code_1876_propagatesEx1867() {
 
 #[test]
 fn subshell_fifty_nine_begins_fifty_seven_ends_last_end_status_winsEx1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -67855,7 +66841,6 @@ fn subshell_end_exit_code_1877_propagatesEx1867() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1878Ex1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -67920,7 +66905,6 @@ fn subshell_end_exit_code_1879_propagatesEx1867() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1880Ex1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -67985,7 +66969,6 @@ fn subshell_end_exit_code_1881_propagatesEx1867() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1882Ex1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -68024,7 +67007,6 @@ fn subshell_end_exit_code_1882_propagatesEx1867() {
 
 #[test]
 fn request_halt_three_hundred_fifty_five_consecutive_runs_without_reset_still_blockedEx1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -68130,7 +67112,6 @@ fn subshell_end_exit_code_1885_propagatesEx1867() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1886Ex1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -68260,7 +67241,6 @@ fn subshell_end_exit_code_1889_propagatesEx1867() {
 
 #[test]
 fn request_halt_three_hundred_fifty_six_consecutive_runs_without_reset_still_blockedEx1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -68474,7 +67454,6 @@ fn subshell_end_exit_code_1895_propagatesEx1867() {
 
 #[test]
 fn request_halt_three_hundred_fifty_seven_consecutive_runs_without_reset_still_blockedEx1867() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -68562,7 +67541,6 @@ fn subshell_end_exit_code_1898_propagatesEx1898() {
 
 #[test]
 fn request_halt_three_hundred_fifty_eight_consecutive_runs_without_reset_still_blockedEx1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -68592,7 +67570,6 @@ fn subshell_end_exit_code_1899_propagatesEx1898() {
 
 #[test]
 fn request_halt_three_hundred_fifty_nine_consecutive_runs_without_reset_still_blockedEx1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -68621,7 +67598,6 @@ fn subshell_end_exit_code_1900_propagatesEx1898() {
 
 #[test]
 fn request_halt_three_hundred_sixty_consecutive_runs_without_reset_still_blockedEx1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -68781,7 +67757,6 @@ fn subshell_end_exit_code_1905_propagatesEx1898() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -68825,7 +67800,6 @@ fn subshell_end_exit_code_1906_propagatesEx1898() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1907Ex1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -68858,7 +67832,6 @@ fn subshell_end_exit_code_1907_propagatesEx1898() {
 
 #[test]
 fn subshell_sixty_begins_fifty_eight_ends_last_end_status_winsEx1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -68907,7 +67880,6 @@ fn subshell_end_exit_code_1908_propagatesEx1898() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1909Ex1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -68982,7 +67954,6 @@ fn subshell_end_exit_code_1910_propagatesEx1898() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1911Ex1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -69047,7 +68018,6 @@ fn subshell_end_exit_code_1912_propagatesEx1898() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1913Ex1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -69081,7 +68051,6 @@ fn subshell_end_exit_code_1913_propagatesEx1898() {
 
 #[test]
 fn request_halt_three_hundred_sixty_one_consecutive_runs_without_reset_still_blockedEx1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -69110,7 +68079,6 @@ fn subshell_end_exit_code_1914_propagatesEx1898() {
 
 #[test]
 fn request_halt_three_hundred_sixty_two_consecutive_runs_without_reset_still_blockedEx1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -69340,7 +68308,6 @@ fn subshell_end_exit_code_1921_propagatesEx1898() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1922Ex1898() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -69388,7 +68355,6 @@ fn subshell_end_exit_code_1923_propagatesEx1923() {
 
 #[test]
 fn request_halt_three_hundred_sixty_three_consecutive_runs_without_reset_still_blockedEx1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -69418,7 +68384,6 @@ fn subshell_end_exit_code_1924_propagatesEx1923() {
 
 #[test]
 fn request_halt_three_hundred_sixty_four_consecutive_runs_without_reset_still_blockedEx1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -69447,7 +68412,6 @@ fn subshell_end_exit_code_1925_propagatesEx1923() {
 
 #[test]
 fn request_halt_three_hundred_sixty_five_consecutive_runs_without_reset_still_blockedEx1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -69607,7 +68571,6 @@ fn subshell_end_exit_code_1930_propagatesEx1923() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -69651,7 +68614,6 @@ fn subshell_end_exit_code_1931_propagatesEx1923() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1932Ex1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -69684,7 +68646,6 @@ fn subshell_end_exit_code_1932_propagatesEx1923() {
 
 #[test]
 fn subshell_sixty_one_begins_fifty_nine_ends_last_end_status_winsEx1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -69733,7 +68694,6 @@ fn subshell_end_exit_code_1933_propagatesEx1923() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1934Ex1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -69798,7 +68758,6 @@ fn subshell_end_exit_code_1935_propagatesEx1923() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1936Ex1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -69863,7 +68822,6 @@ fn subshell_end_exit_code_1937_propagatesEx1923() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1938Ex1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -69902,7 +68860,6 @@ fn subshell_end_exit_code_1938_propagatesEx1923() {
 
 #[test]
 fn request_halt_three_hundred_sixty_six_consecutive_runs_without_reset_still_blockedEx1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -70008,7 +68965,6 @@ fn subshell_end_exit_code_1941_propagatesEx1923() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1942Ex1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -70138,7 +69094,6 @@ fn subshell_end_exit_code_1945_propagatesEx1923() {
 
 #[test]
 fn request_halt_three_hundred_sixty_seven_consecutive_runs_without_reset_still_blockedEx1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -70352,7 +69307,6 @@ fn subshell_end_exit_code_1951_propagatesEx1923() {
 
 #[test]
 fn request_halt_three_hundred_sixty_eight_consecutive_runs_without_reset_still_blockedEx1923() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -70440,7 +69394,6 @@ fn subshell_end_exit_code_1954_propagatesEx1954() {
 
 #[test]
 fn request_halt_three_hundred_sixty_nine_consecutive_runs_without_reset_still_blockedEx1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -70470,7 +69423,6 @@ fn subshell_end_exit_code_1955_propagatesEx1954() {
 
 #[test]
 fn request_halt_three_hundred_seventy_consecutive_runs_without_reset_still_blockedEx1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -70499,7 +69451,6 @@ fn subshell_end_exit_code_1956_propagatesEx1954() {
 
 #[test]
 fn request_halt_three_hundred_seventy_one_consecutive_runs_without_reset_still_blockedEx1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -70659,7 +69610,6 @@ fn subshell_end_exit_code_1961_propagatesEx1954() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -70703,7 +69653,6 @@ fn subshell_end_exit_code_1962_propagatesEx1954() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status1963Ex1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -70736,7 +69685,6 @@ fn subshell_end_exit_code_1963_propagatesEx1954() {
 
 #[test]
 fn subshell_sixty_two_begins_sixty_ends_last_end_status_winsEx1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -70785,7 +69733,6 @@ fn subshell_end_exit_code_1964_propagatesEx1954() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status1965Ex1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -70860,7 +69807,6 @@ fn subshell_end_exit_code_1966_propagatesEx1954() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status1967Ex1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -70925,7 +69871,6 @@ fn subshell_end_exit_code_1968_propagatesEx1954() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status1969Ex1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -70959,7 +69904,6 @@ fn subshell_end_exit_code_1969_propagatesEx1954() {
 
 #[test]
 fn request_halt_three_hundred_seventy_two_consecutive_runs_without_reset_still_blockedEx1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -70988,7 +69932,6 @@ fn subshell_end_exit_code_1970_propagatesEx1954() {
 
 #[test]
 fn request_halt_three_hundred_seventy_three_consecutive_runs_without_reset_still_blockedEx1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -71218,7 +70161,6 @@ fn subshell_end_exit_code_1977_propagatesEx1954() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status1978Ex1954() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -71266,7 +70208,6 @@ fn subshell_end_exit_code_1979_propagatesEx1979() {
 
 #[test]
 fn request_halt_three_hundred_seventy_four_consecutive_runs_without_reset_still_blockedEx1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -71296,7 +70237,6 @@ fn subshell_end_exit_code_1980_propagatesEx1979() {
 
 #[test]
 fn request_halt_three_hundred_seventy_five_consecutive_runs_without_reset_still_blockedEx1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -71325,7 +70265,6 @@ fn subshell_end_exit_code_1981_propagatesEx1979() {
 
 #[test]
 fn request_halt_three_hundred_seventy_six_consecutive_runs_without_reset_still_blockedEx1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -71485,7 +70424,6 @@ fn subshell_end_exit_code_1986_propagatesEx1979() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -71529,7 +70467,6 @@ fn subshell_end_exit_code_1987_propagatesEx1979() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status1988Ex1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -71562,7 +70499,6 @@ fn subshell_end_exit_code_1988_propagatesEx1979() {
 
 #[test]
 fn subshell_sixty_three_begins_sixty_one_ends_last_end_status_winsEx1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -71611,7 +70547,6 @@ fn subshell_end_exit_code_1989_propagatesEx1979() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status1990Ex1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -71676,7 +70611,6 @@ fn subshell_end_exit_code_1991_propagatesEx1979() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status1992Ex1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -71741,7 +70675,6 @@ fn subshell_end_exit_code_1993_propagatesEx1979() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status1994Ex1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -71780,7 +70713,6 @@ fn subshell_end_exit_code_1994_propagatesEx1979() {
 
 #[test]
 fn request_halt_three_hundred_seventy_seven_consecutive_runs_without_reset_still_blockedEx1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -71886,7 +70818,6 @@ fn subshell_end_exit_code_1997_propagatesEx1979() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status1998Ex1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -72016,7 +70947,6 @@ fn subshell_end_exit_code_2001_propagatesEx1979() {
 
 #[test]
 fn request_halt_three_hundred_seventy_eight_consecutive_runs_without_reset_still_blockedEx1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -72230,7 +71160,6 @@ fn subshell_end_exit_code_2007_propagatesEx1979() {
 
 #[test]
 fn request_halt_three_hundred_seventy_nine_consecutive_runs_without_reset_still_blockedEx1979() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -72318,7 +71247,6 @@ fn subshell_end_exit_code_2010_propagatesEx2010() {
 
 #[test]
 fn request_halt_three_hundred_eighty_consecutive_runs_without_reset_still_blockedEx2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -72348,7 +71276,6 @@ fn subshell_end_exit_code_2011_propagatesEx2010() {
 
 #[test]
 fn request_halt_three_hundred_eighty_one_consecutive_runs_without_reset_still_blockedEx2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -72377,7 +71304,6 @@ fn subshell_end_exit_code_2012_propagatesEx2010() {
 
 #[test]
 fn request_halt_three_hundred_eighty_two_consecutive_runs_without_reset_still_blockedEx2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -72537,7 +71463,6 @@ fn subshell_end_exit_code_2017_propagatesEx2010() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -72581,7 +71506,6 @@ fn subshell_end_exit_code_2018_propagatesEx2010() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2019Ex2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -72614,7 +71538,6 @@ fn subshell_end_exit_code_2019_propagatesEx2010() {
 
 #[test]
 fn subshell_sixty_four_begins_sixty_two_ends_last_end_status_winsEx2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -72663,7 +71586,6 @@ fn subshell_end_exit_code_2020_propagatesEx2010() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2021Ex2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -72738,7 +71660,6 @@ fn subshell_end_exit_code_2022_propagatesEx2010() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2023Ex2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -72803,7 +71724,6 @@ fn subshell_end_exit_code_2024_propagatesEx2010() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2025Ex2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -72837,7 +71757,6 @@ fn subshell_end_exit_code_2025_propagatesEx2010() {
 
 #[test]
 fn request_halt_three_hundred_eighty_three_consecutive_runs_without_reset_still_blockedEx2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -72866,7 +71785,6 @@ fn subshell_end_exit_code_2026_propagatesEx2010() {
 
 #[test]
 fn request_halt_three_hundred_eighty_four_consecutive_runs_without_reset_still_blockedEx2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -73096,7 +72014,6 @@ fn subshell_end_exit_code_2033_propagatesEx2010() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2034Ex2010() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -73144,7 +72061,6 @@ fn subshell_end_exit_code_2035_propagatesEx2035() {
 
 #[test]
 fn request_halt_three_hundred_eighty_five_consecutive_runs_without_reset_still_blockedEx2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -73174,7 +72090,6 @@ fn subshell_end_exit_code_2036_propagatesEx2035() {
 
 #[test]
 fn request_halt_three_hundred_eighty_six_consecutive_runs_without_reset_still_blockedEx2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -73203,7 +72118,6 @@ fn subshell_end_exit_code_2037_propagatesEx2035() {
 
 #[test]
 fn request_halt_three_hundred_eighty_seven_consecutive_runs_without_reset_still_blockedEx2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -73363,7 +72277,6 @@ fn subshell_end_exit_code_2042_propagatesEx2035() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -73407,7 +72320,6 @@ fn subshell_end_exit_code_2043_propagatesEx2035() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2044Ex2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -73440,7 +72352,6 @@ fn subshell_end_exit_code_2044_propagatesEx2035() {
 
 #[test]
 fn subshell_sixty_five_begins_sixty_three_ends_last_end_status_winsEx2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -73489,7 +72400,6 @@ fn subshell_end_exit_code_2045_propagatesEx2035() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2046Ex2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -73554,7 +72464,6 @@ fn subshell_end_exit_code_2047_propagatesEx2035() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2048Ex2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -73619,7 +72528,6 @@ fn subshell_end_exit_code_2049_propagatesEx2035() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2050Ex2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -73658,7 +72566,6 @@ fn subshell_end_exit_code_2050_propagatesEx2035() {
 
 #[test]
 fn request_halt_three_hundred_eighty_eight_consecutive_runs_without_reset_still_blockedEx2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -73764,7 +72671,6 @@ fn subshell_end_exit_code_2053_propagatesEx2035() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2054Ex2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -73894,7 +72800,6 @@ fn subshell_end_exit_code_2057_propagatesEx2035() {
 
 #[test]
 fn request_halt_three_hundred_eighty_nine_consecutive_runs_without_reset_still_blockedEx2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -74108,7 +73013,6 @@ fn subshell_end_exit_code_2063_propagatesEx2035() {
 
 #[test]
 fn request_halt_three_hundred_ninety_consecutive_runs_without_reset_still_blockedEx2035() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -74196,7 +73100,6 @@ fn subshell_end_exit_code_2066_propagatesEx2066() {
 
 #[test]
 fn request_halt_three_hundred_ninety_one_consecutive_runs_without_reset_still_blockedEx2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -74226,7 +73129,6 @@ fn subshell_end_exit_code_2067_propagatesEx2066() {
 
 #[test]
 fn request_halt_three_hundred_ninety_two_consecutive_runs_without_reset_still_blockedEx2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -74255,7 +73157,6 @@ fn subshell_end_exit_code_2068_propagatesEx2066() {
 
 #[test]
 fn request_halt_three_hundred_ninety_three_consecutive_runs_without_reset_still_blockedEx2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -74415,7 +73316,6 @@ fn subshell_end_exit_code_2073_propagatesEx2066() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -74459,7 +73359,6 @@ fn subshell_end_exit_code_2074_propagatesEx2066() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2075Ex2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -74492,7 +73391,6 @@ fn subshell_end_exit_code_2075_propagatesEx2066() {
 
 #[test]
 fn subshell_sixty_six_begins_sixty_four_ends_last_end_status_winsEx2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -74541,7 +73439,6 @@ fn subshell_end_exit_code_2076_propagatesEx2066() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2077Ex2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -74616,7 +73513,6 @@ fn subshell_end_exit_code_2078_propagatesEx2066() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2079Ex2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -74681,7 +73577,6 @@ fn subshell_end_exit_code_2080_propagatesEx2066() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2081Ex2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -74715,7 +73610,6 @@ fn subshell_end_exit_code_2081_propagatesEx2066() {
 
 #[test]
 fn request_halt_three_hundred_ninety_four_consecutive_runs_without_reset_still_blockedEx2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -74744,7 +73638,6 @@ fn subshell_end_exit_code_2082_propagatesEx2066() {
 
 #[test]
 fn request_halt_three_hundred_ninety_five_consecutive_runs_without_reset_still_blockedEx2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -74974,7 +73867,6 @@ fn subshell_end_exit_code_2089_propagatesEx2066() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2090Ex2066() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -75022,7 +73914,6 @@ fn subshell_end_exit_code_2091_propagatesEx2091() {
 
 #[test]
 fn request_halt_three_hundred_ninety_six_consecutive_runs_without_reset_still_blockedEx2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -75052,7 +73943,6 @@ fn subshell_end_exit_code_2092_propagatesEx2091() {
 
 #[test]
 fn request_halt_three_hundred_ninety_seven_consecutive_runs_without_reset_still_blockedEx2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -75081,7 +73971,6 @@ fn subshell_end_exit_code_2093_propagatesEx2091() {
 
 #[test]
 fn request_halt_three_hundred_ninety_eight_consecutive_runs_without_reset_still_blockedEx2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -75241,7 +74130,6 @@ fn subshell_end_exit_code_2098_propagatesEx2091() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -75285,7 +74173,6 @@ fn subshell_end_exit_code_2099_propagatesEx2091() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2100Ex2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -75318,7 +74205,6 @@ fn subshell_end_exit_code_2100_propagatesEx2091() {
 
 #[test]
 fn subshell_sixty_seven_begins_sixty_five_ends_last_end_status_winsEx2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -75367,7 +74253,6 @@ fn subshell_end_exit_code_2101_propagatesEx2091() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2102Ex2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -75432,7 +74317,6 @@ fn subshell_end_exit_code_2103_propagatesEx2091() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2104Ex2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -75497,7 +74381,6 @@ fn subshell_end_exit_code_2105_propagatesEx2091() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2106Ex2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -75536,7 +74419,6 @@ fn subshell_end_exit_code_2106_propagatesEx2091() {
 
 #[test]
 fn request_halt_three_hundred_ninety_nine_consecutive_runs_without_reset_still_blockedEx2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -75642,7 +74524,6 @@ fn subshell_end_exit_code_2109_propagatesEx2091() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2110Ex2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -75772,7 +74653,6 @@ fn subshell_end_exit_code_2113_propagatesEx2091() {
 
 #[test]
 fn request_halt_four_hundred_consecutive_runs_without_reset_still_blockedEx2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -75986,7 +74866,6 @@ fn subshell_end_exit_code_2119_propagatesEx2091() {
 
 #[test]
 fn request_halt_four_hundred_one_consecutive_runs_without_reset_still_blockedEx2091() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -76074,7 +74953,6 @@ fn subshell_end_exit_code_2122_propagatesEx2122() {
 
 #[test]
 fn request_halt_four_hundred_two_consecutive_runs_without_reset_still_blockedEx2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -76104,7 +74982,6 @@ fn subshell_end_exit_code_2123_propagatesEx2122() {
 
 #[test]
 fn request_halt_four_hundred_three_consecutive_runs_without_reset_still_blockedEx2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -76133,7 +75010,6 @@ fn subshell_end_exit_code_2124_propagatesEx2122() {
 
 #[test]
 fn request_halt_four_hundred_four_consecutive_runs_without_reset_still_blockedEx2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -76293,7 +75169,6 @@ fn subshell_end_exit_code_2129_propagatesEx2122() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -76337,7 +75212,6 @@ fn subshell_end_exit_code_2130_propagatesEx2122() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2131Ex2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -76370,7 +75244,6 @@ fn subshell_end_exit_code_2131_propagatesEx2122() {
 
 #[test]
 fn subshell_sixty_eight_begins_sixty_six_ends_last_end_status_winsEx2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -76419,7 +75292,6 @@ fn subshell_end_exit_code_2132_propagatesEx2122() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2133Ex2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -76494,7 +75366,6 @@ fn subshell_end_exit_code_2134_propagatesEx2122() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2135Ex2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -76559,7 +75430,6 @@ fn subshell_end_exit_code_2136_propagatesEx2122() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2137Ex2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -76593,7 +75463,6 @@ fn subshell_end_exit_code_2137_propagatesEx2122() {
 
 #[test]
 fn request_halt_four_hundred_five_consecutive_runs_without_reset_still_blockedEx2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -76622,7 +75491,6 @@ fn subshell_end_exit_code_2138_propagatesEx2122() {
 
 #[test]
 fn request_halt_four_hundred_six_consecutive_runs_without_reset_still_blockedEx2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -76852,7 +75720,6 @@ fn subshell_end_exit_code_2145_propagatesEx2122() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2146Ex2122() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -76900,7 +75767,6 @@ fn subshell_end_exit_code_2147_propagatesEx2147() {
 
 #[test]
 fn request_halt_four_hundred_seven_consecutive_runs_without_reset_still_blockedEx2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -76930,7 +75796,6 @@ fn subshell_end_exit_code_2148_propagatesEx2147() {
 
 #[test]
 fn request_halt_four_hundred_eight_consecutive_runs_without_reset_still_blockedEx2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -76959,7 +75824,6 @@ fn subshell_end_exit_code_2149_propagatesEx2147() {
 
 #[test]
 fn request_halt_four_hundred_nine_consecutive_runs_without_reset_still_blockedEx2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -77119,7 +75983,6 @@ fn subshell_end_exit_code_2154_propagatesEx2147() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -77163,7 +76026,6 @@ fn subshell_end_exit_code_2155_propagatesEx2147() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2156Ex2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -77196,7 +76058,6 @@ fn subshell_end_exit_code_2156_propagatesEx2147() {
 
 #[test]
 fn subshell_sixty_nine_begins_sixty_seven_ends_last_end_status_winsEx2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -77245,7 +76106,6 @@ fn subshell_end_exit_code_2157_propagatesEx2147() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2158Ex2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -77310,7 +76170,6 @@ fn subshell_end_exit_code_2159_propagatesEx2147() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2160Ex2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -77375,7 +76234,6 @@ fn subshell_end_exit_code_2161_propagatesEx2147() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2162Ex2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -77414,7 +76272,6 @@ fn subshell_end_exit_code_2162_propagatesEx2147() {
 
 #[test]
 fn request_halt_four_hundred_ten_consecutive_runs_without_reset_still_blockedEx2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -77520,7 +76377,6 @@ fn subshell_end_exit_code_2165_propagatesEx2147() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2166Ex2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -77650,7 +76506,6 @@ fn subshell_end_exit_code_2169_propagatesEx2147() {
 
 #[test]
 fn request_halt_four_hundred_eleven_consecutive_runs_without_reset_still_blockedEx2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -77864,7 +76719,6 @@ fn subshell_end_exit_code_2175_propagatesEx2147() {
 
 #[test]
 fn request_halt_four_hundred_twelve_consecutive_runs_without_reset_still_blockedEx2147() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -77952,7 +76806,6 @@ fn subshell_end_exit_code_2178_propagatesEx2178() {
 
 #[test]
 fn request_halt_four_hundred_thirteen_consecutive_runs_without_reset_still_blockedEx2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -77982,7 +76835,6 @@ fn subshell_end_exit_code_2179_propagatesEx2178() {
 
 #[test]
 fn request_halt_four_hundred_fourteen_consecutive_runs_without_reset_still_blockedEx2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -78011,7 +76863,6 @@ fn subshell_end_exit_code_2180_propagatesEx2178() {
 
 #[test]
 fn request_halt_four_hundred_fifteen_consecutive_runs_without_reset_still_blockedEx2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -78171,7 +77022,6 @@ fn subshell_end_exit_code_2185_propagatesEx2178() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -78215,7 +77065,6 @@ fn subshell_end_exit_code_2186_propagatesEx2178() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2187Ex2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -78248,7 +77097,6 @@ fn subshell_end_exit_code_2187_propagatesEx2178() {
 
 #[test]
 fn subshell_seventy_begins_sixty_eight_ends_last_end_status_winsEx2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -78297,7 +77145,6 @@ fn subshell_end_exit_code_2188_propagatesEx2178() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2189Ex2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -78372,7 +77219,6 @@ fn subshell_end_exit_code_2190_propagatesEx2178() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2191Ex2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -78437,7 +77283,6 @@ fn subshell_end_exit_code_2192_propagatesEx2178() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2193Ex2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -78471,7 +77316,6 @@ fn subshell_end_exit_code_2193_propagatesEx2178() {
 
 #[test]
 fn request_halt_four_hundred_sixteen_consecutive_runs_without_reset_still_blockedEx2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -78500,7 +77344,6 @@ fn subshell_end_exit_code_2194_propagatesEx2178() {
 
 #[test]
 fn request_halt_four_hundred_seventeen_consecutive_runs_without_reset_still_blockedEx2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -78730,7 +77573,6 @@ fn subshell_end_exit_code_2201_propagatesEx2178() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2202Ex2178() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -78778,7 +77620,6 @@ fn subshell_end_exit_code_2203_propagatesEx2203() {
 
 #[test]
 fn request_halt_four_hundred_eighteen_consecutive_runs_without_reset_still_blockedEx2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -78808,7 +77649,6 @@ fn subshell_end_exit_code_2204_propagatesEx2203() {
 
 #[test]
 fn request_halt_four_hundred_nineteen_consecutive_runs_without_reset_still_blockedEx2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -78837,7 +77677,6 @@ fn subshell_end_exit_code_2205_propagatesEx2203() {
 
 #[test]
 fn request_halt_four_hundred_twenty_consecutive_runs_without_reset_still_blockedEx2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -78997,7 +77836,6 @@ fn subshell_end_exit_code_2210_propagatesEx2203() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -79041,7 +77879,6 @@ fn subshell_end_exit_code_2211_propagatesEx2203() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2212Ex2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -79074,7 +77911,6 @@ fn subshell_end_exit_code_2212_propagatesEx2203() {
 
 #[test]
 fn subshell_seventy_one_begins_sixty_nine_ends_last_end_status_winsEx2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -79123,7 +77959,6 @@ fn subshell_end_exit_code_2213_propagatesEx2203() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2214Ex2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -79188,7 +78023,6 @@ fn subshell_end_exit_code_2215_propagatesEx2203() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2216Ex2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -79253,7 +78087,6 @@ fn subshell_end_exit_code_2217_propagatesEx2203() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2218Ex2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -79292,7 +78125,6 @@ fn subshell_end_exit_code_2218_propagatesEx2203() {
 
 #[test]
 fn request_halt_four_hundred_twenty_one_consecutive_runs_without_reset_still_blockedEx2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -79398,7 +78230,6 @@ fn subshell_end_exit_code_2221_propagatesEx2203() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2222Ex2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -79528,7 +78359,6 @@ fn subshell_end_exit_code_2225_propagatesEx2203() {
 
 #[test]
 fn request_halt_four_hundred_twenty_two_consecutive_runs_without_reset_still_blockedEx2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -79742,7 +78572,6 @@ fn subshell_end_exit_code_2231_propagatesEx2203() {
 
 #[test]
 fn request_halt_four_hundred_twenty_three_consecutive_runs_without_reset_still_blockedEx2203() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -79830,7 +78659,6 @@ fn subshell_end_exit_code_2234_propagatesEx2234() {
 
 #[test]
 fn request_halt_four_hundred_twenty_four_consecutive_runs_without_reset_still_blockedEx2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -79860,7 +78688,6 @@ fn subshell_end_exit_code_2235_propagatesEx2234() {
 
 #[test]
 fn request_halt_four_hundred_twenty_five_consecutive_runs_without_reset_still_blockedEx2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -79889,7 +78716,6 @@ fn subshell_end_exit_code_2236_propagatesEx2234() {
 
 #[test]
 fn request_halt_four_hundred_twenty_six_consecutive_runs_without_reset_still_blockedEx2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -80049,7 +78875,6 @@ fn subshell_end_exit_code_2241_propagatesEx2234() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -80093,7 +78918,6 @@ fn subshell_end_exit_code_2242_propagatesEx2234() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2243Ex2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -80126,7 +78950,6 @@ fn subshell_end_exit_code_2243_propagatesEx2234() {
 
 #[test]
 fn subshell_seventy_two_begins_seventy_ends_last_end_status_winsEx2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -80175,7 +78998,6 @@ fn subshell_end_exit_code_2244_propagatesEx2234() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2245Ex2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -80250,7 +79072,6 @@ fn subshell_end_exit_code_2246_propagatesEx2234() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2247Ex2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -80315,7 +79136,6 @@ fn subshell_end_exit_code_2248_propagatesEx2234() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2249Ex2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -80349,7 +79169,6 @@ fn subshell_end_exit_code_2249_propagatesEx2234() {
 
 #[test]
 fn request_halt_four_hundred_twenty_seven_consecutive_runs_without_reset_still_blockedEx2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -80378,7 +79197,6 @@ fn subshell_end_exit_code_2250_propagatesEx2234() {
 
 #[test]
 fn request_halt_four_hundred_twenty_eight_consecutive_runs_without_reset_still_blockedEx2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -80608,7 +79426,6 @@ fn subshell_end_exit_code_2257_propagatesEx2234() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2258Ex2234() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -80656,7 +79473,6 @@ fn subshell_end_exit_code_2259_propagatesEx2259() {
 
 #[test]
 fn request_halt_four_hundred_twenty_nine_consecutive_runs_without_reset_still_blockedEx2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -80686,7 +79502,6 @@ fn subshell_end_exit_code_2260_propagatesEx2259() {
 
 #[test]
 fn request_halt_four_hundred_thirty_consecutive_runs_without_reset_still_blockedEx2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -80715,7 +79530,6 @@ fn subshell_end_exit_code_2261_propagatesEx2259() {
 
 #[test]
 fn request_halt_four_hundred_thirty_one_consecutive_runs_without_reset_still_blockedEx2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -80875,7 +79689,6 @@ fn subshell_end_exit_code_2266_propagatesEx2259() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -80919,7 +79732,6 @@ fn subshell_end_exit_code_2267_propagatesEx2259() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2268Ex2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -80952,7 +79764,6 @@ fn subshell_end_exit_code_2268_propagatesEx2259() {
 
 #[test]
 fn subshell_seventy_three_begins_seventy_one_ends_last_end_status_winsEx2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -81001,7 +79812,6 @@ fn subshell_end_exit_code_2269_propagatesEx2259() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2270Ex2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -81066,7 +79876,6 @@ fn subshell_end_exit_code_2271_propagatesEx2259() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2272Ex2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -81131,7 +79940,6 @@ fn subshell_end_exit_code_2273_propagatesEx2259() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2274Ex2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -81170,7 +79978,6 @@ fn subshell_end_exit_code_2274_propagatesEx2259() {
 
 #[test]
 fn request_halt_four_hundred_thirty_two_consecutive_runs_without_reset_still_blockedEx2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -81276,7 +80083,6 @@ fn subshell_end_exit_code_2277_propagatesEx2259() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2278Ex2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -81406,7 +80212,6 @@ fn subshell_end_exit_code_2281_propagatesEx2259() {
 
 #[test]
 fn request_halt_four_hundred_thirty_three_consecutive_runs_without_reset_still_blockedEx2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -81620,7 +80425,6 @@ fn subshell_end_exit_code_2287_propagatesEx2259() {
 
 #[test]
 fn request_halt_four_hundred_thirty_four_consecutive_runs_without_reset_still_blockedEx2259() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -81708,7 +80512,6 @@ fn subshell_end_exit_code_2290_propagatesEx2290() {
 
 #[test]
 fn request_halt_four_hundred_thirty_five_consecutive_runs_without_reset_still_blockedEx2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -81738,7 +80541,6 @@ fn subshell_end_exit_code_2291_propagatesEx2290() {
 
 #[test]
 fn request_halt_four_hundred_thirty_six_consecutive_runs_without_reset_still_blockedEx2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -81767,7 +80569,6 @@ fn subshell_end_exit_code_2292_propagatesEx2290() {
 
 #[test]
 fn request_halt_four_hundred_thirty_seven_consecutive_runs_without_reset_still_blockedEx2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -81927,7 +80728,6 @@ fn subshell_end_exit_code_2297_propagatesEx2290() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -81971,7 +80771,6 @@ fn subshell_end_exit_code_2298_propagatesEx2290() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2299Ex2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -82004,7 +80803,6 @@ fn subshell_end_exit_code_2299_propagatesEx2290() {
 
 #[test]
 fn subshell_seventy_four_begins_seventy_two_ends_last_end_status_winsEx2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -82053,7 +80851,6 @@ fn subshell_end_exit_code_2300_propagatesEx2290() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2301Ex2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -82128,7 +80925,6 @@ fn subshell_end_exit_code_2302_propagatesEx2290() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2303Ex2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -82193,7 +80989,6 @@ fn subshell_end_exit_code_2304_propagatesEx2290() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2305Ex2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -82227,7 +81022,6 @@ fn subshell_end_exit_code_2305_propagatesEx2290() {
 
 #[test]
 fn request_halt_four_hundred_thirty_eight_consecutive_runs_without_reset_still_blockedEx2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -82256,7 +81050,6 @@ fn subshell_end_exit_code_2306_propagatesEx2290() {
 
 #[test]
 fn request_halt_four_hundred_thirty_nine_consecutive_runs_without_reset_still_blockedEx2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -82486,7 +81279,6 @@ fn subshell_end_exit_code_2313_propagatesEx2290() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2314Ex2290() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -82534,7 +81326,6 @@ fn subshell_end_exit_code_2315_propagatesEx2315() {
 
 #[test]
 fn request_halt_four_hundred_forty_consecutive_runs_without_reset_still_blockedEx2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -82564,7 +81355,6 @@ fn subshell_end_exit_code_2316_propagatesEx2315() {
 
 #[test]
 fn request_halt_four_hundred_forty_one_consecutive_runs_without_reset_still_blockedEx2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -82593,7 +81383,6 @@ fn subshell_end_exit_code_2317_propagatesEx2315() {
 
 #[test]
 fn request_halt_four_hundred_forty_two_consecutive_runs_without_reset_still_blockedEx2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -82753,7 +81542,6 @@ fn subshell_end_exit_code_2322_propagatesEx2315() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -82797,7 +81585,6 @@ fn subshell_end_exit_code_2323_propagatesEx2315() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2324Ex2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -82830,7 +81617,6 @@ fn subshell_end_exit_code_2324_propagatesEx2315() {
 
 #[test]
 fn subshell_seventy_five_begins_seventy_three_ends_last_end_status_winsEx2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -82879,7 +81665,6 @@ fn subshell_end_exit_code_2325_propagatesEx2315() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2326Ex2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -82944,7 +81729,6 @@ fn subshell_end_exit_code_2327_propagatesEx2315() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2328Ex2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -83009,7 +81793,6 @@ fn subshell_end_exit_code_2329_propagatesEx2315() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2330Ex2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -83048,7 +81831,6 @@ fn subshell_end_exit_code_2330_propagatesEx2315() {
 
 #[test]
 fn request_halt_four_hundred_forty_three_consecutive_runs_without_reset_still_blockedEx2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -83154,7 +81936,6 @@ fn subshell_end_exit_code_2333_propagatesEx2315() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2334Ex2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -83284,7 +82065,6 @@ fn subshell_end_exit_code_2337_propagatesEx2315() {
 
 #[test]
 fn request_halt_four_hundred_forty_four_consecutive_runs_without_reset_still_blockedEx2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -83498,7 +82278,6 @@ fn subshell_end_exit_code_2343_propagatesEx2315() {
 
 #[test]
 fn request_halt_four_hundred_forty_five_consecutive_runs_without_reset_still_blockedEx2315() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -83586,7 +82365,6 @@ fn subshell_end_exit_code_2346_propagatesEx2346() {
 
 #[test]
 fn request_halt_four_hundred_forty_six_consecutive_runs_without_reset_still_blockedEx2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -83616,7 +82394,6 @@ fn subshell_end_exit_code_2347_propagatesEx2346() {
 
 #[test]
 fn request_halt_four_hundred_forty_seven_consecutive_runs_without_reset_still_blockedEx2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -83645,7 +82422,6 @@ fn subshell_end_exit_code_2348_propagatesEx2346() {
 
 #[test]
 fn request_halt_four_hundred_forty_eight_consecutive_runs_without_reset_still_blockedEx2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -83805,7 +82581,6 @@ fn subshell_end_exit_code_2353_propagatesEx2346() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -83849,7 +82624,6 @@ fn subshell_end_exit_code_2354_propagatesEx2346() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2355Ex2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -83882,7 +82656,6 @@ fn subshell_end_exit_code_2355_propagatesEx2346() {
 
 #[test]
 fn subshell_seventy_six_begins_seventy_four_ends_last_end_status_winsEx2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -83931,7 +82704,6 @@ fn subshell_end_exit_code_2356_propagatesEx2346() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2357Ex2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -84006,7 +82778,6 @@ fn subshell_end_exit_code_2358_propagatesEx2346() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2359Ex2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -84071,7 +82842,6 @@ fn subshell_end_exit_code_2360_propagatesEx2346() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2361Ex2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -84105,7 +82875,6 @@ fn subshell_end_exit_code_2361_propagatesEx2346() {
 
 #[test]
 fn request_halt_four_hundred_forty_nine_consecutive_runs_without_reset_still_blockedEx2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -84134,7 +82903,6 @@ fn subshell_end_exit_code_2362_propagatesEx2346() {
 
 #[test]
 fn request_halt_four_hundred_fifty_consecutive_runs_without_reset_still_blockedEx2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -84364,7 +83132,6 @@ fn subshell_end_exit_code_2369_propagatesEx2346() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2370Ex2346() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -84412,7 +83179,6 @@ fn subshell_end_exit_code_2371_propagatesEx2371() {
 
 #[test]
 fn request_halt_four_hundred_fifty_one_consecutive_runs_without_reset_still_blockedEx2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -84442,7 +83208,6 @@ fn subshell_end_exit_code_2372_propagatesEx2371() {
 
 #[test]
 fn request_halt_four_hundred_fifty_two_consecutive_runs_without_reset_still_blockedEx2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -84471,7 +83236,6 @@ fn subshell_end_exit_code_2373_propagatesEx2371() {
 
 #[test]
 fn request_halt_four_hundred_fifty_three_consecutive_runs_without_reset_still_blockedEx2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -84631,7 +83395,6 @@ fn subshell_end_exit_code_2378_propagatesEx2371() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -84675,7 +83438,6 @@ fn subshell_end_exit_code_2379_propagatesEx2371() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2380Ex2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -84708,7 +83470,6 @@ fn subshell_end_exit_code_2380_propagatesEx2371() {
 
 #[test]
 fn subshell_seventy_seven_begins_seventy_five_ends_last_end_status_winsEx2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -84757,7 +83518,6 @@ fn subshell_end_exit_code_2381_propagatesEx2371() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2382Ex2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -84822,7 +83582,6 @@ fn subshell_end_exit_code_2383_propagatesEx2371() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2384Ex2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -84887,7 +83646,6 @@ fn subshell_end_exit_code_2385_propagatesEx2371() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2386Ex2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -84926,7 +83684,6 @@ fn subshell_end_exit_code_2386_propagatesEx2371() {
 
 #[test]
 fn request_halt_four_hundred_fifty_four_consecutive_runs_without_reset_still_blockedEx2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -85032,7 +83789,6 @@ fn subshell_end_exit_code_2389_propagatesEx2371() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2390Ex2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -85162,7 +83918,6 @@ fn subshell_end_exit_code_2393_propagatesEx2371() {
 
 #[test]
 fn request_halt_four_hundred_fifty_five_consecutive_runs_without_reset_still_blockedEx2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -85376,7 +84131,6 @@ fn subshell_end_exit_code_2399_propagatesEx2371() {
 
 #[test]
 fn request_halt_four_hundred_fifty_six_consecutive_runs_without_reset_still_blockedEx2371() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -85464,7 +84218,6 @@ fn subshell_end_exit_code_2402_propagatesEx2402() {
 
 #[test]
 fn request_halt_four_hundred_fifty_seven_consecutive_runs_without_reset_still_blockedEx2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -85494,7 +84247,6 @@ fn subshell_end_exit_code_2403_propagatesEx2402() {
 
 #[test]
 fn request_halt_four_hundred_fifty_eight_consecutive_runs_without_reset_still_blockedEx2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -85523,7 +84275,6 @@ fn subshell_end_exit_code_2404_propagatesEx2402() {
 
 #[test]
 fn request_halt_four_hundred_fifty_nine_consecutive_runs_without_reset_still_blockedEx2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -85683,7 +84434,6 @@ fn subshell_end_exit_code_2409_propagatesEx2402() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -85727,7 +84477,6 @@ fn subshell_end_exit_code_2410_propagatesEx2402() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2411Ex2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -85760,7 +84509,6 @@ fn subshell_end_exit_code_2411_propagatesEx2402() {
 
 #[test]
 fn subshell_seventy_eight_begins_seventy_six_ends_last_end_status_winsEx2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -85809,7 +84557,6 @@ fn subshell_end_exit_code_2412_propagatesEx2402() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2413Ex2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -85884,7 +84631,6 @@ fn subshell_end_exit_code_2414_propagatesEx2402() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2415Ex2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -85949,7 +84695,6 @@ fn subshell_end_exit_code_2416_propagatesEx2402() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2417Ex2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -85983,7 +84728,6 @@ fn subshell_end_exit_code_2417_propagatesEx2402() {
 
 #[test]
 fn request_halt_four_hundred_sixty_consecutive_runs_without_reset_still_blockedEx2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -86012,7 +84756,6 @@ fn subshell_end_exit_code_2418_propagatesEx2402() {
 
 #[test]
 fn request_halt_four_hundred_sixty_one_consecutive_runs_without_reset_still_blockedEx2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -86242,7 +84985,6 @@ fn subshell_end_exit_code_2425_propagatesEx2402() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2426Ex2402() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -86290,7 +85032,6 @@ fn subshell_end_exit_code_2427_propagatesEx2427() {
 
 #[test]
 fn request_halt_four_hundred_sixty_two_consecutive_runs_without_reset_still_blockedEx2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -86320,7 +85061,6 @@ fn subshell_end_exit_code_2428_propagatesEx2427() {
 
 #[test]
 fn request_halt_four_hundred_sixty_three_consecutive_runs_without_reset_still_blockedEx2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -86349,7 +85089,6 @@ fn subshell_end_exit_code_2429_propagatesEx2427() {
 
 #[test]
 fn request_halt_four_hundred_sixty_four_consecutive_runs_without_reset_still_blockedEx2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -86509,7 +85248,6 @@ fn subshell_end_exit_code_2434_propagatesEx2427() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -86553,7 +85291,6 @@ fn subshell_end_exit_code_2435_propagatesEx2427() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2436Ex2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -86586,7 +85323,6 @@ fn subshell_end_exit_code_2436_propagatesEx2427() {
 
 #[test]
 fn subshell_seventy_nine_begins_seventy_seven_ends_last_end_status_winsEx2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -86635,7 +85371,6 @@ fn subshell_end_exit_code_2437_propagatesEx2427() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2438Ex2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -86700,7 +85435,6 @@ fn subshell_end_exit_code_2439_propagatesEx2427() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2440Ex2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -86765,7 +85499,6 @@ fn subshell_end_exit_code_2441_propagatesEx2427() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2442Ex2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -86804,7 +85537,6 @@ fn subshell_end_exit_code_2442_propagatesEx2427() {
 
 #[test]
 fn request_halt_four_hundred_sixty_five_consecutive_runs_without_reset_still_blockedEx2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -86910,7 +85642,6 @@ fn subshell_end_exit_code_2445_propagatesEx2427() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2446Ex2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -87040,7 +85771,6 @@ fn subshell_end_exit_code_2449_propagatesEx2427() {
 
 #[test]
 fn request_halt_four_hundred_sixty_six_consecutive_runs_without_reset_still_blockedEx2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -87254,7 +85984,6 @@ fn subshell_end_exit_code_2455_propagatesEx2427() {
 
 #[test]
 fn request_halt_four_hundred_sixty_seven_consecutive_runs_without_reset_still_blockedEx2427() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -87342,7 +86071,6 @@ fn subshell_end_exit_code_2458_propagatesEx2458() {
 
 #[test]
 fn request_halt_four_hundred_sixty_eight_consecutive_runs_without_reset_still_blockedEx2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -87372,7 +86100,6 @@ fn subshell_end_exit_code_2459_propagatesEx2458() {
 
 #[test]
 fn request_halt_four_hundred_sixty_nine_consecutive_runs_without_reset_still_blockedEx2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -87401,7 +86128,6 @@ fn subshell_end_exit_code_2460_propagatesEx2458() {
 
 #[test]
 fn request_halt_four_hundred_seventy_consecutive_runs_without_reset_still_blockedEx2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -87561,7 +86287,6 @@ fn subshell_end_exit_code_2465_propagatesEx2458() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -87605,7 +86330,6 @@ fn subshell_end_exit_code_2466_propagatesEx2458() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2467Ex2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -87638,7 +86362,6 @@ fn subshell_end_exit_code_2467_propagatesEx2458() {
 
 #[test]
 fn subshell_eighty_begins_seventy_eight_ends_last_end_status_winsEx2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -87687,7 +86410,6 @@ fn subshell_end_exit_code_2468_propagatesEx2458() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2469Ex2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -87762,7 +86484,6 @@ fn subshell_end_exit_code_2470_propagatesEx2458() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2471Ex2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -87827,7 +86548,6 @@ fn subshell_end_exit_code_2472_propagatesEx2458() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2473Ex2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -87861,7 +86581,6 @@ fn subshell_end_exit_code_2473_propagatesEx2458() {
 
 #[test]
 fn request_halt_four_hundred_seventy_one_consecutive_runs_without_reset_still_blockedEx2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -87890,7 +86609,6 @@ fn subshell_end_exit_code_2474_propagatesEx2458() {
 
 #[test]
 fn request_halt_four_hundred_seventy_two_consecutive_runs_without_reset_still_blockedEx2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -88120,7 +86838,6 @@ fn subshell_end_exit_code_2481_propagatesEx2458() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2482Ex2458() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -88168,7 +86885,6 @@ fn subshell_end_exit_code_2483_propagatesEx2483() {
 
 #[test]
 fn request_halt_four_hundred_seventy_three_consecutive_runs_without_reset_still_blockedEx2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -88198,7 +86914,6 @@ fn subshell_end_exit_code_2484_propagatesEx2483() {
 
 #[test]
 fn request_halt_four_hundred_seventy_four_consecutive_runs_without_reset_still_blockedEx2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -88227,7 +86942,6 @@ fn subshell_end_exit_code_2485_propagatesEx2483() {
 
 #[test]
 fn request_halt_four_hundred_seventy_five_consecutive_runs_without_reset_still_blockedEx2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -88387,7 +87101,6 @@ fn subshell_end_exit_code_2490_propagatesEx2483() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -88431,7 +87144,6 @@ fn subshell_end_exit_code_2491_propagatesEx2483() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2492Ex2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -88464,7 +87176,6 @@ fn subshell_end_exit_code_2492_propagatesEx2483() {
 
 #[test]
 fn subshell_eighty_one_begins_seventy_nine_ends_last_end_status_winsEx2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -88513,7 +87224,6 @@ fn subshell_end_exit_code_2493_propagatesEx2483() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2494Ex2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -88578,7 +87288,6 @@ fn subshell_end_exit_code_2495_propagatesEx2483() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2496Ex2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -88643,7 +87352,6 @@ fn subshell_end_exit_code_2497_propagatesEx2483() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2498Ex2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -88682,7 +87390,6 @@ fn subshell_end_exit_code_2498_propagatesEx2483() {
 
 #[test]
 fn request_halt_four_hundred_seventy_six_consecutive_runs_without_reset_still_blockedEx2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -88788,7 +87495,6 @@ fn subshell_end_exit_code_2501_propagatesEx2483() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2502Ex2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -88918,7 +87624,6 @@ fn subshell_end_exit_code_2505_propagatesEx2483() {
 
 #[test]
 fn request_halt_four_hundred_seventy_seven_consecutive_runs_without_reset_still_blockedEx2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -89132,7 +87837,6 @@ fn subshell_end_exit_code_2511_propagatesEx2483() {
 
 #[test]
 fn request_halt_four_hundred_seventy_eight_consecutive_runs_without_reset_still_blockedEx2483() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -89220,7 +87924,6 @@ fn subshell_end_exit_code_2514_propagatesEx2514() {
 
 #[test]
 fn request_halt_four_hundred_seventy_nine_consecutive_runs_without_reset_still_blockedEx2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -89250,7 +87953,6 @@ fn subshell_end_exit_code_2515_propagatesEx2514() {
 
 #[test]
 fn request_halt_four_hundred_eighty_consecutive_runs_without_reset_still_blockedEx2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -89279,7 +87981,6 @@ fn subshell_end_exit_code_2516_propagatesEx2514() {
 
 #[test]
 fn request_halt_four_hundred_eighty_one_consecutive_runs_without_reset_still_blockedEx2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -89439,7 +88140,6 @@ fn subshell_end_exit_code_2521_propagatesEx2514() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -89483,7 +88183,6 @@ fn subshell_end_exit_code_2522_propagatesEx2514() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2523Ex2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -89516,7 +88215,6 @@ fn subshell_end_exit_code_2523_propagatesEx2514() {
 
 #[test]
 fn subshell_eighty_two_begins_eighty_ends_last_end_status_winsEx2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -89565,7 +88263,6 @@ fn subshell_end_exit_code_2524_propagatesEx2514() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2525Ex2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -89640,7 +88337,6 @@ fn subshell_end_exit_code_2526_propagatesEx2514() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2527Ex2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -89705,7 +88401,6 @@ fn subshell_end_exit_code_2528_propagatesEx2514() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2529Ex2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -89739,7 +88434,6 @@ fn subshell_end_exit_code_2529_propagatesEx2514() {
 
 #[test]
 fn request_halt_four_hundred_eighty_two_consecutive_runs_without_reset_still_blockedEx2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -89768,7 +88462,6 @@ fn subshell_end_exit_code_2530_propagatesEx2514() {
 
 #[test]
 fn request_halt_four_hundred_eighty_three_consecutive_runs_without_reset_still_blockedEx2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -89998,7 +88691,6 @@ fn subshell_end_exit_code_2537_propagatesEx2514() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2538Ex2514() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -90046,7 +88738,6 @@ fn subshell_end_exit_code_2539_propagatesEx2539() {
 
 #[test]
 fn request_halt_four_hundred_eighty_four_consecutive_runs_without_reset_still_blockedEx2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -90076,7 +88767,6 @@ fn subshell_end_exit_code_2540_propagatesEx2539() {
 
 #[test]
 fn request_halt_four_hundred_eighty_five_consecutive_runs_without_reset_still_blockedEx2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -90105,7 +88795,6 @@ fn subshell_end_exit_code_2541_propagatesEx2539() {
 
 #[test]
 fn request_halt_four_hundred_eighty_six_consecutive_runs_without_reset_still_blockedEx2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -90265,7 +88954,6 @@ fn subshell_end_exit_code_2546_propagatesEx2539() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -90309,7 +88997,6 @@ fn subshell_end_exit_code_2547_propagatesEx2539() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2548Ex2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -90342,7 +89029,6 @@ fn subshell_end_exit_code_2548_propagatesEx2539() {
 
 #[test]
 fn subshell_eighty_three_begins_eighty_one_ends_last_end_status_winsEx2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -90391,7 +89077,6 @@ fn subshell_end_exit_code_2549_propagatesEx2539() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2550Ex2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -90456,7 +89141,6 @@ fn subshell_end_exit_code_2551_propagatesEx2539() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2552Ex2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -90521,7 +89205,6 @@ fn subshell_end_exit_code_2553_propagatesEx2539() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2554Ex2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -90560,7 +89243,6 @@ fn subshell_end_exit_code_2554_propagatesEx2539() {
 
 #[test]
 fn request_halt_four_hundred_eighty_seven_consecutive_runs_without_reset_still_blockedEx2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -90666,7 +89348,6 @@ fn subshell_end_exit_code_2557_propagatesEx2539() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2558Ex2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -90796,7 +89477,6 @@ fn subshell_end_exit_code_2561_propagatesEx2539() {
 
 #[test]
 fn request_halt_four_hundred_eighty_eight_consecutive_runs_without_reset_still_blockedEx2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91010,7 +89690,6 @@ fn subshell_end_exit_code_2567_propagatesEx2539() {
 
 #[test]
 fn request_halt_four_hundred_eighty_nine_consecutive_runs_without_reset_still_blockedEx2539() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91098,7 +89777,6 @@ fn subshell_end_exit_code_2570_propagatesEx2570() {
 
 #[test]
 fn request_halt_four_hundred_ninety_consecutive_runs_without_reset_still_blockedEx2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91128,7 +89806,6 @@ fn subshell_end_exit_code_2571_propagatesEx2570() {
 
 #[test]
 fn request_halt_four_hundred_ninety_one_consecutive_runs_without_reset_still_blockedEx2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91157,7 +89834,6 @@ fn subshell_end_exit_code_2572_propagatesEx2570() {
 
 #[test]
 fn request_halt_four_hundred_ninety_two_consecutive_runs_without_reset_still_blockedEx2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91317,7 +89993,6 @@ fn subshell_end_exit_code_2577_propagatesEx2570() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -91361,7 +90036,6 @@ fn subshell_end_exit_code_2578_propagatesEx2570() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2579Ex2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -91394,7 +90068,6 @@ fn subshell_end_exit_code_2579_propagatesEx2570() {
 
 #[test]
 fn subshell_eighty_four_begins_eighty_two_ends_last_end_status_winsEx2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -91443,7 +90116,6 @@ fn subshell_end_exit_code_2580_propagatesEx2570() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2581Ex2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -91518,7 +90190,6 @@ fn subshell_end_exit_code_2582_propagatesEx2570() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2583Ex2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -91583,7 +90254,6 @@ fn subshell_end_exit_code_2584_propagatesEx2570() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2585Ex2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -91617,7 +90287,6 @@ fn subshell_end_exit_code_2585_propagatesEx2570() {
 
 #[test]
 fn request_halt_four_hundred_ninety_three_consecutive_runs_without_reset_still_blockedEx2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91646,7 +90315,6 @@ fn subshell_end_exit_code_2586_propagatesEx2570() {
 
 #[test]
 fn request_halt_four_hundred_ninety_four_consecutive_runs_without_reset_still_blockedEx2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91876,7 +90544,6 @@ fn subshell_end_exit_code_2593_propagatesEx2570() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2594Ex2570() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -91924,7 +90591,6 @@ fn subshell_end_exit_code_2595_propagatesEx2595() {
 
 #[test]
 fn request_halt_four_hundred_ninety_five_consecutive_runs_without_reset_still_blockedEx2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91954,7 +90620,6 @@ fn subshell_end_exit_code_2596_propagatesEx2595() {
 
 #[test]
 fn request_halt_four_hundred_ninety_six_consecutive_runs_without_reset_still_blockedEx2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -91983,7 +90648,6 @@ fn subshell_end_exit_code_2597_propagatesEx2595() {
 
 #[test]
 fn request_halt_four_hundred_ninety_seven_consecutive_runs_without_reset_still_blockedEx2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -92143,7 +90807,6 @@ fn subshell_end_exit_code_2602_propagatesEx2595() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -92187,7 +90850,6 @@ fn subshell_end_exit_code_2603_propagatesEx2595() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2604Ex2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -92220,7 +90882,6 @@ fn subshell_end_exit_code_2604_propagatesEx2595() {
 
 #[test]
 fn subshell_eighty_five_begins_eighty_three_ends_last_end_status_winsEx2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -92269,7 +90930,6 @@ fn subshell_end_exit_code_2605_propagatesEx2595() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2606Ex2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -92334,7 +90994,6 @@ fn subshell_end_exit_code_2607_propagatesEx2595() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2608Ex2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -92399,7 +91058,6 @@ fn subshell_end_exit_code_2609_propagatesEx2595() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2610Ex2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -92438,7 +91096,6 @@ fn subshell_end_exit_code_2610_propagatesEx2595() {
 
 #[test]
 fn request_halt_four_hundred_ninety_eight_consecutive_runs_without_reset_still_blockedEx2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -92544,7 +91201,6 @@ fn subshell_end_exit_code_2613_propagatesEx2595() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2614Ex2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -92674,7 +91330,6 @@ fn subshell_end_exit_code_2617_propagatesEx2595() {
 
 #[test]
 fn request_halt_four_hundred_ninety_nine_consecutive_runs_without_reset_still_blockedEx2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -92888,7 +91543,6 @@ fn subshell_end_exit_code_2623_propagatesEx2595() {
 
 #[test]
 fn request_halt_five_hundred_consecutive_runs_without_reset_still_blockedEx2595() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -92976,7 +91630,6 @@ fn subshell_end_exit_code_2626_propagatesEx2626() {
 
 #[test]
 fn request_halt_five_hundred_one_consecutive_runs_without_reset_still_blockedEx2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -93006,7 +91659,6 @@ fn subshell_end_exit_code_2627_propagatesEx2626() {
 
 #[test]
 fn request_halt_five_hundred_two_consecutive_runs_without_reset_still_blockedEx2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -93035,7 +91687,6 @@ fn subshell_end_exit_code_2628_propagatesEx2626() {
 
 #[test]
 fn request_halt_five_hundred_three_consecutive_runs_without_reset_still_blockedEx2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -93195,7 +91846,6 @@ fn subshell_end_exit_code_2633_propagatesEx2626() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -93239,7 +91889,6 @@ fn subshell_end_exit_code_2634_propagatesEx2626() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2635Ex2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -93272,7 +91921,6 @@ fn subshell_end_exit_code_2635_propagatesEx2626() {
 
 #[test]
 fn subshell_eighty_six_begins_eighty_four_ends_last_end_status_winsEx2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -93321,7 +91969,6 @@ fn subshell_end_exit_code_2636_propagatesEx2626() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2637Ex2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -93396,7 +92043,6 @@ fn subshell_end_exit_code_2638_propagatesEx2626() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2639Ex2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -93461,7 +92107,6 @@ fn subshell_end_exit_code_2640_propagatesEx2626() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2641Ex2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -93495,7 +92140,6 @@ fn subshell_end_exit_code_2641_propagatesEx2626() {
 
 #[test]
 fn request_halt_five_hundred_four_consecutive_runs_without_reset_still_blockedEx2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -93524,7 +92168,6 @@ fn subshell_end_exit_code_2642_propagatesEx2626() {
 
 #[test]
 fn request_halt_five_hundred_five_consecutive_runs_without_reset_still_blockedEx2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -93754,7 +92397,6 @@ fn subshell_end_exit_code_2649_propagatesEx2626() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2650Ex2626() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -93802,7 +92444,6 @@ fn subshell_end_exit_code_2651_propagatesEx2651() {
 
 #[test]
 fn request_halt_five_hundred_six_consecutive_runs_without_reset_still_blockedEx2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -93832,7 +92473,6 @@ fn subshell_end_exit_code_2652_propagatesEx2651() {
 
 #[test]
 fn request_halt_five_hundred_seven_consecutive_runs_without_reset_still_blockedEx2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -93861,7 +92501,6 @@ fn subshell_end_exit_code_2653_propagatesEx2651() {
 
 #[test]
 fn request_halt_five_hundred_eight_consecutive_runs_without_reset_still_blockedEx2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -94021,7 +92660,6 @@ fn subshell_end_exit_code_2658_propagatesEx2651() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -94065,7 +92703,6 @@ fn subshell_end_exit_code_2659_propagatesEx2651() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2660Ex2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -94098,7 +92735,6 @@ fn subshell_end_exit_code_2660_propagatesEx2651() {
 
 #[test]
 fn subshell_eighty_seven_begins_eighty_five_ends_last_end_status_winsEx2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -94147,7 +92783,6 @@ fn subshell_end_exit_code_2661_propagatesEx2651() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2662Ex2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -94212,7 +92847,6 @@ fn subshell_end_exit_code_2663_propagatesEx2651() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2664Ex2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -94277,7 +92911,6 @@ fn subshell_end_exit_code_2665_propagatesEx2651() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2666Ex2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -94316,7 +92949,6 @@ fn subshell_end_exit_code_2666_propagatesEx2651() {
 
 #[test]
 fn request_halt_five_hundred_nine_consecutive_runs_without_reset_still_blockedEx2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -94422,7 +93054,6 @@ fn subshell_end_exit_code_2669_propagatesEx2651() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2670Ex2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -94552,7 +93183,6 @@ fn subshell_end_exit_code_2673_propagatesEx2651() {
 
 #[test]
 fn request_halt_five_hundred_ten_consecutive_runs_without_reset_still_blockedEx2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -94766,7 +93396,6 @@ fn subshell_end_exit_code_2679_propagatesEx2651() {
 
 #[test]
 fn request_halt_five_hundred_eleven_consecutive_runs_without_reset_still_blockedEx2651() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -94854,7 +93483,6 @@ fn subshell_end_exit_code_2682_propagatesEx2682() {
 
 #[test]
 fn request_halt_five_hundred_twelve_consecutive_runs_without_reset_still_blockedEx2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -94884,7 +93512,6 @@ fn subshell_end_exit_code_2683_propagatesEx2682() {
 
 #[test]
 fn request_halt_five_hundred_thirteen_consecutive_runs_without_reset_still_blockedEx2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -94913,7 +93540,6 @@ fn subshell_end_exit_code_2684_propagatesEx2682() {
 
 #[test]
 fn request_halt_five_hundred_fourteen_consecutive_runs_without_reset_still_blockedEx2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -95073,7 +93699,6 @@ fn subshell_end_exit_code_2689_propagatesEx2682() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -95117,7 +93742,6 @@ fn subshell_end_exit_code_2690_propagatesEx2682() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2691Ex2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -95150,7 +93774,6 @@ fn subshell_end_exit_code_2691_propagatesEx2682() {
 
 #[test]
 fn subshell_eighty_eight_begins_eighty_six_ends_last_end_status_winsEx2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -95199,7 +93822,6 @@ fn subshell_end_exit_code_2692_propagatesEx2682() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2693Ex2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -95274,7 +93896,6 @@ fn subshell_end_exit_code_2694_propagatesEx2682() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2695Ex2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -95339,7 +93960,6 @@ fn subshell_end_exit_code_2696_propagatesEx2682() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2697Ex2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -95373,7 +93993,6 @@ fn subshell_end_exit_code_2697_propagatesEx2682() {
 
 #[test]
 fn request_halt_five_hundred_fifteen_consecutive_runs_without_reset_still_blockedEx2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -95402,7 +94021,6 @@ fn subshell_end_exit_code_2698_propagatesEx2682() {
 
 #[test]
 fn request_halt_five_hundred_sixteen_consecutive_runs_without_reset_still_blockedEx2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -95632,7 +94250,6 @@ fn subshell_end_exit_code_2705_propagatesEx2682() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2706Ex2682() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -95680,7 +94297,6 @@ fn subshell_end_exit_code_2707_propagatesEx2707() {
 
 #[test]
 fn request_halt_five_hundred_seventeen_consecutive_runs_without_reset_still_blockedEx2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -95710,7 +94326,6 @@ fn subshell_end_exit_code_2708_propagatesEx2707() {
 
 #[test]
 fn request_halt_five_hundred_eighteen_consecutive_runs_without_reset_still_blockedEx2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -95739,7 +94354,6 @@ fn subshell_end_exit_code_2709_propagatesEx2707() {
 
 #[test]
 fn request_halt_five_hundred_nineteen_consecutive_runs_without_reset_still_blockedEx2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -95899,7 +94513,6 @@ fn subshell_end_exit_code_2714_propagatesEx2707() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -95943,7 +94556,6 @@ fn subshell_end_exit_code_2715_propagatesEx2707() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2716Ex2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -95976,7 +94588,6 @@ fn subshell_end_exit_code_2716_propagatesEx2707() {
 
 #[test]
 fn subshell_eighty_nine_begins_eighty_seven_ends_last_end_status_winsEx2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -96025,7 +94636,6 @@ fn subshell_end_exit_code_2717_propagatesEx2707() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2718Ex2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -96090,7 +94700,6 @@ fn subshell_end_exit_code_2719_propagatesEx2707() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2720Ex2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -96155,7 +94764,6 @@ fn subshell_end_exit_code_2721_propagatesEx2707() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2722Ex2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -96194,7 +94802,6 @@ fn subshell_end_exit_code_2722_propagatesEx2707() {
 
 #[test]
 fn request_halt_five_hundred_twenty_consecutive_runs_without_reset_still_blockedEx2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -96300,7 +94907,6 @@ fn subshell_end_exit_code_2725_propagatesEx2707() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2726Ex2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -96430,7 +95036,6 @@ fn subshell_end_exit_code_2729_propagatesEx2707() {
 
 #[test]
 fn request_halt_five_hundred_twenty_one_consecutive_runs_without_reset_still_blockedEx2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -96644,7 +95249,6 @@ fn subshell_end_exit_code_2735_propagatesEx2707() {
 
 #[test]
 fn request_halt_five_hundred_twenty_two_consecutive_runs_without_reset_still_blockedEx2707() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -96732,7 +95336,6 @@ fn subshell_end_exit_code_2738_propagatesEx2738() {
 
 #[test]
 fn request_halt_five_hundred_twenty_three_consecutive_runs_without_reset_still_blockedEx2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -96762,7 +95365,6 @@ fn subshell_end_exit_code_2739_propagatesEx2738() {
 
 #[test]
 fn request_halt_five_hundred_twenty_four_consecutive_runs_without_reset_still_blockedEx2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -96791,7 +95393,6 @@ fn subshell_end_exit_code_2740_propagatesEx2738() {
 
 #[test]
 fn request_halt_five_hundred_twenty_five_consecutive_runs_without_reset_still_blockedEx2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -96951,7 +95552,6 @@ fn subshell_end_exit_code_2745_propagatesEx2738() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_second_run_appliesEx2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -96995,7 +95595,6 @@ fn subshell_end_exit_code_2746_propagatesEx2738() {
 
 #[test]
 fn request_halt_stops_before_load_int_pair_after_subshell_end_status2747Ex2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -97028,7 +95627,6 @@ fn subshell_end_exit_code_2747_propagatesEx2738() {
 
 #[test]
 fn subshell_ninety_begins_eighty_eight_ends_last_end_status_winsEx2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -97077,7 +95675,6 @@ fn subshell_end_exit_code_2748_propagatesEx2738() {
 
 #[test]
 fn request_halt_stops_before_second_subshell_begin_after_subshell_end_status2749Ex2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -97152,7 +95749,6 @@ fn subshell_end_exit_code_2750_propagatesEx2738() {
 
 #[test]
 fn request_halt_stops_before_num_le_after_subshell_end_status2751Ex2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -97217,7 +95813,6 @@ fn subshell_end_exit_code_2752_propagatesEx2738() {
 
 #[test]
 fn request_halt_stops_before_num_ge_after_subshell_end_status2753Ex2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -97251,7 +95846,6 @@ fn subshell_end_exit_code_2753_propagatesEx2738() {
 
 #[test]
 fn request_halt_five_hundred_twenty_six_consecutive_runs_without_reset_still_blockedEx2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -97280,7 +95874,6 @@ fn subshell_end_exit_code_2754_propagatesEx2738() {
 
 #[test]
 fn request_halt_five_hundred_twenty_seven_consecutive_runs_without_reset_still_blockedEx2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -97510,7 +96103,6 @@ fn subshell_end_exit_code_2761_propagatesEx2738() {
 
 #[test]
 fn request_halt_stops_before_bit_xor_after_subshell_end_status2762Ex2738() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -97558,7 +96150,6 @@ fn subshell_end_exit_code_2763_propagatesEx2763() {
 
 #[test]
 fn request_halt_five_hundred_twenty_eight_consecutive_runs_without_reset_still_blockedEx2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -97588,7 +96179,6 @@ fn subshell_end_exit_code_2764_propagatesEx2763() {
 
 #[test]
 fn request_halt_five_hundred_twenty_nine_consecutive_runs_without_reset_still_blockedEx2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -97617,7 +96207,6 @@ fn subshell_end_exit_code_2765_propagatesEx2763() {
 
 #[test]
 fn request_halt_five_hundred_thirty_consecutive_runs_without_reset_still_blockedEx2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -97777,7 +96366,6 @@ fn subshell_end_exit_code_2770_propagatesEx2763() {
 
 #[test]
 fn subshell_halt_reset_subshell_end_twenty_third_run_appliesEx2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let sub = {
         let mut b = ChunkBuilder::new();
@@ -97821,7 +96409,6 @@ fn subshell_end_exit_code_2771_propagatesEx2763() {
 
 #[test]
 fn request_halt_stops_before_log_not_after_subshell_end_status2772Ex2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -97854,7 +96441,6 @@ fn subshell_end_exit_code_2772_propagatesEx2763() {
 
 #[test]
 fn subshell_ninety_one_begins_eighty_nine_ends_last_end_status_winsEx2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     SUBSHELL_BEGIN_CALLS.store(0, Ordering::SeqCst);
     SUBSHELL_END_CALLS.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
@@ -97903,7 +96489,6 @@ fn subshell_end_exit_code_2773_propagatesEx2763() {
 
 #[test]
 fn request_halt_stops_before_negate_after_subshell_end_status2774Ex2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -97968,7 +96553,6 @@ fn subshell_end_exit_code_2775_propagatesEx2763() {
 
 #[test]
 fn request_halt_stops_before_make_array_after_subshell_end_status2776Ex2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -98033,7 +96617,6 @@ fn subshell_end_exit_code_2777_propagatesEx2763() {
 
 #[test]
 fn request_halt_stops_before_concat_after_subshell_end_status2778Ex2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let chunk = {
         let mut cb = ChunkBuilder::new();
@@ -98072,7 +96655,6 @@ fn subshell_end_exit_code_2778_propagatesEx2763() {
 
 #[test]
 fn request_halt_five_hundred_thirty_one_consecutive_runs_without_reset_still_blockedEx2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -98178,7 +96760,6 @@ fn subshell_end_exit_code_2781_propagatesEx2763() {
 
 #[test]
 fn request_halt_stops_before_load_float_after_subshell_end_status2782Ex2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     AFTER_HALT_COUNT.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::SubshellEnd, 1);
@@ -98308,7 +96889,6 @@ fn subshell_end_exit_code_2785_propagatesEx2763() {
 
 #[test]
 fn request_halt_five_hundred_thirty_two_consecutive_runs_without_reset_still_blockedEx2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
@@ -98522,7 +97102,6 @@ fn subshell_end_exit_code_2791_propagatesEx2763() {
 
 #[test]
 fn request_halt_five_hundred_thirty_three_consecutive_runs_without_reset_still_blockedEx2763() {
-    let _guard = PIN_TEST_LOCK.lock().unwrap();
     TOUCHED.store(0, Ordering::SeqCst);
     let mut b = ChunkBuilder::new();
     b.emit(Op::CallBuiltin(100, 0), 1);
