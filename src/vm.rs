@@ -862,14 +862,16 @@ impl VM {
         }
     }
 
-    /// Enable the tracing JIT for this VM. After this call, hot loops
+    /// Enable native dispatch for this VM. After this call, hot loops
     /// (loops crossing the backedge threshold) will be recorded and JIT-
     /// compiled at runtime; subsequent iterations dispatch through the
-    /// compiled trace.
+    /// compiled trace. Loops the recorder cannot record or compile keep
+    /// running in the interpreter.
     ///
-    /// Phase 1 limits: only int-slot loops with a single backward branch and
-    /// no internal jumps are traceable. Loops outside that envelope continue
-    /// to run in the interpreter.
+    /// The same switch gates the block tier in [`VM::run`]: a whole
+    /// block-eligible chunk runs as native code (after
+    /// `TraceJitConfig::block_threshold` runs) only on a VM where this was
+    /// called. A VM that never calls it runs every chunk in the interpreter.
     #[cfg(feature = "jit")]
     pub fn enable_tracing_jit(&mut self) {
         self.tracing_jit = true;
@@ -1760,9 +1762,9 @@ impl VM {
         // this VM; clear any stragglers so a plain (schedulerless) run is unaffected.
         self.sched = None;
         // Phase 10: try block JIT first for fully-eligible chunks. The
-        // block-JIT cache has its own threshold (10 invocations); the
-        // call returns None until it warms up, at which point the whole
-        // chunk runs in native code.
+        // block-JIT cache has its own threshold
+        // (`TraceJitConfig::block_threshold`); the call returns None until it
+        // warms up, at which point the whole chunk runs in native code.
         //
         // VM-side eligibility cache (`block_eligible_cached`) saves the
         // TLS HashMap lookup `JitCompiler::is_block_eligible` would
