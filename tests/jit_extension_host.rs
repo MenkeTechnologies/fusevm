@@ -120,7 +120,7 @@ fn cpair(a: &str, b: &str) -> CPair {
 fn run_eq(a: &str, b: &str) -> i64 {
     setup();
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(None); // in-memory only
+    let _no_disk = jit.scope_jit_cache_dir(None); // in-memory only, this thread
     let chunk = str_op_chunk(STR_EQ);
     let mut p = cpair(a, b);
     let r = jit
@@ -132,7 +132,7 @@ fn run_eq(a: &str, b: &str) -> i64 {
 fn run_cmp(a: &str, b: &str) -> i64 {
     setup();
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(None);
+    let _no_disk = jit.scope_jit_cache_dir(None);
     let chunk = str_op_chunk(STR_CMP);
     let mut p = cpair(a, b);
     jit.try_run_block_eager(&chunk, &mut p.slots)
@@ -178,11 +178,11 @@ fn has_blk_file(dir: &PathBuf) -> bool {
 fn run_eq_with_cache(dir: &PathBuf, a: &str, b: &str) -> Option<i64> {
     setup();
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     let chunk = str_op_chunk(STR_EQ);
     let mut p = cpair(a, b);
     let r = jit.try_run_block_eager(&chunk, &mut p.slots);
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
     r
 }
 

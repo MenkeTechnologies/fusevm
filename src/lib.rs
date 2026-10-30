@@ -82,8 +82,8 @@ pub use awk_host::{AwkHost, AwkLvalue, DefaultAwkHost};
 pub use chunk::{Chunk, ChunkBuilder};
 pub use host::{DefaultHost, ShellHost};
 pub use jit::{
-    set_awk_field_num_hook, BlockNum, DeoptFrame, DeoptInfo, JitCompiler, JitExtension, NativeCode,
-    SlotKind, TraceJitConfig, TraceLookup, TraceMetadata,
+    set_awk_field_num_hook, BlockNum, DeoptFrame, DeoptInfo, JitCacheDirScope, JitCompiler,
+    JitExtension, NativeCode, SlotKind, TraceJitConfig, TraceLookup, TraceMetadata,
 };
 pub use op::Op;
 

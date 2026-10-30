@@ -4112,6 +4112,25 @@ mod cranelift_jit_impl {
 
         // ── Cache directory configuration ──
 
+        thread_local! {
+            /// Per-thread override installed by [`JitCompiler::scope_jit_cache_dir`].
+            /// `Some(Some(dir))` pins `dir` for this thread, `Some(None)` disables
+            /// the disk cache for this thread, `None` defers to the process-wide
+            /// resolution in [`cache_dir`]. Native code is compiled and persisted
+            /// on the calling thread, so the override covers every load and store
+            /// that thread performs and none that other threads perform.
+            static THREAD_DIR: std::cell::RefCell<Option<Option<PathBuf>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Install `dir` as this thread's override, returning the previous one so
+        /// the caller can restore it.
+        pub(crate) fn replace_thread_cache_dir(
+            dir: Option<Option<PathBuf>>,
+        ) -> Option<Option<PathBuf>> {
+            THREAD_DIR.with(|t| std::mem::replace(&mut *t.borrow_mut(), dir))
+        }
+
         fn cache_dir_slot() -> &'static RwLock<Option<PathBuf>> {
             static SLOT: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
             SLOT.get_or_init(|| RwLock::new(None))
@@ -4157,13 +4176,17 @@ mod cranelift_jit_impl {
         }
 
         /// The active cache directory. Resolution order:
-        /// 1. programmatic override (`set_cache_dir`),
-        /// 2. `FUSEVM_JIT_CACHE_DIR` env var (a "disabled" sentinel turns
+        /// 1. this thread's scoped override (`replace_thread_cache_dir`),
+        /// 2. programmatic process-wide override (`set_cache_dir`),
+        /// 3. `FUSEVM_JIT_CACHE_DIR` env var (a "disabled" sentinel turns
         ///    caching off, any other value is used as the directory),
-        /// 3. the default `~/.cache/fusevm-jit`.
+        /// 4. the default `~/.cache/fusevm-jit`.
         ///
         /// `None` means disk caching is disabled for this run.
         pub(crate) fn cache_dir() -> Option<PathBuf> {
+            if let Some(scoped) = THREAD_DIR.with(|t| t.borrow().clone()) {
+                return scoped;
+            }
             if let Ok(g) = cache_dir_slot().read() {
                 if let Some(p) = g.as_ref() {
                     return Some(p.clone());
@@ -9642,6 +9665,21 @@ mod cranelift_jit_impl {
 
 // ── Public API (always available) ──
 
+/// Guard returned by [`JitCompiler::scope_jit_cache_dir`]. Dropping it restores
+/// the calling thread's previous cache-directory override.
+pub struct JitCacheDirScope {
+    #[cfg(feature = "jit-disk-cache")]
+    prev: Option<Option<std::path::PathBuf>>,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for JitCacheDirScope {
+    fn drop(&mut self) {
+        #[cfg(feature = "jit-disk-cache")]
+        cranelift_jit_impl::disk_cache::replace_thread_cache_dir(self.prev.take());
+    }
+}
+
 /// JIT compiler state.
 pub struct JitCompiler {
     extensions: Vec<Box<dyn JitExtension>>,
@@ -9836,6 +9874,30 @@ impl JitCompiler {
         cranelift_jit_impl::disk_cache::set_cache_dir(dir);
     }
 
+    /// Override the on-disk JIT cache directory for the **calling thread only**,
+    /// until the returned guard is dropped (the previous per-thread setting is
+    /// then restored, so scopes nest). `Some(dir)` pins `dir`; `None` disables
+    /// disk caching on this thread. The override takes precedence over
+    /// [`set_jit_cache_dir`](Self::set_jit_cache_dir), `FUSEVM_JIT_CACHE_DIR` and
+    /// the default, and is invisible to every other thread.
+    ///
+    /// [`set_jit_cache_dir`](Self::set_jit_cache_dir) is process-wide, so two
+    /// threads that each pin a directory with it race: one thread's native code
+    /// can land in the other's directory. Native code is compiled, persisted
+    /// and loaded on the thread that runs the chunk, so a thread-scoped
+    /// directory isolates concurrent embedders (and concurrent `#[test]`s).
+    ///
+    /// The guard restores state on the thread that created it, so it is not
+    /// `Send`. Without the `jit-disk-cache` feature this is a no-op.
+    #[cfg(feature = "jit-disk-cache")]
+    #[must_use = "the override is removed when the guard is dropped"]
+    pub fn scope_jit_cache_dir(&self, dir: Option<std::path::PathBuf>) -> JitCacheDirScope {
+        JitCacheDirScope {
+            prev: cranelift_jit_impl::disk_cache::replace_thread_cache_dir(Some(dir)),
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
     /// The active on-disk JIT cache directory, or `None` if caching is
     /// disabled (`FUSEVM_JIT_CACHE_DIR=off`). Defaults to `~/.cache/fusevm-jit`.
     #[cfg(feature = "jit-disk-cache")]
@@ -9889,6 +9951,15 @@ impl JitCompiler {
     /// No-op stub when the `jit-disk-cache` feature is disabled.
     #[cfg(not(feature = "jit-disk-cache"))]
     pub fn set_jit_cache_dir(&self, _dir: Option<std::path::PathBuf>) {}
+
+    /// No-op stub when the `jit-disk-cache` feature is disabled.
+    #[cfg(not(feature = "jit-disk-cache"))]
+    #[must_use = "the override is removed when the guard is dropped"]
+    pub fn scope_jit_cache_dir(&self, _dir: Option<std::path::PathBuf>) -> JitCacheDirScope {
+        JitCacheDirScope {
+            _not_send: std::marker::PhantomData,
+        }
+    }
 
     /// Always `None` when the `jit-disk-cache` feature is disabled.
     #[cfg(not(feature = "jit-disk-cache"))]

@@ -13,8 +13,11 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fusevm::{ChunkBuilder, JitCompiler, Op, VMResult, Value, VM};
 
-/// The cache directory is a process-global override, so tests that configure it
-/// must not run concurrently. Each such test holds this lock for its duration.
+/// Serializes the tests that touch process-wide settings: the
+/// `FUSEVM_JIT_CACHE_DIR` environment variable, the process-wide
+/// `set_jit_cache_dir` override and the cache-size cap. Each test that persists
+/// native code pins its directory with `scope_jit_cache_dir`, which is private to
+/// its thread, so a concurrent compile elsewhere cannot land in it.
 fn serial() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -55,9 +58,9 @@ fn build(ops: &[(Op, u32)]) -> fusevm::Chunk {
 /// dedicated roundtrip test which uses a subprocess-style fresh op set).
 fn run_with_cache(chunk: &fusevm::Chunk, dir: &PathBuf, slots: &[i64]) -> Option<Value> {
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     let r = jit.try_run_linear(chunk, slots);
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
     r
 }
 
@@ -256,6 +259,63 @@ fn disk_cache_set_and_get_dir() {
     jit.set_jit_cache_dir(None);
 }
 
+/// `scope_jit_cache_dir` is private to the calling thread: another thread does
+/// not see it, and native code compiled there persists into that thread's own
+/// directory, never into this one. Scopes nest, restoring the outer setting.
+#[test]
+fn scoped_cache_dir_is_private_to_its_thread_and_nests() {
+    let _g = serial();
+    let mine = fresh_dir("scoped_mine");
+    let theirs = fresh_dir("scoped_theirs");
+    let jit = JitCompiler::new();
+    let outer = jit.scope_jit_cache_dir(Some(mine.clone()));
+    assert_eq!(jit.jit_cache_dir(), Some(mine.clone()));
+    {
+        let _inner = jit.scope_jit_cache_dir(None);
+        assert_eq!(jit.jit_cache_dir(), None, "inner scope disables the cache");
+    }
+    assert_eq!(
+        jit.jit_cache_dir(),
+        Some(mine.clone()),
+        "outer scope restored"
+    );
+
+    let theirs2 = theirs.clone();
+    let (seen, r) = std::thread::spawn(move || {
+        let jit = JitCompiler::new();
+        let seen = jit.jit_cache_dir();
+        let _s = jit.scope_jit_cache_dir(Some(theirs2));
+        let chunk = build(&[(Op::LoadInt(31), 1), (Op::LoadInt(11), 1), (Op::Add, 1)]);
+        (seen, jit.try_run_linear(&chunk, &[]))
+    })
+    .join()
+    .unwrap();
+    assert_ne!(
+        seen,
+        Some(mine.clone()),
+        "another thread must not see this scope"
+    );
+    assert_eq!(r, Some(Value::Int(42)));
+    let count = |d: &PathBuf| {
+        std::fs::read_dir(d)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().extension().map_or(false, |x| x == "fjit"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    assert_eq!(
+        count(&theirs),
+        1,
+        "the other thread persists into its own dir"
+    );
+    assert_eq!(count(&mine), 0, "nothing lands in this thread's dir");
+    drop(outer);
+    let _ = std::fs::remove_dir_all(&mine);
+    let _ = std::fs::remove_dir_all(&theirs);
+}
+
 // ── Block tier ──
 
 /// `sum = 0; i = 0; while (i < 100) { sum += i; i++ }` → 4950. Block-JIT
@@ -293,10 +353,10 @@ fn has_tagged_file(dir: &PathBuf, tag: &str) -> bool {
 
 fn run_block_with_cache(chunk: &fusevm::Chunk, dir: &PathBuf) -> Option<i64> {
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     let mut slots = vec![0i64; 4];
     let r = jit.try_run_block_eager(chunk, &mut slots);
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
     r
 }
 
@@ -368,7 +428,7 @@ fn disk_cache_trace_matches_and_persists() {
     let _g = serial();
     let dir = fresh_dir("trace");
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
 
     let (chunk, _anchor) = counter_loop(200);
     // First run records + compiles the trace; with caching on this builds the
@@ -379,7 +439,7 @@ fn disk_cache_trace_matches_and_persists() {
         "expected a .trc.fjit trace cache file to be written"
     );
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -393,9 +453,9 @@ fn disk_cache_trace_roundtrip_second_thread() {
     let chunk_a = chunk.clone();
     let first = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir_a.clone()));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir_a.clone()));
         let r = run_trace_vm(&chunk_a);
-        jit.set_jit_cache_dir(None);
+        drop(_cache_dir);
         r
     })
     .join()
@@ -409,9 +469,9 @@ fn disk_cache_trace_roundtrip_second_thread() {
     let chunk_b = chunk.clone();
     let second = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir_b.clone()));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir_b.clone()));
         let r = run_trace_vm(&chunk_b);
-        jit.set_jit_cache_dir(None);
+        drop(_cache_dir);
         r
     })
     .join()
@@ -425,7 +485,7 @@ fn cache_size_clear_and_max_bytes_api() {
     let _g = serial();
     let dir = fresh_dir("size_api");
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
 
     // Populate the cache with several distinct linear chunks.
     for k in 0..6 {
@@ -452,7 +512,7 @@ fn cache_size_clear_and_max_bytes_api() {
 
     // Restore default cap resolution and detach the dir override.
     jit.set_jit_cache_max_bytes(None);
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -536,7 +596,7 @@ fn disk_cache_awk_div_block_persists() {
     let chunk = build(&[(Op::GetSlot(0), 1), (Op::GetSlot(1), 1), (Op::AwkDivJit, 1)]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -555,7 +615,7 @@ fn disk_cache_awk_div_block_persists() {
         other => panic!("expected Float(3.5) from AwkDivJit block, got {other:?}"),
     }
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -586,7 +646,7 @@ fn disk_cache_awk_div_block_persists() {
     let chunk2 = chunk.clone();
     let reloaded = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir2));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir2));
         jit.set_config(TraceJitConfig {
             block_threshold: 0,
             ..TraceJitConfig::defaults()
@@ -622,7 +682,7 @@ fn disk_cache_pow_float_block_persists() {
     let chunk = build(&[(Op::GetSlot(0), 1), (Op::GetSlot(1), 1), (Op::PowFloat, 1)]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -641,7 +701,7 @@ fn disk_cache_pow_float_block_persists() {
         other => panic!("expected Float(1024.0) from PowFloat block, got {other:?}"),
     }
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -671,7 +731,7 @@ fn disk_cache_pow_float_block_persists() {
     let chunk2 = chunk.clone();
     let reloaded = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir2));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir2));
         jit.set_config(TraceJitConfig {
             block_threshold: 0,
             ..TraceJitConfig::defaults()
@@ -708,7 +768,7 @@ fn disk_cache_sqrt_float_block_persists() {
     let chunk = build(&[(Op::GetSlot(0), 1), (Op::SqrtFloat, 1)]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -727,7 +787,7 @@ fn disk_cache_sqrt_float_block_persists() {
         other => panic!("expected Float(3.0) from SqrtFloat block, got {other:?}"),
     }
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -756,7 +816,7 @@ fn disk_cache_sqrt_float_block_persists() {
     let chunk2 = chunk.clone();
     let reloaded = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir2));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir2));
         jit.set_config(TraceJitConfig {
             block_threshold: 0,
             ..TraceJitConfig::defaults()
@@ -792,7 +852,7 @@ fn disk_cache_sin_float_block_persists() {
     let chunk = build(&[(Op::GetSlot(0), 1), (Op::SinFloat, 1)]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -811,7 +871,7 @@ fn disk_cache_sin_float_block_persists() {
         other => panic!("expected Float(0.0) from SinFloat block, got {other:?}"),
     }
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -840,7 +900,7 @@ fn disk_cache_sin_float_block_persists() {
     let chunk2 = chunk.clone();
     let reloaded = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir2));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir2));
         jit.set_config(TraceJitConfig {
             block_threshold: 0,
             ..TraceJitConfig::defaults()
@@ -875,7 +935,7 @@ fn disk_cache_log_float_block_persists() {
     let chunk = build(&[(Op::GetSlot(0), 1), (Op::LogFloat, 1)]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -894,7 +954,7 @@ fn disk_cache_log_float_block_persists() {
         other => panic!("expected Float(0.0) from LogFloat block, got {other:?}"),
     }
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -923,7 +983,7 @@ fn disk_cache_log_float_block_persists() {
     let chunk2 = chunk.clone();
     let reloaded = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir2));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir2));
         jit.set_config(TraceJitConfig {
             block_threshold: 0,
             ..TraceJitConfig::defaults()
@@ -956,7 +1016,7 @@ fn disk_cache_abs_float_block_persists() {
     let chunk = build(&[(Op::GetSlot(0), 1), (Op::AbsFloat, 1)]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -975,7 +1035,7 @@ fn disk_cache_abs_float_block_persists() {
         other => panic!("expected Float(0.0) from AbsFloat block, got {other:?}"),
     }
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -1004,7 +1064,7 @@ fn disk_cache_abs_float_block_persists() {
     let chunk2 = chunk.clone();
     let reloaded = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir2));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir2));
         jit.set_config(TraceJitConfig {
             block_threshold: 0,
             ..TraceJitConfig::defaults()
@@ -1039,7 +1099,7 @@ fn disk_cache_trunc_int_block_persists() {
     let chunk = build(&[(Op::GetSlot(0), 1), (Op::SqrtFloat, 1), (Op::TruncInt, 1)]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1058,7 +1118,7 @@ fn disk_cache_trunc_int_block_persists() {
         other => panic!("expected Int(4) from TruncInt block, got {other:?}"),
     }
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -1086,7 +1146,7 @@ fn disk_cache_trunc_int_block_persists() {
     let chunk2 = chunk.clone();
     let reloaded = std::thread::spawn(move || {
         let jit = JitCompiler::new();
-        jit.set_jit_cache_dir(Some(dir2));
+        let _cache_dir = jit.scope_jit_cache_dir(Some(dir2));
         jit.set_config(TraceJitConfig {
             block_threshold: 0,
             ..TraceJitConfig::defaults()
@@ -1137,7 +1197,7 @@ fn disk_cache_awk_record_shape_trunc_chunk_persists_but_awk_int_never_does() {
     let chunk = build(ops);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     // Compile on the 2nd invocation (mimics warmup across records).
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
@@ -1186,7 +1246,7 @@ fn disk_cache_awk_record_shape_trunc_chunk_persists_but_awk_int_never_does() {
         );
     }
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     // A `blk` native blob must have been persisted to disk.
     let blk: Vec<_> = std::fs::read_dir(&dir)
@@ -1241,7 +1301,7 @@ fn disk_cache_trunc_float_slot_block_persists() {
     ]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1275,7 +1335,7 @@ fn disk_cache_trunc_float_slot_block_persists() {
         "second pass must be real f64 arithmetic: trunc(2.9) == 2"
     );
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -1319,7 +1379,7 @@ fn disk_cache_awk_sin_float_slot_block_persists() {
     ]);
 
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1352,7 +1412,7 @@ fn disk_cache_awk_sin_float_slot_block_persists() {
         "second pass must call the sin libcall: sin(1)+1"
     );
 
-    jit.set_jit_cache_dir(None);
+    drop(_cache_dir);
 
     let blk: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -1382,7 +1442,7 @@ fn disk_cache_ceil_float_block_persists() {
     let dir = fresh_dir("ceilfloat");
     let chunk = build(&[(Op::LoadFloat(2.3), 1), (Op::CeilFloat, 1)]);
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1407,7 +1467,7 @@ fn disk_cache_floor_float_block_persists() {
     let dir = fresh_dir("floorfloat");
     let chunk = build(&[(Op::LoadFloat(2.7), 1), (Op::FloorFloat, 1)]);
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1432,7 +1492,7 @@ fn disk_cache_trunc_float_block_persists() {
     let dir = fresh_dir("truncfloat");
     let chunk = build(&[(Op::LoadFloat(-2.7), 1), (Op::TruncFloat, 1)]);
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1457,7 +1517,7 @@ fn disk_cache_round_float_block_persists() {
     let dir = fresh_dir("roundfloat");
     let chunk = build(&[(Op::LoadFloat(0.5), 1), (Op::RoundFloat, 1)]);
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1482,7 +1542,7 @@ fn disk_cache_tan_float_block_persists() {
     let dir = fresh_dir("tanfloat");
     let chunk = build(&[(Op::LoadFloat(0.0), 1), (Op::TanFloat, 1)]);
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1516,7 +1576,7 @@ fn disk_cache_asin_acos_atan_float_block_persists() {
         (Op::Add, 1),
     ]);
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1553,7 +1613,7 @@ fn disk_cache_hyperbolic_block_persists() {
         (Op::Add, 1),
     ]);
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
@@ -1584,7 +1644,7 @@ fn disk_cache_log2_log10_block_persists() {
         (Op::Add, 1),
     ]);
     let jit = JitCompiler::new();
-    jit.set_jit_cache_dir(Some(dir.clone()));
+    let _cache_dir = jit.scope_jit_cache_dir(Some(dir.clone()));
     jit.set_config(TraceJitConfig {
         block_threshold: 1,
         ..TraceJitConfig::defaults()
