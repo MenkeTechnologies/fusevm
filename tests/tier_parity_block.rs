@@ -562,3 +562,206 @@ fn global_chunks_round_trip_through_the_disk_cache() {
     assert_eq!(blobs, 2, "one block blob per global-kind signature");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── Host-routed awk bitwise ops ──
+//
+// The interpreter computes `and`/`or`/`xor` itself only with no `AwkHost`
+// registered (raising gawk's negative-operand fatal); with a host it delegates
+// (`DefaultAwkHost` clamps a negative operand to 0, and a frontend may override
+// the op outright). The block tier lowers the no-host semantics, so a chunk
+// holding one of these ops must stay in the interpreter while a host is
+// installed — including once the block cache is warm from a host-less run.
+
+/// Overrides `and`/`or`/`xor` with a sentinel no native lowering produces.
+struct SentinelBitHost;
+
+impl fusevm::AwkHost for SentinelBitHost {
+    fn and(&mut self, _args: &[Value]) -> Value {
+        Value::Float(-1.0)
+    }
+    fn or(&mut self, _args: &[Value]) -> Value {
+        Value::Float(-2.0)
+    }
+    fn xor(&mut self, _args: &[Value]) -> Value {
+        Value::Float(-3.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Host {
+    None,
+    Default,
+    Sentinel,
+}
+
+fn run_with_host(chunk: &Chunk, host: Host) -> String {
+    let mut vm = VM::new(chunk.clone());
+    match host {
+        Host::None => {}
+        Host::Default => vm.set_awk_host(Box::new(fusevm::DefaultAwkHost)),
+        Host::Sentinel => vm.set_awk_host(Box::new(SentinelBitHost)),
+    }
+    vm.enable_tracing_jit();
+    let mut run = || match vm.run() {
+        VMResult::Ok(v) => describe(&v),
+        VMResult::Halted => "Halted".to_string(),
+        VMResult::Error(e) => format!("Error({e})"),
+    };
+    let (first, rerun) = (run(), run());
+    format!("{first} rerun={rerun}")
+}
+
+fn bitwise_chunks() -> Vec<(String, Vec<Op>)> {
+    let operands: [(&str, f64); 4] = [("12", 12.0), ("10", 10.0), ("-3", -3.0), ("0", 0.0)];
+    let mut out = Vec::new();
+    for op in [Op::AwkAnd(2), Op::AwkOr(2), Op::AwkXor(2)] {
+        for (la, a) in operands {
+            for (lb, b) in operands {
+                out.push((
+                    format!("{op:?}({la}, {lb})"),
+                    vec![Op::LoadFloat(a), Op::LoadFloat(b), op.clone()],
+                ));
+            }
+        }
+    }
+    out.push((
+        "AwkAnd(15, 9, -5)".to_string(),
+        vec![
+            Op::LoadFloat(15.0),
+            Op::LoadFloat(9.0),
+            Op::LoadFloat(-5.0),
+            Op::AwkAnd(3),
+        ],
+    ));
+    out
+}
+
+#[test]
+fn awk_bitwise_ops_agree_with_and_without_an_awk_host() {
+    let mut diffs = Vec::new();
+    let mut compiled_without_host = 0usize;
+    for (label, ops) in bitwise_chunks() {
+        for host in [Host::None, Host::Default, Host::Sentinel] {
+            let chunk = salted(&ops);
+            let answers: Vec<String> = (0..3).map(|_| run_with_host(&chunk, host)).collect();
+            if !answers.windows(2).all(|w| w[0] == w[1]) {
+                diffs.push(format!(
+                    "{label} host={host:?}: cold={} warm={}",
+                    answers[0], answers[2]
+                ));
+            }
+            let compiled = JitCompiler::new().block_jit_is_compiled(&chunk);
+            match host {
+                Host::None => compiled_without_host += compiled as usize,
+                _ if compiled => diffs.push(format!(
+                    "{label} host={host:?}: block compiled under a host"
+                )),
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        compiled_without_host > 0,
+        "no host-less case reached the block tier, so agreement proves nothing"
+    );
+    assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+}
+
+#[test]
+fn awk_host_installed_after_the_block_cache_is_warm_still_answers() {
+    // Warm the block cache with host-less runs, then install a host: the host's
+    // answer must win, as it does in the interpreter.
+    for (label, ops) in bitwise_chunks() {
+        let chunk = salted(&ops);
+        let no_host: Vec<String> = (0..3).map(|_| run_with_host(&chunk, Host::None)).collect();
+        assert!(
+            JitCompiler::new().block_jit_is_compiled(&chunk),
+            "{label}: host-less runs did not compile"
+        );
+        for host in [Host::Default, Host::Sentinel] {
+            let interp = {
+                let mut vm = VM::new(chunk.clone());
+                match host {
+                    Host::Default => vm.set_awk_host(Box::new(fusevm::DefaultAwkHost)),
+                    _ => vm.set_awk_host(Box::new(SentinelBitHost)),
+                }
+                match vm.run() {
+                    VMResult::Ok(v) => describe(&v),
+                    other => format!("{other:?}"),
+                }
+            };
+            let warm = run_with_host(&chunk, host);
+            assert!(
+                warm.starts_with(&format!("{interp} ")),
+                "{label} host={host:?}: interpreter={interp} warm block VM={warm} (no-host {})",
+                no_host[2]
+            );
+        }
+    }
+}
+
+#[test]
+fn awk_traps_leave_the_vm_where_the_interpreter_does() {
+    // A native trap is answered by re-running the chunk in the interpreter,
+    // which raises the fatal and stops just past the failing op, so a second
+    // `run()` on the same VM resumes there (here: pushes 5). A chunk that
+    // could warn before trapping is kept out of the block path, since the
+    // re-run would print the warning again.
+    let cases = vec![
+        case(
+            "1 / 0; 5".to_string(),
+            &[
+                Op::LoadFloat(1.0),
+                Op::LoadFloat(0.0),
+                Op::AwkDivJit,
+                Op::LoadInt(5),
+            ],
+            Vec::new(),
+            true,
+        ),
+        case(
+            "1 % 0".to_string(),
+            &[Op::LoadFloat(1.0), Op::LoadFloat(0.0), Op::AwkModJit],
+            Vec::new(),
+            true,
+        ),
+        case(
+            "lshift(-1, 2); 7".to_string(),
+            &[
+                Op::LoadFloat(-1.0),
+                Op::LoadFloat(2.0),
+                Op::AwkLshiftJit,
+                Op::Pop,
+                Op::LoadInt(7),
+            ],
+            Vec::new(),
+            true,
+        ),
+        case(
+            "g0 = 3; 1 / 0".to_string(),
+            &[
+                Op::LoadInt(3),
+                Op::SetVar(0),
+                Op::LoadFloat(1.0),
+                Op::LoadFloat(0.0),
+                Op::AwkDivJit,
+            ],
+            vec![Value::Int(0)],
+            true,
+        ),
+        case(
+            "sqrt(4); 1 / 0 (warn op + trap op)".to_string(),
+            &[
+                Op::LoadFloat(4.0),
+                Op::AwkSqrtJit,
+                Op::Pop,
+                Op::LoadFloat(1.0),
+                Op::LoadFloat(0.0),
+                Op::AwkDivJit,
+            ],
+            Vec::new(),
+            false,
+        ),
+    ];
+    assert_parity("awk trap", cases);
+}

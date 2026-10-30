@@ -5713,6 +5713,24 @@ mod cranelift_jit_impl {
         h.finish()
     }
 
+    /// Whether re-running a block chunk in the interpreter after a native awk
+    /// trap repeats nothing observable.
+    ///
+    /// `VM::run` answers a trap (`AwkDivJit`/`AwkModJit` zero divisor, a
+    /// negative operand to the gawk bitwise ops) by discarding the native run
+    /// and re-running the chunk from the top in the interpreter, which raises
+    /// the fatal and leaves the VM exactly where it stops. The native run may
+    /// already have printed a negative-argument warning (`AwkSqrtJit`/
+    /// `AwkLogJit`) or called an extension op, which the re-run would repeat,
+    /// so a chunk with both a trapping op and one of those stays out of the
+    /// `VM::run` block path. The linear tier's rule (`validate_linear_seq`)
+    /// only looks for a warning *before* a trap; a block chunk loops, so a
+    /// warning anywhere can run before a trap on a later iteration.
+    pub(crate) fn block_trap_rerun_is_pure(ops: &[Op]) -> bool {
+        let side_effect = |op: &Op| is_awk_warn_op(op) || matches!(op, Op::Extended(_, _));
+        !(ops.iter().any(is_awk_trap_op) && ops.iter().any(side_effect))
+    }
+
     /// Slot and referenced-global kinds of a block chunk in one word — the
     /// cold-path form of the key `try_run_block_inner` builds from a cached
     /// [`BlockGlobals::used`].
@@ -9980,6 +9998,14 @@ impl JitCompiler {
     #[cfg(feature = "jit")]
     pub(crate) fn block_globals(&self, chunk: &crate::Chunk) -> BlockGlobals {
         cranelift_jit_impl::collect_block_globals(&chunk.ops)
+    }
+
+    /// Whether `VM::run` may answer a native awk trap in this chunk by
+    /// re-running it in the interpreter (no warning or extension call could
+    /// repeat).
+    #[cfg(feature = "jit")]
+    pub(crate) fn block_trap_rerun_is_pure(&self, chunk: &crate::Chunk) -> bool {
+        cranelift_jit_impl::block_trap_rerun_is_pure(&chunk.ops)
     }
 
     /// Typed slot-kind-aware [`Self::try_run_block_kinded`]: returns the chunk result

@@ -279,6 +279,15 @@ pub struct VM {
     /// the `written` ones back after a native run.
     #[cfg(feature = "jit")]
     block_globals: crate::jit::BlockGlobals,
+    /// Whether `self.chunk` holds an op the interpreter routes to a registered
+    /// [`AwkHost`](crate::awk_host::AwkHost) (`AwkAnd`/`AwkOr`/`AwkXor`, via
+    /// `awk_bitwise`). The block tier lowers those ops to the no-host
+    /// semantics (gawk's negative-operand fatal), so `VM::run` keeps such a
+    /// chunk in the interpreter while a host is installed — the same split as
+    /// the AOT tier's `fusevm_aot_has_awk_host` deopt. Computed beside
+    /// [`VM::block_eligible_cached`].
+    #[cfg(feature = "jit")]
+    block_host_routed: bool,
     /// Result captured by the AOT closed-world driver (`fusevm::aot`). The
     /// native entry function stores the terminating [`VMResult`] here via
     /// [`VM::aot_finish`]; the caller takes it after the driver returns.
@@ -619,6 +628,8 @@ impl VM {
             block_eligible_cached: None,
             #[cfg(feature = "jit")]
             block_globals: crate::jit::BlockGlobals::default(),
+            #[cfg(feature = "jit")]
+            block_host_routed: false,
             #[cfg(feature = "aot")]
             aot_result: None,
             #[cfg(feature = "aot")]
@@ -1779,14 +1790,23 @@ impl VM {
                     // address a fresh, empty frame instead — a read there is
                     // `Undef`, not the entry frame's value — so a chunk that
                     // pushes a frame stays in the interpreter.
+                    //
+                    // A trapping awk op makes the interpreter re-run the whole
+                    // chunk (see the trap handling below), so a chunk that can
+                    // also warn or call an extension before the trap would
+                    // repeat that side effect; it stays in the interpreter.
                     let v = self.jit.is_block_eligible(&self.chunk)
-                        && !self.chunk.ops.iter().any(|op| matches!(op, Op::PushFrame));
+                        && !self.chunk.ops.iter().any(|op| matches!(op, Op::PushFrame))
+                        && self.jit.block_trap_rerun_is_pure(&self.chunk);
                     self.block_eligible_cached = Some(v);
                     self.block_globals = if v {
                         self.jit.block_globals(&self.chunk)
                     } else {
                         crate::jit::BlockGlobals::default()
                     };
+                    self.block_host_routed = self.chunk.ops.iter().any(|op| {
+                        matches!(op, Op::AwkAnd(_) | Op::AwkOr(_) | Op::AwkXor(_))
+                    });
                     v
                 }
             };
@@ -1802,7 +1822,11 @@ impl VM {
                         .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
                 })
             };
-            if eligible && slots_fit_block() {
+            // A registered awk host answers `and`/`or`/`xor` itself (see
+            // `block_host_routed`); the native lowering only knows the no-host
+            // answer.
+            let host_routed = self.block_host_routed && self.awk_host.is_some();
+            if eligible && !host_routed && slots_fit_block() {
                 self.refresh_slot_buffers();
                 // Strict numeric mode: a non-numeric slot reaches native code as
                 // the integer 0 (`refresh_slot_buffers` has no richer encoding),
@@ -1827,33 +1851,27 @@ impl VM {
                         // block's ops are pure, so nothing has escaped — and let the
                         // interpreter re-run the chunk, where the `NumericHook`
                         // produces the exact result (elisp: a bignum).
-                        if crate::jit::take_num_overflow_trap() {
+                        //
+                        // A JIT-compiled AwkDivJit/AwkModJit may have hit a zero
+                        // divisor (or a bitwise op a negative operand) and set
+                        // the thread-local trap code before returning. The same
+                        // discard-and-re-run applies: the interpreter raises the
+                        // awk fatal itself and leaves `ip`, the operand stack and
+                        // the frame where it stopped. Returning the fatal from
+                        // here left the VM at `ip == 0`, so a second `run()`
+                        // re-entered the block and raised it again where the
+                        // interpreter resumes after the failing op (`Halted` for
+                        // a trailing one). Eligibility above keeps out every
+                        // chunk whose re-run could repeat a side effect.
+                        let overflowed = crate::jit::take_num_overflow_trap();
+                        let awk_trapped = crate::jit::take_awk_div_trap() != 0;
+                        if awk_trapped {
+                            // Drain the operand record the bitwise trap leaves.
+                            let _ = crate::jit::take_awk_trap_args();
+                        }
+                        if overflowed || awk_trapped {
                             self.ip = 0;
                         } else {
-                            // A JIT-compiled AwkDivJit/AwkModJit may have hit a zero
-                            // divisor (or a bitwise op a negative operand) and set
-                            // the thread-local trap code before returning. Honor it
-                            // as the awk fatal, discarding the (garbage) block
-                            // result and slot writeback.
-                            match crate::jit::take_awk_div_trap() {
-                                1 => {
-                                    return VMResult::Error(
-                                        "division by zero attempted".to_string(),
-                                    )
-                                }
-                                2 => {
-                                    return VMResult::Error(
-                                        "division by zero attempted in `%'".to_string(),
-                                    )
-                                }
-                                code @ 3..=8 => {
-                                    let (a, b) = crate::jit::take_awk_trap_args();
-                                    if let Some(msg) = crate::awk_host::awk_bit_fatal(code, a, b) {
-                                        return VMResult::Error(msg);
-                                    }
-                                }
-                                _ => {}
-                            }
                             self.write_slots_back(false);
                             self.write_block_globals_back();
                             self.halted = true;
