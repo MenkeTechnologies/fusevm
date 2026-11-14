@@ -270,6 +270,8 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                 } else {
                     self.chan_mut(ch)?.send_q.push_back((gid, val));
                     self.blocked.insert(gid);
+                    // A parked `select` receiving on `ch` can take this value.
+                    self.recheck_selects()?;
                 }
             }
             SchedReq::Recv { ch } => {
@@ -280,6 +282,8 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                 } else {
                     self.chan_mut(ch)?.recv_q.push_back((gid, false));
                     self.blocked.insert(gid);
+                    // A parked `select` sending on `ch` can hand off to us.
+                    self.recheck_selects()?;
                 }
             }
             SchedReq::RecvOk { ch } => {
@@ -291,6 +295,7 @@ impl<F: FnMut() -> VM> Scheduler<F> {
                 } else {
                     self.chan_mut(ch)?.recv_q.push_back((gid, true));
                     self.blocked.insert(gid);
+                    self.recheck_selects()?;
                 }
             }
             SchedReq::Select { cases, has_default } => {
